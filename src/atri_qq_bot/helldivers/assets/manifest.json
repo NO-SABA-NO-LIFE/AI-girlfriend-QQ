@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "description": "Logical IDs for local visual assets. Runtime accepts verified PNG files only.",
+  "assets": {
+    "emblem.super_earth": {
+      "user": {
+        "path": "super_earth.png",
+        "sha256": "0e2100e67936f3065a2c4a6578fd4d8ac1944c796bcd3b56ee50c478c7c7383a"
+      },
+      "bundled": {
+        "path": "emblems/super_earth.png",
+        "sha256": "e87ee945163ccb7c8561929d360710e7ba13acc2e19998ea9c72d80e1cdffd60"
+      },
+      "attribution": "User-provided asset; bundled fallback artwork",
+      "source_url": null,
+      "license": "user-provided / project artwork",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "emblem.dss": {
+      "bundled": {
+        "path": "emblems/dss.png",
+        "sha256": "cdbfdfdcc9bfc0be11483f8168ed8b6c82842f253c48caa613a337e5b90e4205"
+      },
+      "attribution": "Bundled compact DSS emblem",
+      "source_url": null,
+      "license": "project artwork",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "emblem.automaton": {
+      "user": {
+        "path": "automaton.png",
+        "sha256": "1f8a2382a9f3599670230ef0ba8e97bcd422639c8e7e6246c88e9c44a24b10da"
+      },
+      "bundled": {
+        "path": "emblems/automaton.png",
+        "sha256": "0c229b6d971efe0a199967675a9f6a55d2a29541d80b97274325260293f00057"
+      },
+      "attribution": "User-provided asset; bundled fallback artwork",
+      "source_url": null,
+      "license": "user-provided / project artwork",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "emblem.illuminate": {
+      "user": {
+        "path": "illuminate.png",
+        "sha256": "b27ea9035f8b47d52d6c61fedc45032c3759cea9cbfb109b4796750955455b35"
+      },
+      "bundled": {
+        "path": "emblems/illuminate.png",
+        "sha256": "62a862ecfcfd552ad24bf624eed0c53b1b5784ac4a892fdb8b2814b07d96451f"
+      },
+      "attribution": "User-provided asset; bundled fallback artwork",
+      "source_url": null,
+      "license": "user-provided / project artwork",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "emblem.terminids": {
+      "user": {
+        "path": "terminids.png",
+        "sha256": "9a8c4ea718a99f2acbea07eb694762ce2f153f8b517ccb244e038e0d0fc0759d"
+      },
+      "bundled": {
+        "path": "emblems/terminids.png",
+        "sha256": "9a2f98bdd7cb17f76ff74684f5e83646ad49f8c6631471a56d66b7a67928f6f5"
+      },
+      "attribution": "User-provided asset; bundled fallback artwork",
+      "source_url": null,
+      "license": "user-provided / project artwork",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "dss.wireframe": {
+      "user": {
+        "path": "dss.png",
+        "sha256": "427d43f71f1fe5d58094453cacdd0b7aaf47dbb1f875f50cc1fe3f230cdddade"
+      },
+      "bundled": {
+        "path": "dss/dss_wireframe.png",
+        "sha256": "c0b0597f1964408249cd7d37e3fdec3827048878ba8f9f601fad3a1c86a80e15"
+      },
+      "attribution": "User-provided asset; bundled fallback artwork",
+      "source_url": null,
+      "license": "user-provided / project artwork",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "map.reference": {
+      "user": {
+        "path": "map.png",
+        "sha256": "7fb2379a95e02911b18458c05d76a71fc8eba7e7c17670c16787b818e2f5251e"
+      },
+      "attribution": "User-provided reference map",
+      "source_url": null,
+      "license": "user-provided",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "template.map": {
+      "user": {
+        "path": "map_template.png",
+        "sha256": "72b35a5b04dc4d65cd32b606cef81db117d72e94c81f4ab3b77c48231151c574"
+      },
+      "attribution": "User-provided map visual reference",
+      "source_url": null,
+      "license": "user-provided",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "steam.hero": {
+      "user": {
+        "path": "steam_hero.png",
+        "sha256": "23aded699fb59ffdcff06accbdc5cae199322c4abd61da341dafa1e855e79bbe"
+      },
+      "attribution": "Helldivers 2 'Scope of Authority' official key art (warbond banner, via helldivers.wiki.gg)",
+      "source_url": "https://helldivers.wiki.gg/images/Scope_of_Authority_Premium_Warbond_Banner.png",
+      "license": "Arrowhead Game Studios promotional artwork; bundled as user-provided current-warbond hero",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "template.warfront": {
+      "user": {
+        "path": "warfront_template.png",
+        "sha256": "7a8087f1f846fde853d533cbc0c8533ae14f47eb6449488689e07e92c6721875"
+      },
+      "attribution": "User-provided warfront visual reference",
+      "source_url": null,
+      "license": "user-provided",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "global_event.default_flag": {
+      "user": {
+        "path": "super_earth_flag.png",
+        "sha256": "e916e51321fb94d6df6f51a0854bb04e4fc5b128841dcba5af7d8b4ce3dce38f"
+      },
+      "bundled": {
+        "path": "global_events/super_earth_flag.png",
+        "sha256": "6aea8cc4339ad0569ef2f1776bd215bc2acc71fc9aeac5086ce673369210210e"
+      },
+      "attribution": "User-provided Super Earth flag image; bundled fallback artwork",
+      "source_url": null,
+      "license": "user-provided / project artwork",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "tactical.eagle_storm": {
+      "bundled": {
+        "path": "tactical/eagle_storm.png",
+        "sha256": "d8b7beba049b63b865f7155e2a0db45a0662d35c5a7622a723d4d928cd1530a8"
+      },
+      "attribution": "User-provided DSS tactical icon",
+      "source_url": null,
+      "license": "user-provided",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "tactical.heavy_ordnance": {
+      "bundled": {
+        "path": "tactical/heavy_ordnance.png",
+        "sha256": "b97082f14c0c5f4aea31dabdeddf1e26dc456183c3e804c8d642a49bbca48ab8"
+      },
+      "attribution": "User-provided DSS tactical icon",
+      "source_url": null,
+      "license": "user-provided",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "tactical.orbital_blockade": {
+      "bundled": {
+        "path": "tactical/orbital_blockade.png",
+        "sha256": "ca9dc6708acf277706a38a89e8319a684be9941a37fafd257a0cf8e9c5359f51"
+      },
+      "attribution": "User-provided DSS tactical icon",
+      "source_url": null,
+      "license": "user-provided",
+      "original_sha1": null,
+      "media_type": "image/png"
+    },
+    "tactical.orbital_napalm": {
+      "bundled": {
+        "path": "tactical/orbital_napalm.png",
+        "sha256": "2a728f20d65e01e36b053daf6e58722c17bffd6f54df28fd367170e17a5c5896"
+      },
+      "attribution": "Bundled project artwork",
+      "source_url": null,
+      "license": "project artwork",
+      "original_sha1": null,
+      "media_type": "image/png"
+    }
+  }
+}

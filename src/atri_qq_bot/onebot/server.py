@@ -153,6 +153,14 @@ async def run_server(config: Any) -> None:
     if server.insights is not None:
         await server.insights.start()
 
+    # 启动 Helldivers 情报模块。它是可选旁路：任何启动异常都只记录并降级，
+    # 保证亚托莉的核心对话始终可用。
+    if server.helldivers.config.enabled:
+        try:
+            await server.helldivers.start()
+        except Exception as exc:
+            LOGGER.warning("Helldivers 情报模块启动失败，已降级为仅对话：%s", exc)
+
     async with websockets.serve(server.handle_connection, config.host, config.port):
         print(
             f"[onebot] Listening on ws://{config.host}:{config.port}/onebot "
@@ -179,6 +187,7 @@ async def run_server(config: Any) -> None:
                 await proactive_v2_task
             with contextlib.suppress(asyncio.CancelledError):
                 await group_task
+            await server.helldivers.stop()
             await server.shutdown()
             if server.insights is not None:
                 await server.insights.close()

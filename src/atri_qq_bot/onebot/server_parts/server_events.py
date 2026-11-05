@@ -7,6 +7,7 @@ from .server_support import OneBotServerMixin, _sync_server_globals
 
 # 显式导入而不是依赖 _sync_server_globals 的全局注入：注入只在**实例**属性访问时
 # 才把 server.py 的名字塞进本模块，直接以类方法调用（测试、脚本）时会 NameError。
+from .helpers import _conversation_id
 from ..message_parser import group_increase_text  # type: ignore[import-not-found]
 from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
     forced_event_block_reason,
@@ -67,6 +68,23 @@ class OneBotEventMixin(OneBotServerMixin):
             event = await self._resolve_group_increase_name(websocket, event)
 
         plain_text = extract_plain_text(event.get("message"))
+
+        # Helldivers 指令守卫：命中以 / 开头的情报命令时，直接取情报并发送后
+        # return，绕开回复策略与 LLM。因此群里无需 @ 机器人也能触发情报查询。
+        helldivers = getattr(self, "helldivers", None)
+        if helldivers is not None:
+            # 传入会话标识，订阅/退订命令据此记录要推送到哪个群/私聊。
+            hd2_session_key = _conversation_id(event)
+            hd2_messages = await helldivers.handle(
+                plain_text, hd2_session_key
+            )
+            if hd2_messages is not None:
+                # 确定性查询命令：用 first_delay=False 跳过拟人打字停顿，响应更快。
+                await self.send_reply(
+                    websocket, event, hd2_messages, first_delay=False
+                )
+                return
+
         poke_event = bool(event.get("_atri_poke_event"))
         # 入群通知归一化后也是普通群消息，但和戳一戳一样**强制回复**——
         # 否则群聊默认策略不会理一条没有 @ 的消息，欢迎就发不出去。

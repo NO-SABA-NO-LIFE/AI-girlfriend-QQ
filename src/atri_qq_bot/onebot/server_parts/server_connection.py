@@ -18,6 +18,13 @@ from ...accounts import (  # type: ignore[import-not-found]
     registry_for_config,
 )
 
+# Helldivers 情报桥接。helldivers 包只依赖 message_plan，不反向依赖 onebot，
+# 因此在这里导入不会形成循环依赖。
+from ...helldivers.bridge import HelldiversBridge
+from ...helldivers.config import HelldiversConfig
+from ...message_plan import outgoing_to_onebot_message
+from ...runtime.paths import DATA_DIR
+
 # 运行时会由 _sync_server_globals 注入 server.py 的同名 logger；这里显式声明一份，
 # 保证模块在被单独导入（例如单元测试）时也能正常记录账号/连接类告警。
 LOGGER = logging.getLogger("atri.onebot")
@@ -108,6 +115,47 @@ class OneBotConnectionMixin(OneBotServerMixin):
         self.account_coordinator = None
         if bool(getattr(config, "account_system_enabled", False)):
             self.account_coordinator = self._build_account_coordinator(config)
+
+        # Helldivers 情报桥接（可选旁路）：这里只实例化、不发起任何网络请求；
+        # 真正的组件装配在 run_server 中 await start()，且启动失败会被捕获降级，
+        # 不会影响亚托莉本身的对话能力。
+        self.helldivers = HelldiversBridge(
+            HelldiversConfig.from_env(DATA_DIR / "helldivers")
+        )
+        # 注入主动推送能力：订阅的新闻/快报由 bridge 回调本方法，再经当前
+        # NapCat 连接发出去。这样 helldivers 包无需知道 OneBot 的存在。
+        self.helldivers.set_push_sender(self._hd2_push_sender)
+
+    async def _hd2_push_sender(
+        self, session_key: str, messages: list[Any]
+    ) -> int:
+        """把 Helldivers 的消息主动推送到一个群或私聊，成功返回 1。"""
+        kind, target = HelldiversBridge.parse_session_key(session_key)
+        websocket = self._first_active_websocket()
+        if websocket is None:
+            raise RuntimeError("NapCat 当前未连接，无法主动推送")
+        if kind not in {"group", "private"} or not target:
+            raise RuntimeError(f"无效的会话标识：{session_key}")
+        for message in messages:
+            onebot_message = outgoing_to_onebot_message(message)
+            if kind == "group":
+                params = {
+                    "group_id": target,
+                    "message": onebot_message,
+                }
+                action = "send_group_msg"
+            else:
+                params = {
+                    "user_id": target,
+                    "message": onebot_message,
+                }
+                action = "send_private_msg"
+            result = await self.call_action_and_wait(
+                websocket, action, params, 15.0
+            )
+            # 发送失败会抛 RuntimeError，由 bridge 侧兜底并安排重试。
+            self._require_message_delivery(result)
+        return 1
 
     def _build_account_coordinator(
         self,
