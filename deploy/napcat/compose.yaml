@@ -1,0 +1,14 @@
+services:
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      MODE: ws
+      TZ: Asia/Shanghai
+      WEBUI_TOKEN: f31e9ee7929a6632db7714f9
+    volumes:
+      - /opt/napcat/data/qq:/app/.config/QQ
+      - /opt/napcat/data/config:/app/napcat/config
+      - /opt/napcat/data/plugins:/app/napcat/plugins
