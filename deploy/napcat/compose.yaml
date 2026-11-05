@@ -12,3 +12,5 @@ services:
       - /opt/napcat/data/qq:/app/.config/QQ
       - /opt/napcat/data/config:/app/napcat/config
       - /opt/napcat/data/plugins:/app/napcat/plugins
+      # 让容器内能用相同路径读到亚托莉生成的图片，否则发送图片会"识别URL失败"
+      - /opt/atri-qq-bot/data:/opt/atri-qq-bot/data
