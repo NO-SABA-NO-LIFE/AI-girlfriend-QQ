@@ -85,8 +85,8 @@ def _build_config(root: Path) -> BotConfig:
     )
     # 分段/发送节奏一律在这里收敛：WebUI 的数字输入框没有 min/max，
     # 非法值（负数、小数、超大值）必须先被夹住再落进运行配置。
-    split_max_chars = max(8, min(200, _env_int("MESSAGE_SPLIT_MAX_CHARS", 44)))
-    split_max_parts = max(1, min(10, _env_int("MESSAGE_SPLIT_MAX_PARTS", 4)))
+    split_max_chars = max(8, min(200, _env_int("MESSAGE_SPLIT_MAX_CHARS", 120)))
+    split_max_parts = max(1, min(10, _env_int("MESSAGE_SPLIT_MAX_PARTS", 2)))
     send_delay_min = max(0.0, min(10.0, _env_float("MESSAGE_SEND_DELAY_MIN", 0.55)))
     send_delay_max = max(
         send_delay_min,

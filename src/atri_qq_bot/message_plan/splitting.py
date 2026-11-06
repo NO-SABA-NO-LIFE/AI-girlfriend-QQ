@@ -28,7 +28,7 @@ _PROTECTED_RE = re.compile(
 )
 
 
-def split_reply_text(text: str, max_chars: int = 44, max_parts: int = 4) -> list[str]:
+def split_reply_text(text: str, max_chars: int = 120, max_parts: int = 2) -> list[str]:
     text = _compact_reply_text(text)
     if not text:
         return []
