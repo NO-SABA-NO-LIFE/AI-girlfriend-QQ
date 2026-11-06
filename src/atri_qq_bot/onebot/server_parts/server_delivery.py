@@ -662,7 +662,9 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             return
 
         if message_type == "group":
-            group_message = self._with_group_reply_prefix(event, onebot_message)
+            group_message = self._with_group_reply_prefix(
+                event, onebot_message, group_quote=group_quote
+            )
             result = await self.call_action_and_wait(
                 websocket,
                 "send_group_msg",

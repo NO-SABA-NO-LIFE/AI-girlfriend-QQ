@@ -45,8 +45,8 @@ def build_outgoing_messages(
             )
         else:
             messages.append(OutgoingMessage("image", sticker.file_url))
-    elif sticker and sticker.face_id:
-        messages.append(OutgoingMessage("face", sticker.face_id))
+    # 只有 face_id（QQ 系统小黄脸）时不单独追加 face 气泡：对应 emoji_text 已附着
+    # 在最后一条文字里，避免表情被拆成独立气泡。
 
     # 空文本代表上游模型失败或被安全策略拦截，必须保持静默。
     # 这里不能再补发“嗯，我在”之类的模板，否则会把失败伪装成正常回复。
@@ -58,7 +58,8 @@ def _append_light_emoji(text: str, emoji_text: str) -> str:
         return text
     if emoji_text in text:
         return text
-    if len(text) + len(emoji_text) + 1 > 64:
+    # 放宽到分段上限，长文字也能把 emoji 附着在句尾，不产生独立表情气泡。
+    if len(text) + len(emoji_text) + 1 > 200:
         return text
     if text.endswith(("。", "！", "？", "!", "?")):
         return f"{text[:-1]}，{emoji_text}{text[-1]}"
