@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import copy
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from .server_support import OneBotServerMixin, _sync_server_globals
+
+LOGGER = logging.getLogger("atri.onebot")
 
 
 def _history_event_time(event: dict[str, Any]) -> datetime | None:
@@ -557,6 +560,29 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         if user_id:
             prefix.append({"type": "at", "data": {"qq": user_id}})
         return prefix
+
+    async def _send_group_poke(
+        self,
+        websocket: Any,
+        group_id: Any,
+        target_id: Any,
+    ) -> bool:
+        """在群里主动戳一戳指定成员。失败只记录不抛出，避免拖垮主回复。"""
+        if not getattr(self.config, "group_poke_enabled", True):
+            return False
+        if websocket is None or group_id in (None, "") or target_id in (None, ""):
+            return False
+        try:
+            result = await self.call_action_and_wait(
+                websocket,
+                "group_poke",
+                {"group_id": int(group_id), "user_id": int(target_id)},
+                8.0,
+            )
+            return result is not None
+        except Exception as exc:  # pragma: no cover - 网络/协议异常兜底
+            LOGGER.warning("主动戳一戳失败 group=%s target=%s: %s", group_id, target_id, exc)
+            return False
 
     def _with_group_reply_prefix(
         self,

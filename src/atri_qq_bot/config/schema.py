@@ -71,6 +71,8 @@ class BotConfig:
     group_ambient_reply_enabled: bool = True
     group_ambient_reply_chance: float = 0.10
     group_ambient_reply_cooldown_seconds: int = 120
+    # 主动戳一戳：被戳回戳、以及“戳一下 @某人”指令。
+    group_poke_enabled: bool = True
     memory_path: Path = field(default_factory=lambda: _project_root() / "data" / "memory" / "users.json")
     # JSON 是可编辑事实源；SQLite 仅作可删除、可重建的检索索引。
     memory_retrieval_enabled: bool = True

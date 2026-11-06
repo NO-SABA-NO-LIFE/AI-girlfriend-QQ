@@ -13,6 +13,7 @@ from ..message_parser import group_increase_text  # type: ignore[import-not-foun
 from ..reply_policy import (  # type: ignore[import-not-found]
     _at_segment_targets,
     _has_reply_segment,
+    poke_command_target,
 )
 from ...group_reply_focus import _strip_placeholder_text  # type: ignore[import-not-found]
 from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
@@ -96,6 +97,14 @@ class OneBotEventMixin(OneBotServerMixin):
                 )
                 return
 
+        # 指令戳人：“亚托莉戳一下 @某人”，先执行戳人动作，再让正常流程配一句话。
+        poke_target = poke_command_target(event, self.config.bot_qq)
+        poke_command_hit = poke_target is not None
+        if poke_command_hit:
+            await self._send_group_poke(
+                websocket, event.get("group_id"), poke_target
+            )
+
         poke_event = bool(event.get("_atri_poke_event"))
         # 入群通知归一化后也是普通群消息，但和戳一戳一样**强制回复**——
         # 否则群聊默认策略不会理一条没有 @ 的消息，欢迎就发不出去。
@@ -115,7 +124,13 @@ class OneBotEventMixin(OneBotServerMixin):
             )
             return
 
-        preliminary_reply = push_event or should_reply(
+        # 被戳时先回戳对方（再走下面的文字回复），像真人互相戳着玩。
+        if poke_event:
+            await self._send_group_poke(
+                websocket, event.get("group_id"), event.get("user_id")
+            )
+
+        preliminary_reply = push_event or poke_command_hit or should_reply(
             event,
             self.config.bot_qq,
             self.config.reply_mode,

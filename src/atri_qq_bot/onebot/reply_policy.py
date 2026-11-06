@@ -183,3 +183,25 @@ def _as_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+# “戳一下/戳一戳/戳他/戳她”等戳人指令。
+_POKE_COMMAND_RE = re.compile(r"戳(?:一?[下戳]|[他她它])")
+
+
+def poke_command_target(
+    event: dict[str, Any], bot_qq: int
+) -> str | None:
+    """识别“戳一下 @某人”指令，返回目标 QQ；不是戳人指令或无有效目标返回 None。"""
+    message = event.get("message")
+    if not isinstance(message, list):
+        return None
+    if not _POKE_COMMAND_RE.search(extract_plain_text(message)):
+        return None
+    for segment in message:
+        if not isinstance(segment, dict) or str(segment.get("type") or "") != "at":
+            continue
+        qq = str((segment.get("data") or {}).get("qq") or "")
+        if qq and qq != "all" and qq != str(bot_qq):
+            return qq
+    return None
