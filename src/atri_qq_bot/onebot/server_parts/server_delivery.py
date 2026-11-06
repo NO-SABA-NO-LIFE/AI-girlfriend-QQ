@@ -468,6 +468,38 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             return
         self._last_smart_group_reply_at[conversation_id] = datetime.now().timestamp()
 
+    def _group_reply_prefix_segments(
+        self, event: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """构造群聊回复开头的引用(reply) + @对方(at) 段。"""
+        prefix: list[dict[str, Any]] = []
+        message_id = str(event.get("message_id") or "").strip()
+        user_id = str(event.get("user_id") or "").strip()
+        if message_id:
+            prefix.append({"type": "reply", "data": {"id": message_id}})
+        if user_id:
+            prefix.append({"type": "at", "data": {"qq": user_id}})
+        return prefix
+
+    def _with_group_reply_prefix(
+        self, event: dict[str, Any], onebot_message: Any
+    ) -> Any:
+        """群聊回复在消息开头加引用+@；私聊或开关关闭时原样返回。"""
+        if event.get("message_type") != "group" or not getattr(
+            self.config, "group_reply_quote_enabled", True
+        ):
+            return onebot_message
+        # 统一成段数组，再把前缀拼到最前面。
+        if isinstance(onebot_message, str):
+            segments = (
+                [{"type": "text", "data": {"text": onebot_message}}]
+                if onebot_message
+                else []
+            )
+        else:
+            segments = onebot_message
+        return self._group_reply_prefix_segments(event) + segments
+
     async def _send_one_reply(
         self,
         websocket: Any,
@@ -492,10 +524,11 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                 self._log_voice_event(event, "delivered", message=message, result=result)
                 return
             if message_type == "group":
+                group_message = self._with_group_reply_prefix(event, onebot_message)
                 result = await self.call_action_and_wait(
                     websocket,
                     "send_group_msg",
-                    {"group_id": event["group_id"], "message": onebot_message},
+                    {"group_id": event["group_id"], "message": group_message},
                     12.0,
                 )
                 try:
@@ -516,10 +549,11 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             return
 
         if message_type == "group":
+            group_message = self._with_group_reply_prefix(event, onebot_message)
             result = await self.call_action_and_wait(
                 websocket,
                 "send_group_msg",
-                {"group_id": event["group_id"], "message": onebot_message},
+                {"group_id": event["group_id"], "message": group_message},
                 12.0,
             )
             self._require_message_delivery(result)
@@ -537,10 +571,11 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         if not segments:
             return ""
         if event.get("message_type") == "group":
+            merged_segments = self._with_group_reply_prefix(event, segments)
             result = await self.call_action_and_wait(
                 websocket,
                 "send_group_msg",
-                {"group_id": event["group_id"], "message": segments},
+                {"group_id": event["group_id"], "message": merged_segments},
                 12.0,
             )
         else:

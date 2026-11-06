@@ -44,6 +44,29 @@ def is_bot_mentioned(event: dict[str, Any], bot_qq: int, plain_text: str) -> boo
     return f"@{bot_qq}" in plain_text or "亚托莉" in plain_text or "atri" in lowered
 
 
+def _at_segment_targets(
+    event: dict[str, Any], bot_qq: int
+) -> tuple[bool, bool]:
+    """读取消息里的 at 段，返回 (是否@机器人, 是否@其他成员)。
+
+    @全体成员（all）算作 @机器人；at 段的判断比纯文本兜底更权威，
+    用来区分“@机器人”和“@别人”。
+    """
+    at_bot = False
+    at_other = False
+    message = event.get("message")
+    if isinstance(message, list):
+        for segment in message:
+            if not isinstance(segment, dict) or segment.get("type") != "at":
+                continue
+            qq = str((segment.get("data") or {}).get("qq", ""))
+            if qq == "all" or qq == str(bot_qq):
+                at_bot = True
+            elif qq:
+                at_other = True
+    return at_bot, at_other
+
+
 def should_reply(
     event: dict[str, Any],
     bot_qq: int,
@@ -70,6 +93,9 @@ def should_reply(
         return True
     plain_text = extract_plain_text(event.get("message"))
     if reply_mode == "mention":
+        at_bot, at_other = _at_segment_targets(event, bot_qq)
+        if at_other and not at_bot:
+            return False
         return is_bot_mentioned(event, bot_qq, plain_text)
     if reply_mode == "smart":
         return _should_reply_smart_group(event, bot_qq, plain_text, owner_qqs)
@@ -82,6 +108,12 @@ def _should_reply_smart_group(
     plain_text: str,
     owner_qqs: tuple[int, ...] = (),
 ) -> bool:
+    at_bot, at_other = _at_segment_targets(event, bot_qq)
+    # 最高优先级：消息明确 @ 了其他成员、却没 @ 机器人，说明这话是对别人
+    # 说的，即使含触发词或机器人名字也不抢答。
+    if at_other and not at_bot:
+        return False
+
     if is_bot_mentioned(event, bot_qq, plain_text):
         return True
 
