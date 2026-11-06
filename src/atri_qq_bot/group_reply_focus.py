@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -283,6 +284,18 @@ def _is_only_generic_mentions(text: str) -> bool:
     return not compact
 
 
+# 图片/表情/视频等非文字段在 extract_plain_text 里被转成的方括号占位符。
+# 判断“有没有真实文字”时先把这些占位符剥掉，避免文件名长度把纯图片误判成续聊。
+_PLACEHOLDER_RE = re.compile(
+    r"\[(?:表情包/图片|动画表情|QQ表情|分享|视频|语音|文件|图片)[^\]]*\]"
+)
+
+
+def _strip_placeholder_text(text: str) -> str:
+    """剥掉图片/表情等占位符，返回用户真正输入的文字（可能为空）。"""
+    return _PLACEHOLDER_RE.sub("", str(text or "")).strip()
+
+
 def _looks_like_direct_continuation(
     event: dict[str, Any],
     text: str,
@@ -306,18 +319,18 @@ def _looks_like_direct_continuation(
     if mentions_other and not has_reply:
         return False
 
-    normalized = str(text or "").replace("@群友", "").strip()
-    compact = "".join(normalized.split()).lower()
+    # 引用回复明确是在对机器人说话；其余情况先剥掉图片/表情占位符，
+    # 只看用户有没有输入真实文字。
     if has_reply:
         return True
-    if not compact:
-        return any(
-            isinstance(segment, dict)
-            and str(segment.get("type") or "").lower()
-            in {"image", "mface", "marketface", "record", "video", "file"}
-            for segment in segments
-        )
+    normalized = str(text or "").replace("@群友", "").strip()
+    real_text = _strip_placeholder_text(normalized)
+    if not real_text:
+        # 纯图片/表情/视频等非文字消息：不自动触发回复，只在后台理解，
+        # 避免机器人对每条图都跳出来描述画面。
+        return False
 
+    compact = "".join(real_text.split()).lower()
     direct_cues = (
         "你", "亚托莉", "atri", "那", "所以", "然后", "还有", "对了",
         "但是", "为什么", "怎么", "什么", "真的吗", "你呢", "可以吗",
