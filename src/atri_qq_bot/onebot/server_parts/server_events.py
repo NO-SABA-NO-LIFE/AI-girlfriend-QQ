@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 
 from .server_support import OneBotServerMixin, _sync_server_globals
@@ -9,6 +10,11 @@ from .server_support import OneBotServerMixin, _sync_server_globals
 # 才把 server.py 的名字塞进本模块，直接以类方法调用（测试、脚本）时会 NameError。
 from .helpers import _conversation_id
 from ..message_parser import group_increase_text  # type: ignore[import-not-found]
+from ..reply_policy import (  # type: ignore[import-not-found]
+    _at_segment_targets,
+    _has_reply_segment,
+)
+from ...group_reply_focus import _strip_placeholder_text  # type: ignore[import-not-found]
 from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
     forced_event_block_reason,
     object_requires_mention,
@@ -141,6 +147,9 @@ class OneBotEventMixin(OneBotServerMixin):
                 plain_text,
             )
             preliminary_reply = preliminary_reply or active_group_continuation
+            # 没有任何明确触发时，普通群聊允许低概率偶尔搭话（带冷却）。
+            if not preliminary_reply:
+                preliminary_reply = self._maybe_ambient_group_reply(event, plain_text)
         voice_transcript = None
         voice_error: Exception | None = None
         if is_message and (event.get("message_type") == "private" or preliminary_reply):
@@ -760,6 +769,39 @@ class OneBotEventMixin(OneBotServerMixin):
                     model_name=delivery_model_name,
                 )
             )
+
+    def _maybe_ambient_group_reply(
+        self,
+        event: dict[str, Any],
+        plain_text: str,
+    ) -> bool:
+        """普通群聊里低概率主动搭话，带冷却；只对有真实文字的普通消息生效。"""
+        if not getattr(self.config, "group_ambient_reply_enabled", True):
+            return False
+        if event.get("message_type") != "group":
+            return False
+        # 引用回复、戳一戳、@别人都有各自的处理路径，不走随机搭话。
+        if _has_reply_segment(event) or event.get("_atri_poke_event"):
+            return False
+        _, at_other = _at_segment_targets(event, self.config.bot_qq)
+        if at_other:
+            return False
+        # 纯图片/表情等占位消息不搭话，必须有真实文字。
+        if not _strip_placeholder_text(str(plain_text or "")):
+            return False
+        now = time.time()
+        group_id = str(event.get("group_id") or "")
+        cooldown = max(
+            0,
+            int(getattr(self.config, "group_ambient_reply_cooldown_seconds", 300)),
+        )
+        if now - float(self._last_ambient_group_reply_at.get(group_id, 0.0)) < cooldown:
+            return False
+        chance = float(getattr(self.config, "group_ambient_reply_chance", 0.08))
+        if random.random() > chance:
+            return False
+        self._last_ambient_group_reply_at[group_id] = now
+        return True
 
     def _evaluate_reply_strategy(
         self,

@@ -67,6 +67,10 @@ class BotConfig:
     group_recent_visual_enabled: bool = True
     group_recent_visual_ttl_seconds: int = 300
     group_recent_visual_max: int = 3
+    # 普通群聊里偶尔主动搭话：低概率 + 冷却，避免刷屏。
+    group_ambient_reply_enabled: bool = True
+    group_ambient_reply_chance: float = 0.08
+    group_ambient_reply_cooldown_seconds: int = 300
     memory_path: Path = field(default_factory=lambda: _project_root() / "data" / "memory" / "users.json")
     # JSON 是可编辑事实源；SQLite 仅作可删除、可重建的检索索引。
     memory_retrieval_enabled: bool = True

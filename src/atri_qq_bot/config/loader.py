@@ -152,6 +152,9 @@ def _build_config(root: Path) -> BotConfig:
         group_recent_visual_enabled=_env_bool("GROUP_RECENT_VISUAL_ENABLED", True),
         group_recent_visual_ttl_seconds=_env_int("GROUP_RECENT_VISUAL_TTL_SECONDS", 300),
         group_recent_visual_max=_env_int("GROUP_RECENT_VISUAL_MAX", 3),
+        group_ambient_reply_enabled=_env_bool("GROUP_AMBIENT_REPLY_ENABLED", True),
+        group_ambient_reply_chance=max(0.0, min(1.0, _env_float("GROUP_AMBIENT_REPLY_CHANCE", 0.08))),
+        group_ambient_reply_cooldown_seconds=_env_int("GROUP_AMBIENT_REPLY_COOLDOWN_SECONDS", 300),
         memory_path=_env_path("MEMORY_PATH", root / "data" / "memory" / "users.json", root),
         memory_retrieval_enabled=_env_bool("MEMORY_RETRIEVAL_ENABLED", True),
         memory_retrieval_path=_env_path(
