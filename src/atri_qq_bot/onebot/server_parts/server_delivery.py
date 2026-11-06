@@ -435,8 +435,9 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             )
         for index, message in enumerate(outgoing):
             try:
+                # 引用+@只加在第一个气泡，后续气泡不带前缀，避免重复刷屏。
                 await self._send_one_reply(
-                    websocket, event, message, group_quote=group_quote
+                    websocket, event, message, group_quote=group_quote and index == 0
                 )
                 self._record_delivery_event(event, message=message, model_type=normalized_model_type, model_name=model_name, status="success")
             except Exception as exc:

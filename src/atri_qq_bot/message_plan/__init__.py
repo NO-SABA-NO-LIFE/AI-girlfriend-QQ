@@ -6,8 +6,6 @@ from .schema import OutgoingMessage
 from .splitting import (
     _compact_reply_text,
     _ends_with_strong_punctuation,
-    _hard_wrap,
-    _sentence_chunks,
     _truncate_tail,
     split_reply_text,
 )
@@ -21,7 +19,5 @@ __all__ = [
     "_append_light_emoji",
     "_compact_reply_text",
     "_ends_with_strong_punctuation",
-    "_hard_wrap",
-    "_sentence_chunks",
     "_truncate_tail",
 ]

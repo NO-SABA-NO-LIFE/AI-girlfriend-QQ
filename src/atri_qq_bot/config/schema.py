@@ -33,8 +33,8 @@ class BotConfig:
     chat_request_timeout_seconds: float = 25.0
     chat_resource_wait_seconds: float = 35.0
     chat_quality_retries: int = 1
-    message_split_max_chars: int = 44
-    message_split_max_parts: int = 4
+    message_split_max_chars: int = 120
+    message_split_max_parts: int = 2
     message_send_delay_min: float = 0.55
     message_send_delay_max: float = 1.35
     # 拟人打字节奏：按字数估算"打完这一条"的耗时，再叠加抖动。
