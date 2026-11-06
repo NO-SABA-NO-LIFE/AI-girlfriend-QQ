@@ -101,6 +101,9 @@ class OneBotConnectionMixin(OneBotServerMixin):
             str,
             tuple[float, dict[str, Any]],
         ] = {}
+        # 群维度的近期视觉素材：key=群号，value=按时间排列的 (时间戳, 图片段)。
+        # 只在机器人被 @ 回复时才合并分析，平时不调用视觉模型。
+        self._recent_group_visuals: dict[str, list[tuple[float, dict[str, Any]]]] = {}
         self._event_log = PROJECT_ROOT / "logs" / "onebot-events.log"
         self._reply_event_log = PROJECT_ROOT / "logs" / "reply-events.jsonl"
         self._voice_event_log = PROJECT_ROOT / "logs" / "voice-events.log"

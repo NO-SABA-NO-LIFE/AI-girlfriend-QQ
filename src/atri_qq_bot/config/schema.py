@@ -63,6 +63,10 @@ class BotConfig:
     sticker_capture_max_bytes: int = 3_000_000
     # 群聊回复时引用原消息并 @ 对方（reply + at 段）。
     group_reply_quote_enabled: bool = True
+    # 被 @ 回复时，顺带把群里近期图片/表情合并进本次分析（平时不主动分析）。
+    group_recent_visual_enabled: bool = True
+    group_recent_visual_ttl_seconds: int = 300
+    group_recent_visual_max: int = 3
     memory_path: Path = field(default_factory=lambda: _project_root() / "data" / "memory" / "users.json")
     # JSON 是可编辑事实源；SQLite 仅作可删除、可重建的检索索引。
     memory_retrieval_enabled: bool = True

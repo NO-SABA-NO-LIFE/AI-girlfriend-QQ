@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -173,14 +175,81 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         key = _pending_visual_key(event)
         if not key or not _event_has_visual_material(event):
             return
-        self._pending_group_visual_events[key] = (time.time(), event)
-        if len(self._pending_group_visual_events) <= 256:
+        now = time.time()
+        self._pending_group_visual_events[key] = (now, event)
+        if len(self._pending_group_visual_events) > 256:
+            oldest_key = min(
+                self._pending_group_visual_events,
+                key=lambda item: self._pending_group_visual_events[item][0],
+            )
+            self._pending_group_visual_events.pop(oldest_key, None)
+        # 同时记入群维度的近期图片队列，供被 @ 回复时顺带理解。
+        self._remember_recent_group_visual(event, now)
+
+    def _remember_recent_group_visual(
+        self, event: dict[str, Any], now: float
+    ) -> None:
+        group_id = event.get("group_id")
+        message = event.get("message")
+        if group_id is None or not isinstance(message, list):
             return
-        oldest_key = min(
-            self._pending_group_visual_events,
-            key=lambda item: self._pending_group_visual_events[item][0],
+        ttl = max(30, int(getattr(self.config, "group_recent_visual_ttl_seconds", 300)))
+        max_count = max(1, int(getattr(self.config, "group_recent_visual_max", 3)))
+        bucket = self._recent_group_visuals.setdefault(str(group_id), [])
+        # 收集本条消息里的图片/动画表情段（深拷贝，避免后续 event 被修改影响存档）。
+        for segment in message:
+            if not isinstance(segment, dict):
+                continue
+            if str(segment.get("type") or "").lower() in {
+                "image", "mface", "marketface"
+            }:
+                bucket.append((now, copy.deepcopy(segment)))
+        # 先按 TTL 淘汰过期项，再限制张数，始终保留时间最新的若干张。
+        fresh = [item for item in bucket if now - item[0] <= ttl]
+        if len(fresh) > max_count:
+            fresh = fresh[-max_count:]
+        self._recent_group_visuals[str(group_id)] = fresh
+
+    def _event_with_recent_group_visuals(
+        self, event: dict[str, Any]
+    ) -> dict[str, Any]:
+        """被 @ 回复时，把群里近期图片段合并到本次 event，供本次分析顺带读懂。"""
+        if not getattr(self.config, "group_recent_visual_enabled", True):
+            return event
+        if event.get("message_type") != "group":
+            return event
+        group_id = str(event.get("group_id") or "")
+        now = time.time()
+        ttl = max(30, int(getattr(self.config, "group_recent_visual_ttl_seconds", 300)))
+        max_count = max(1, int(getattr(self.config, "group_recent_visual_max", 3)))
+        bucket = self._recent_group_visuals.get(group_id, [])
+        recent_segments = [
+            segment for stored_at, segment in bucket if now - stored_at <= ttl
+        ][-max_count:]
+        if not recent_segments:
+            return event
+        current_segments = (
+            event.get("message")
+            if isinstance(event.get("message"), list)
+            else []
         )
-        self._pending_group_visual_events.pop(oldest_key, None)
+        # 去重：当前消息里已经带的图片不重复合并。
+        existing_keys = {
+            str((seg.get("data") or {}).get("file") or (seg.get("data") or {}).get("url"))
+            for seg in current_segments
+            if isinstance(seg, dict)
+        }
+        extra = [
+            copy.deepcopy(seg)
+            for seg in recent_segments
+            if str((seg.get("data") or {}).get("file") or (seg.get("data") or {}).get("url"))
+            not in existing_keys
+        ]
+        if not extra:
+            return event
+        merged = dict(event)
+        merged["message"] = extra + [dict(seg) for seg in current_segments]
+        return merged
 
     def _event_with_pending_group_visual(
         self,

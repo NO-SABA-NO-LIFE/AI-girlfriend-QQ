@@ -149,6 +149,9 @@ def _build_config(root: Path) -> BotConfig:
         sticker_capture_enabled=_env_bool("STICKER_CAPTURE_ENABLED", True),
         sticker_capture_max_bytes=_env_int("STICKER_CAPTURE_MAX_BYTES", 3_000_000),
         group_reply_quote_enabled=_env_bool("GROUP_REPLY_QUOTE_ENABLED", True),
+        group_recent_visual_enabled=_env_bool("GROUP_RECENT_VISUAL_ENABLED", True),
+        group_recent_visual_ttl_seconds=_env_int("GROUP_RECENT_VISUAL_TTL_SECONDS", 300),
+        group_recent_visual_max=_env_int("GROUP_RECENT_VISUAL_MAX", 3),
         memory_path=_env_path("MEMORY_PATH", root / "data" / "memory" / "users.json", root),
         memory_retrieval_enabled=_env_bool("MEMORY_RETRIEVAL_ENABLED", True),
         memory_retrieval_path=_env_path(

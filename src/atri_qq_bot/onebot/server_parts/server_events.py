@@ -390,6 +390,8 @@ class OneBotEventMixin(OneBotServerMixin):
             self._pending_group_visual_events.pop(_pending_visual_key(event), None)
         else:
             analysis_event = self._event_with_pending_group_visual(event)
+        # 被 @ 回复时，顺带把群里近期图片/表情合并进本次分析（平时不主动分析）。
+        analysis_event = self._event_with_recent_group_visuals(analysis_event)
 
         quoted_message_id, quoted_text, quoted_segments = await self._resolve_quoted_message(
             websocket,
