@@ -269,11 +269,18 @@ class EngineToolsMixin(PersonaEngineMixin):
                 }
             )
         if nickname:
+            if conversation_id.startswith("group:"):
+                nickname_hint = (
+                    f"当前正在和昵称为“{nickname}”的群友聊天。称呼可以自然一点，"
+                    "不要每句都叫昵称，也不要在文字里写“@昵称”，需要点名时由系统的 at 段处理。"
+                )
+            else:
+                nickname_hint = (
+                    f"当前正在和昵称为“{nickname}”的用户私聊。私聊里直接用“你”称呼，"
+                    "不要在回复开头或文字里写“@昵称”，也不要每句都叫昵称。"
+                )
             messages.append(
-                {
-                    "role": "system",
-                    "content": f"当前正在和昵称为“{nickname}”的用户聊天。称呼可以自然一点，不要每句都叫昵称。",
-                }
+                {"role": "system", "content": nickname_hint}
             )
         if not human_pipeline and not visual_turn:
             messages.extend(self._history[conversation_id])

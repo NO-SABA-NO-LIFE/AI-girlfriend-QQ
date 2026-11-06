@@ -162,17 +162,32 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         )
         return merged
 
-    def _allow_poke_reply(self, event: dict[str, Any]) -> bool:
-        """对戳一戳做会话级冷却，防止重复通知触发刷屏。"""
+    def _allow_poke_back(self, event: dict[str, Any]) -> bool:
+        """回戳动作的会话级短冷却：正常连续戳都能回戳，只防秒级狂戳刷屏。"""
 
+        return self._poke_cooldown_passed(
+            event, "_last_poke_back_at", POKE_BACK_COOLDOWN_SECONDS
+        )
+
+    def _allow_poke_text(self, event: dict[str, Any]) -> bool:
+        """文字回复的会话级长冷却：避免连续戳产生大段文字刷屏。"""
+
+        return self._poke_cooldown_passed(
+            event, "_last_poke_text_at", POKE_TEXT_COOLDOWN_SECONDS
+        )
+
+    def _poke_cooldown_passed(
+        self, event: dict[str, Any], store_name: str, cooldown_seconds: float
+    ) -> bool:
         key = _message_queue_id(event)
         now = time.time()
-        last = getattr(self, "_last_poke_reply_at", {}).get(key, 0.0)
-        if now - last < POKE_REPLY_COOLDOWN_SECONDS:
+        store = getattr(self, store_name, None)
+        if store is None:
+            store = {}
+            setattr(self, store_name, store)
+        if now - store.get(key, 0.0) < cooldown_seconds:
             return False
-        if not hasattr(self, "_last_poke_reply_at"):
-            self._last_poke_reply_at = {}
-        self._last_poke_reply_at[key] = now
+        store[key] = now
         return True
 
     def _remember_pending_group_visual(self, event: dict[str, Any]) -> None:

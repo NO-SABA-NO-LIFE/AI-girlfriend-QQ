@@ -304,6 +304,7 @@ class EngineReplyMixin(PersonaEngineMixin):
                     clean_text,
                     api_reply,
                     strict_quality=not human_pipeline,
+                    nickname=nickname,
                 )
                 if api_reply:
                     self._remember(conversation_id, clean_text, api_reply, nickname)

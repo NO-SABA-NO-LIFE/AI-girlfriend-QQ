@@ -117,20 +117,22 @@ class OneBotEventMixin(OneBotServerMixin):
             and _as_int(event.get("self_id")) in {None, self.config.bot_qq}
         )
 
-        if poke_event and not self._allow_poke_reply(event):
+        # 被戳时先回戳对方（再走下面的文字回复），像真人互相戳着玩。
+        # 回戳用独立短冷却：连续戳都能回戳，只防秒级狂戳。
+        poke_back_done = False
+        if poke_event and self._allow_poke_back(event):
+            poke_back_done = await self._send_group_poke(
+                websocket, event.get("group_id"), event.get("user_id")
+            )
+
+        # 文字回复用独立长冷却：冷却期内只回戳、不生成大段文字，避免文字刷屏。
+        if poke_event and not self._allow_poke_text(event):
             LOGGER.info(
-                "戳一戳回复进入冷却：conversation=%s user=%s",
+                "戳一戳文字回复进入冷却：conversation=%s user=%s",
                 _conversation_id(event),
                 event.get("user_id"),
             )
             return
-
-        # 被戳时先回戳对方（再走下面的文字回复），像真人互相戳着玩。
-        poke_back_done = False
-        if poke_event:
-            poke_back_done = await self._send_group_poke(
-                websocket, event.get("group_id"), event.get("user_id")
-            )
 
         preliminary_reply = push_event or poke_command_hit or should_reply(
             event,

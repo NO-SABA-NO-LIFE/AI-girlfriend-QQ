@@ -199,6 +199,7 @@ class EngineContextMixin(PersonaEngineMixin):
         reply_text: str,
         *,
         strict_quality: bool = True,
+        nickname: str | None = None,
     ) -> str:
         reply_text = _normalize_reply(reply_text)
         reply_text = _redact_sensitive_output(
@@ -207,6 +208,9 @@ class EngineContextMixin(PersonaEngineMixin):
         )
         if conversation_id.startswith("group:"):
             reply_text = _sanitize_group_mentions(reply_text)
+        else:
+            # 私聊兜底：去掉回复开头的“@昵称”，只处理开头，不影响正文里讨论 @ 的内容。
+            reply_text = _strip_leading_private_mention(reply_text, nickname)
         if strict_quality and _question_count(reply_text) > 1:
             reply_text = _trim_extra_questions(reply_text, keep_questions=1)
         if not reply_text:

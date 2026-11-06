@@ -429,6 +429,33 @@ def _sanitize_group_mentions(text: str) -> str:
     return re.sub(r"@\d{5,}", "@群友", text)
 
 
+def _strip_leading_private_mention(text: str, nickname: str | None = None) -> str:
+    """去掉私聊回复开头的“@昵称”称呼，只处理开头，避免误伤正文。
+
+    模型偶尔会把群聊的 @ 习惯带到私聊，在句首写出“@昵称”。这里优先按真实
+    昵称精确剥离，再用通用模式兜底（@ 后接一串非标点字符直到空格/标点）。
+    """
+    stripped = str(text or "").lstrip()
+    prefix_removed = text[: len(text) - len(stripped)] if text else ""
+    if nickname:
+        # 昵称可能含 emoji，按字面匹配，兼容“@昵称”后直接跟正文或空格。
+        for candidate in (f"@{nickname}", f"@ {nickname}"):
+            if stripped.startswith(candidate):
+                rest = stripped[len(candidate):]
+                rest = rest.lstrip(" ，,、")
+                return prefix_removed + rest
+    # 通用兜底：句首 @ 后接昵称主体（允许英文/数字/空格/emoji），直到遇到
+    # 中文句读标点或中文字符为止，兼容含空格的英文昵称。
+    matched = re.match(
+        r"^@[A-Za-z0-9 _\u0080-\uFFFF]+?(?=[，。！？!?、；;：:\u4e00-\u9fff]|$)",
+        stripped,
+    )
+    if matched:
+        rest = stripped[matched.end():].lstrip(" ，,、")
+        return prefix_removed + rest
+    return text
+
+
 def _format_user_content(
     conversation_id: str, user_text: str, nickname: str | None = None
 ) -> str:
