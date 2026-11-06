@@ -100,8 +100,9 @@ class OneBotEventMixin(OneBotServerMixin):
         # 指令戳人：“亚托莉戳一下 @某人”，先执行戳人动作，再让正常流程配一句话。
         poke_target = poke_command_target(event, self.config.bot_qq)
         poke_command_hit = poke_target is not None
+        poke_action_done = False
         if poke_command_hit:
-            await self._send_group_poke(
+            poke_action_done = await self._send_group_poke(
                 websocket, event.get("group_id"), poke_target
             )
 
@@ -125,8 +126,9 @@ class OneBotEventMixin(OneBotServerMixin):
             return
 
         # 被戳时先回戳对方（再走下面的文字回复），像真人互相戳着玩。
+        poke_back_done = False
         if poke_event:
-            await self._send_group_poke(
+            poke_back_done = await self._send_group_poke(
                 websocket, event.get("group_id"), event.get("user_id")
             )
 
@@ -427,6 +429,21 @@ class OneBotEventMixin(OneBotServerMixin):
                 quoted_segments,
             )
         model_input_text = _compose_model_input(plain_text, quoted_text)
+        if poke_action_done:
+            # 明确告诉模型戳人动作已经完成，避免它回复“我不能操作”。
+            model_input_text = (
+                f"{model_input_text}\n\n"
+                "【系统动作反馈】你已经成功戳了一下对方，这个戳一戳动作已经由系统完成，"
+                "对方能看到。请自然地确认这件事，简短回应一句即可，不要说自己做不到、"
+                "不能操作、只能喊一声之类的话。"
+            )
+        elif poke_back_done:
+            # 被戳后已经回戳，让模型知道双方互相戳了一下。
+            model_input_text = (
+                f"{model_input_text}\n\n"
+                "【系统动作反馈】你已经回戳了对方一下，互相戳一戳的动作都完成了。"
+                "请顺着这个打闹的氛围自然回应，不要说自己做不到或不能操作。"
+            )
         voice_only_text = plain_text.replace("@群友", "").strip()
         if (
             voice_error is not None
