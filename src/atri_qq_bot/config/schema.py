@@ -178,6 +178,9 @@ class BotConfig:
     accounts_db_path: Path = field(
         default_factory=lambda: _project_root() / "data" / "accounts" / "index.sqlite3"
     )
+    # 指令返图（Helldivers 卡片、银河快报等）把文字和图片合并成一条消息整体发送；
+    # 默认 false 保持逐条流式，普通对话不受影响。
+    hd2_merge_messages: bool = False
 
     @property
     def ai_enabled(self) -> bool:

@@ -353,6 +353,14 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                     self.config, _outgoing_delay_text(outgoing, fallback_text)
                 )
             )
+        # 指令返图合并：开关开启且这一组里含图片时，把文字和图片拼成一条消息
+        # 整体发送。普通对话（无图片或只有一条）不进入此分支，保持逐条流式。
+        if (
+            getattr(self.config, "hd2_merge_messages", False)
+            and len(outgoing) > 1
+            and any(item.kind == "image" for item in outgoing)
+        ):
+            return await self._send_merged_reply(websocket, event, outgoing)
         for index, message in enumerate(outgoing):
             try:
                 await self._send_one_reply(websocket, event, message)
@@ -515,6 +523,38 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                 12.0,
             )
             self._require_message_delivery(result)
+
+    async def _send_merged_reply(
+        self,
+        websocket: Any,
+        event: dict[str, Any],
+        outgoing: list[OutgoingMessage],
+    ) -> str:
+        """把多条 OutgoingMessage 的消息段 flatten 成一条 QQ 消息整体发送。"""
+        segments: list[dict[str, Any]] = []
+        for message in outgoing:
+            segments.extend(outgoing_to_segments(message))
+        if not segments:
+            return ""
+        if event.get("message_type") == "group":
+            result = await self.call_action_and_wait(
+                websocket,
+                "send_group_msg",
+                {"group_id": event["group_id"], "message": segments},
+                12.0,
+            )
+        else:
+            result = await self.call_action_and_wait(
+                websocket,
+                "send_private_msg",
+                {"user_id": event["user_id"], "message": segments},
+                12.0,
+            )
+        self._require_message_delivery(result)
+        # 返回值与逐条路径保持一致：拼接已送达的文本，供上层记录/归档。
+        return "\n".join(
+            item.content for item in outgoing if item.kind == "text" and item.content
+        ).strip()
 
     def _require_message_delivery(self, result: dict[str, Any] | None) -> None:
         try:

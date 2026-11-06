@@ -32,7 +32,12 @@ from ..insights import (
     InsightsRuntime,
     context_from_tool_context,
 )
-from ..message_plan import OutgoingMessage, build_outgoing_messages, outgoing_to_onebot_message
+from ..message_plan import (
+    OutgoingMessage,
+    build_outgoing_messages,
+    outgoing_to_onebot_message,
+    outgoing_to_segments,
+)
 from ..music import SingingConversationController, SingingDecision
 from ..persona import AtriReplyEngine
 from ..proactive import ProactivePlanner, load_proactive_policy, safe_zoneinfo

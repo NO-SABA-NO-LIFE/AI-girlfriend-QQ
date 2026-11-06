@@ -311,6 +311,7 @@ def _build_config(root: Path) -> BotConfig:
             root / "data" / "accounts" / "index.sqlite3",
             root,
         ),
+        hd2_merge_messages=_env_bool("HD2_MERGE_MESSAGES", False),
     )
 
 

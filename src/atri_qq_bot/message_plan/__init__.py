@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .builder import _append_light_emoji, build_outgoing_messages
-from .onebot import outgoing_to_onebot_message
+from .onebot import outgoing_to_onebot_message, outgoing_to_segments
 from .schema import OutgoingMessage
 from .splitting import (
     _compact_reply_text,
@@ -16,6 +16,7 @@ __all__ = [
     "OutgoingMessage",
     "build_outgoing_messages",
     "outgoing_to_onebot_message",
+    "outgoing_to_segments",
     "split_reply_text",
     "_append_light_emoji",
     "_compact_reply_text",
