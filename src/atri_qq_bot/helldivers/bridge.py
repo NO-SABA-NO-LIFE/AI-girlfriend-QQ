@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -127,6 +128,10 @@ _COMMANDS: dict[str, str] = {
     "诊断": "_cmd_ping",
     "自检": "_cmd_ping",
 }
+
+# 匹配开头的一个或多个 @ 提及（extract_plain_text 把 at 段转成 @群友/@全体成员，
+# 也兼容 @昵称 形式），用于群聊“@机器人 + 指令”时剥掉前面的提及部分。
+_LEADING_MENTION_RE = re.compile(r"^(?:\s*@[^\s@]+)+\s*")
 
 
 def _planet_search_query(value: str) -> str:
@@ -517,10 +522,10 @@ class HelldiversBridge:
     def parse(self, plain_text: str) -> tuple[str, list[str]] | None:
         """把文本解析为 (命令, 参数)；不是 Helldivers 命令则返回 None。
 
-        第一阶段统一要求以 ``/`` 开头，避免与亚托莉的日常对话误触发；
-        命令名大小写不敏感，与原 AstrBot 插件行为一致。
+        统一要求以 ``/`` 开头，避免与亚托莉的日常对话误触发；群聊里
+        “@机器人 /指令”会先剥掉开头的 @ 提及再判断。命令名大小写不敏感。
         """
-        text = (plain_text or "").strip()
+        text = _LEADING_MENTION_RE.sub("", (plain_text or "").strip())
         if not text.startswith("/"):
             return None
         text = text[1:].strip()
