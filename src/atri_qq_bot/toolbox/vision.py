@@ -207,7 +207,7 @@ class ToolboxVisionMixin(ToolboxMixin):
                 f"共 {getattr(ocr_result, 'line_count', 0) or len(ocr_result.text.splitlines())} 行。"
             )
         if vision_text:
-            label = "表情包情绪分析" if resolved_kind == "sticker" else "图片内容分析"
+            label = "表情包情绪理解" if resolved_kind == "sticker" else "图片/表情理解"
             findings.append(f"{label}：{vision_text}")
         elif vision_limitation:
             limitations.append(vision_limitation)
