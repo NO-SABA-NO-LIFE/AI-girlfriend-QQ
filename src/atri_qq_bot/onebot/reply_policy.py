@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .message_parser import extract_plain_text
 
 
-SMART_GROUP_TRIGGERS = (
+# 身份/称呼关键词：群里提到这些，等于在说机器人本人，需要结合上下文回应。
+SMART_IDENTITY_KEYWORDS = (
+    "机器人",
+    "人工智能",
     "萝卜子",
     "高性能",
+)
+
+# 明确要机器人做事的指令词；这些话本身就是对机器人说的。
+SMART_GROUP_TRIGGERS = (
     "哼哒",
     "给我忘掉",
     "不准涩涩",
@@ -28,6 +36,10 @@ SMART_GROUP_TRIGGERS = (
     "看这个视频",
     "抽象",
 )
+
+# 英文 “ai” 只在作为独立单词时才算；前面不能是 @、.、/ 或单词字符，
+# 避免误伤 email（test@ai.com）、网址（x.ai）和 aim 等。
+_AI_EN_RE = re.compile(r"(?<![@./\w])ai\b", re.IGNORECASE)
 
 
 def is_bot_mentioned(event: dict[str, Any], bot_qq: int, plain_text: str) -> bool:
@@ -65,6 +77,33 @@ def _at_segment_targets(
             elif qq:
                 at_other = True
     return at_bot, at_other
+
+
+def _has_reply_segment(event: dict[str, Any]) -> bool:
+    """消息里是否带引用回复（reply 段）。"""
+    message = event.get("message")
+    if not isinstance(message, list):
+        return False
+    return any(
+        isinstance(segment, dict)
+        and str(segment.get("type") or "").lower() == "reply"
+        for segment in message
+    )
+
+
+def _quoted_sender_is_bot(event: dict[str, Any], bot_qq: int) -> bool | None:
+    """判断被引用消息的发送者是不是机器人。
+
+    NapCat 通常在事件顶层附带 ``reply`` 对象（含 sender）。无法确认时返回
+    None，而不是猜测，由调用方按“引用是强互动信号”保守处理。
+    """
+    reply = event.get("reply")
+    if not isinstance(reply, dict):
+        return None
+    sender = reply.get("sender")
+    if not isinstance(sender, dict) or sender.get("user_id") in (None, ""):
+        return None
+    return str(sender.get("user_id")) == str(bot_qq)
 
 
 def should_reply(
@@ -114,12 +153,26 @@ def _should_reply_smart_group(
     if at_other and not at_bot:
         return False
 
-    if is_bot_mentioned(event, bot_qq, plain_text):
+    # 1) 明确 @ 机器人。
+    if at_bot:
         return True
 
-    lowered = plain_text.lower()
-    if "atri" in lowered:
+    # 2) 引用/回复：能确认被引用者时只在引用机器人时触发；无法确认时，
+    #    引用回复本身是强互动信号，保守触发。
+    if _has_reply_segment(event):
+        quoted_is_bot = _quoted_sender_is_bot(event, bot_qq)
+        return True if quoted_is_bot is None else quoted_is_bot
+
+    # 3) 称呼/身份关键词：亚托莉、atri（is_bot_mentioned 文本兜底）、
+    #    机器人、人工智能、萝卜子、高性能，以及独立单词 ai。
+    if is_bot_mentioned(event, bot_qq, plain_text):
         return True
+    if _AI_EN_RE.search(plain_text):
+        return True
+    if any(word in plain_text for word in SMART_IDENTITY_KEYWORDS):
+        return True
+
+    # 4) 明确要机器人做事的指令词。
     return any(trigger in plain_text for trigger in SMART_GROUP_TRIGGERS)
 
 
