@@ -339,6 +339,7 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         model_type: str = "",
         model_name: str = "",
         first_delay: bool = True,
+        group_quote: bool = True,
     ) -> str:
         outgoing = [OutgoingMessage("text", messages)] if isinstance(messages, str) else messages
         normalized_model_type = str(model_type or "").strip().lower()
@@ -360,10 +361,14 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             and len(outgoing) > 1
             and any(item.kind == "image" for item in outgoing)
         ):
-            return await self._send_merged_reply(websocket, event, outgoing)
+            return await self._send_merged_reply(
+                websocket, event, outgoing, group_quote=group_quote
+            )
         for index, message in enumerate(outgoing):
             try:
-                await self._send_one_reply(websocket, event, message)
+                await self._send_one_reply(
+                    websocket, event, message, group_quote=group_quote
+                )
                 self._record_delivery_event(event, message=message, model_type=normalized_model_type, model_name=model_name, status="success")
             except Exception as exc:
                 self._record_delivery_event(event, message=message, model_type=normalized_model_type, model_name=model_name, status="failed", error=str(exc))
@@ -381,7 +386,9 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                     # 回复失败。这里不递归调用 send_reply，防止二次异常扩大。
                     text_fallback = OutgoingMessage("text", str(fallback_text).strip())
                     try:
-                        await self._send_one_reply(websocket, event, text_fallback)
+                        await self._send_one_reply(
+                            websocket, event, text_fallback, group_quote=group_quote
+                        )
                         self._record_delivery_event(event, message=text_fallback, model_type=normalized_model_type, model_name=model_name, status="success")
                     except Exception as fallback_exc:
                         self._record_delivery_event(event, message=text_fallback, model_type=normalized_model_type, model_name=model_name, status="failed", error=str(fallback_exc))
@@ -482,11 +489,17 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         return prefix
 
     def _with_group_reply_prefix(
-        self, event: dict[str, Any], onebot_message: Any
+        self,
+        event: dict[str, Any],
+        onebot_message: Any,
+        *,
+        group_quote: bool = True,
     ) -> Any:
-        """群聊回复在消息开头加引用+@；私聊或开关关闭时原样返回。"""
-        if event.get("message_type") != "group" or not getattr(
-            self.config, "group_reply_quote_enabled", True
+        """群聊回复在消息开头加引用+@；私聊、开关关闭或本次禁用时原样返回。"""
+        if (
+            not group_quote
+            or event.get("message_type") != "group"
+            or not getattr(self.config, "group_reply_quote_enabled", True)
         ):
             return onebot_message
         # 统一成段数组，再把前缀拼到最前面。
@@ -505,6 +518,8 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         websocket: Any,
         event: dict[str, Any],
         message: OutgoingMessage,
+        *,
+        group_quote: bool = True,
     ) -> None:
         message_type = event.get("message_type")
         onebot_message = outgoing_to_onebot_message(message)
@@ -524,7 +539,9 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                 self._log_voice_event(event, "delivered", message=message, result=result)
                 return
             if message_type == "group":
-                group_message = self._with_group_reply_prefix(event, onebot_message)
+                group_message = self._with_group_reply_prefix(
+                    event, onebot_message, group_quote=group_quote
+                )
                 result = await self.call_action_and_wait(
                     websocket,
                     "send_group_msg",
@@ -563,6 +580,8 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         websocket: Any,
         event: dict[str, Any],
         outgoing: list[OutgoingMessage],
+        *,
+        group_quote: bool = True,
     ) -> str:
         """把多条 OutgoingMessage 的消息段 flatten 成一条 QQ 消息整体发送。"""
         segments: list[dict[str, Any]] = []
@@ -571,7 +590,9 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         if not segments:
             return ""
         if event.get("message_type") == "group":
-            merged_segments = self._with_group_reply_prefix(event, segments)
+            merged_segments = self._with_group_reply_prefix(
+                event, segments, group_quote=group_quote
+            )
             result = await self.call_action_and_wait(
                 websocket,
                 "send_group_msg",

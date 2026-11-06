@@ -79,9 +79,14 @@ class OneBotEventMixin(OneBotServerMixin):
                 plain_text, hd2_session_key
             )
             if hd2_messages is not None:
-                # 确定性查询命令：用 first_delay=False 跳过拟人打字停顿，响应更快。
+                # 确定性查询命令：用 first_delay=False 跳过拟人打字停顿，响应更快；
+                # group_quote=False 让情报返图不引用、不 @ 发令者。
                 await self.send_reply(
-                    websocket, event, hd2_messages, first_delay=False
+                    websocket,
+                    event,
+                    hd2_messages,
+                    first_delay=False,
+                    group_quote=False,
                 )
                 return
 
