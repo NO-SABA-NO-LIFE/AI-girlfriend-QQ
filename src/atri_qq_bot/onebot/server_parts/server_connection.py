@@ -22,7 +22,7 @@ from ...accounts import (  # type: ignore[import-not-found]
 # 因此在这里导入不会形成循环依赖。
 from ...helldivers.bridge import HelldiversBridge
 from ...helldivers.config import HelldiversConfig
-from ...message_plan import outgoing_to_onebot_message
+from ...message_plan import outgoing_to_onebot_message, outgoing_to_segments
 from ...runtime.paths import DATA_DIR
 
 # 运行时会由 _sync_server_globals 注入 server.py 的同名 logger；这里显式声明一份，
@@ -141,6 +141,33 @@ class OneBotConnectionMixin(OneBotServerMixin):
             raise RuntimeError("NapCat 当前未连接，无法主动推送")
         if kind not in {"group", "private"} or not target:
             raise RuntimeError(f"无效的会话标识：{session_key}")
+
+        # 合并开关开启、且这组是含图片的多条消息时，flatten 成一条整体发送，
+        # 避免 B站快报/新闻推送的“文字+图+链接”被拆成多个气泡。
+        merge_enabled = getattr(self.config, "hd2_merge_messages", False)
+        can_merge = (
+            merge_enabled
+            and len(messages) > 1
+            and any(getattr(item, "kind", "") == "image" for item in messages)
+        )
+        if can_merge:
+            merged_segments: list[dict[str, Any]] = []
+            for item in messages:
+                merged_segments.extend(outgoing_to_segments(item))
+            if merged_segments:
+                if kind == "group":
+                    action = "send_group_msg"
+                    params = {"group_id": target, "message": merged_segments}
+                else:
+                    action = "send_private_msg"
+                    params = {"user_id": target, "message": merged_segments}
+                result = await self.call_action_and_wait(
+                    websocket, action, params, 15.0
+                )
+                # 发送失败会抛 RuntimeError，由 bridge 侧兜底并安排重试。
+                self._require_message_delivery(result)
+            return 1
+
         for message in messages:
             onebot_message = outgoing_to_onebot_message(message)
             if kind == "group":

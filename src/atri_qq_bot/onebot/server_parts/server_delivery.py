@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from .server_support import OneBotServerMixin, _sync_server_globals
+from ...message_plan import outgoing_to_segments  # type: ignore[import-not-found]
 
 LOGGER = logging.getLogger("atri.onebot")
 
