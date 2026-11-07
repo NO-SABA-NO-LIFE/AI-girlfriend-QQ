@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timedelta
 import json
+import random
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -104,6 +105,46 @@ def test_send_group_summary_uses_its_own_delivery_context(tmp_path) -> None:
             }
         ],
     }
+
+
+def test_proactive_group_poke_picks_non_bot_member(monkeypatch) -> None:
+    server = object.__new__(OneBotServer)
+    websocket = object()
+    server.config = SimpleNamespace(group_poke_enabled=True, bot_qq=100000001)
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_action(target, action, params, timeout_seconds):
+        calls.append((action, dict(params)))
+        if action == "get_group_member_list":
+            return {
+                "retcode": 0,
+                "data": [
+                    {"user_id": 100000001},  # 机器人自己，必须被排除
+                    {"user_id": 100000002},
+                    {"user_id": 100000003},
+                ],
+            }
+        return {"retcode": 0, "data": {"message_id": 1}}
+
+    server.call_action_and_wait = fake_action  # type: ignore[method-assign]
+    monkeypatch.setattr(random, "choice", lambda seq: list(seq)[0])
+
+    ok = asyncio.run(server._proactive_group_poke(websocket, 20001))
+
+    assert ok is True
+    assert calls[0][0] == "get_group_member_list"
+    assert calls[1][0] == "group_poke"
+    # 候选只剩 2 和 3，固定选第一个，绝不会戳到机器人自己
+    assert calls[1][1] == {"group_id": 20001, "user_id": 100000002}
+
+
+def test_proactive_group_poke_respects_disabled_switch() -> None:
+    server = object.__new__(OneBotServer)
+    server.config = SimpleNamespace(group_poke_enabled=False, bot_qq=100000001)
+
+    ok = asyncio.run(server._proactive_group_poke(object(), 20001))
+
+    assert ok is False
 
 
 def test_group_history_uses_message_id_as_pagination_cursor() -> None:
