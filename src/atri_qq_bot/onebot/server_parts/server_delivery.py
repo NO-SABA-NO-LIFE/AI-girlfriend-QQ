@@ -575,6 +575,8 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             prefix.append({"type": "reply", "data": {"id": message_id}})
         if user_id:
             prefix.append({"type": "at", "data": {"qq": user_id}})
+            # @ 昵称后补一个空格，避免昵称和正文挤在一起。
+            prefix.append({"type": "text", "data": {"text": " "}})
         return prefix
 
     async def _send_group_poke(
