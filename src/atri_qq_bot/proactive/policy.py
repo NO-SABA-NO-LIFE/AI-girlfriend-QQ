@@ -57,7 +57,6 @@ DEFAULT_PROACTIVE_POLICY: dict[str, Any] = {
         "guided_topic": 30,
         "daily_share": 14,
         "encouragement": 8,
-        "poke": 10,
     },
 }
 

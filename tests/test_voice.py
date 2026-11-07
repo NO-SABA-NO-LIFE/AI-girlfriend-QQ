@@ -1463,6 +1463,47 @@ def test_model_tool_cannot_create_singing_request(tmp_path: Path) -> None:
     assert engine.consume_voice_request("private:1") is None
 
 
+def _poke_engine(tmp_path: Path, **overrides):
+    from atri_qq_bot.persona import AtriReplyEngine
+
+    config = BotConfig(
+        bot_qq=100000001, host="127.0.0.1", port=8765, reply_mode="smart",
+        openai_api_key="test", openai_base_url="https://example.test/v1",
+        openai_model="test", temperature=0.8, max_tokens=200,
+        memory_path=tmp_path / "memory.json", **overrides,
+    )
+    return AtriReplyEngine(config), config
+
+
+def test_poke_tool_sets_pending_in_group(tmp_path: Path) -> None:
+    engine, config = _poke_engine(tmp_path)
+    result = asyncio.run(engine._execute_context_tool(
+        "group:20001", "poke_user", {}, config,
+    ))
+    assert "随本轮回复一起发出" in result
+    assert engine.consume_poke_request("group:20001") is True
+    # 消费后应被取出，再取一次为 False
+    assert engine.consume_poke_request("group:20001") is False
+
+
+def test_poke_tool_rejected_in_private(tmp_path: Path) -> None:
+    engine, config = _poke_engine(tmp_path)
+    result = asyncio.run(engine._execute_context_tool(
+        "private:10001", "poke_user", {}, config,
+    ))
+    assert "只能在群聊" in result
+    assert engine.consume_poke_request("private:10001") is False
+
+
+def test_poke_tool_rejected_when_disabled(tmp_path: Path) -> None:
+    engine, config = _poke_engine(tmp_path, group_poke_enabled=False)
+    result = asyncio.run(engine._execute_context_tool(
+        "group:20001", "poke_user", {}, config,
+    ))
+    assert "未启用" in result
+    assert engine.consume_poke_request("group:20001") is False
+
+
 def test_voice_send_failure_sends_text_fallback() -> None:
     config = BotConfig(
         bot_qq=100000001,

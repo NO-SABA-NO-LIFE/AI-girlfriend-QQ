@@ -25,6 +25,7 @@ def available_tool_schemas(config: Any) -> list[dict[str, Any]]:
         return []
 
     tools = [_current_time_schema()]
+    tools.append(_poke_user_schema())
     if bool(getattr(config, "web_search_enabled", True)):
         tools.append(_weather_schema())
         tools.append(_web_search_schema(config))
@@ -36,6 +37,24 @@ def available_tool_schemas(config: Any) -> list[dict[str, Any]]:
     if bool(getattr(config, "llm_agent_protocol_enabled", False)):
         tools.append(final_answer_schema(getattr(config, "max_tokens", 1200) * 4))
     return tools
+
+
+def _poke_user_schema() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "poke_user",
+            "description": (
+                "在群里戳一下正在和你对话的人。当你被惹生气、想傲娇抗议、炸毛或俏皮反击时，"
+                "可以自主选择戳一下；也可以完全不戳、只用文字回应。普通闲聊、正经事或没有情绪时不要调用。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    }
 
 
 def _current_time_schema() -> dict[str, Any]:

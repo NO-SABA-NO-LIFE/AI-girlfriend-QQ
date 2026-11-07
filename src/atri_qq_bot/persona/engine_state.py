@@ -20,6 +20,9 @@ class EngineStateMixin(PersonaEngineMixin):
         self._pending_voice_requests: dict[str, VoiceRequest] = {}
         self._pending_reply_voice_choices: dict[str, bool] = {}
         self._pending_call_requests: dict[str, CallInviteRequest] = {}
+        # 模型在对话中因情绪自主决定要戳当前对话者时，先暂存到这里，
+        # 由 OneBot 层在回复时统一执行 group_poke，引擎层不直接碰网络。
+        self._pending_poke_requests: dict[str, bool] = {}
         # 回复失败是运行态信号，不是聊天内容。OneBot 层消费后只记录日志/评测，
         # 绝不把异常文案、固定模板或伪装成人格回复的兜底发给用户。
         self._pending_reply_failures: dict[str, str] = {}
@@ -42,6 +45,9 @@ class EngineStateMixin(PersonaEngineMixin):
 
     def consume_call_request(self, conversation_id: str) -> CallInviteRequest | None:
         return self._pending_call_requests.pop(conversation_id, None)
+
+    def consume_poke_request(self, conversation_id: str) -> bool:
+        return self._pending_poke_requests.pop(conversation_id, False)
 
     def consume_reply_failure(self, conversation_id: str) -> str:
         return self._pending_reply_failures.pop(conversation_id, "")

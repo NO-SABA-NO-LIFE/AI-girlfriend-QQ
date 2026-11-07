@@ -120,28 +120,6 @@ class OneBotProactiveMixin(OneBotServerMixin):
                     continue
                 if message_type != "group" and not user_id:
                     continue
-                if plan.event_type == "poke" and message_type == "group":
-                    # 主动戳人不生成文字：随机挑一个群成员发 group_poke，
-                    # 成功后同样走主动事件记账，复用每日上限与冷却。
-                    try:
-                        poked = await self._proactive_group_poke(websocket, group_id)
-                    except Exception as exc:
-                        print(f"[onebot] Proactive poke failed: {exc}")
-                        poked = False
-                    if poked:
-                        timezone = safe_zoneinfo(str(policy.get("timezone") or "Asia/Shanghai"))
-                        local_now = datetime.now(timezone)
-                        self.reply_engine.record_bot_reply(plan.conversation_id, "[戳一戳]")
-                        self.reply_engine.memory.mark_proactive_sent(
-                            plan.conversation_id,
-                            plan.event_type,
-                            "[戳一戳]",
-                            "proactive_poke",
-                            local_now.date().isoformat(),
-                            now=local_now.timestamp(),
-                        )
-                        print(f"[onebot] Proactive poke sent in group:{group_id}.")
-                    continue
                 result = await self.reply_engine.generate_proactive_message(
                     plan.conversation_id,
                     plan.event_type,

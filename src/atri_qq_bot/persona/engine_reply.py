@@ -20,6 +20,7 @@ class EngineReplyMixin(PersonaEngineMixin):
         self._pending_voice_requests.pop(conversation_id, None)
         self._pending_reply_voice_choices.pop(conversation_id, None)
         self._pending_call_requests.pop(conversation_id, None)
+        self._pending_poke_requests.pop(conversation_id, None)
         self._pending_reply_failures.pop(conversation_id, None)
         # WebUI 的回复策略（按对象/好感度设定的长度要求）经这里注入，和其它
         # 系统提示合并后一起交给模型，不改变既有的修复/检索分支。

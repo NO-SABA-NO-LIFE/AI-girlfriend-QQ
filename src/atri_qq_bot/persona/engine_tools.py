@@ -537,6 +537,16 @@ class EngineToolsMixin(PersonaEngineMixin):
             topic = str(arguments.get("topic") or "").strip()[:120]
             self._pending_call_requests[conversation_id] = CallInviteRequest(topic)
             return "通话邀请已接受。最终回复不要再重复邀请，也不要编造通话已经接通。"
+        if name == "poke_user":
+            if not conversation_id.startswith("group:"):
+                return "戳一戳只能在群聊里使用，请直接用文字自然回复。"
+            if not bool(getattr(config, "group_poke_enabled", True)):
+                return "戳一戳功能当前未启用，请直接用文字自然回复。"
+            self._pending_poke_requests[conversation_id] = True
+            return (
+                "你已决定戳一下对方，这个动作会随本轮回复一起发出。"
+                "最终回复不要再描述戳一戳的动作，也不要声称戳失败。"
+            )
         if name != "speak_as_atri":
             return None
         try:

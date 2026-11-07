@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import random
 import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -602,42 +601,6 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         except Exception as exc:  # pragma: no cover - 网络/协议异常兜底
             LOGGER.warning("主动戳一戳失败 group=%s target=%s: %s", group_id, target_id, exc)
             return False
-
-    async def _proactive_group_poke(self, websocket: Any, group_id: Any) -> bool:
-        """主动互动时随机挑一个群成员（排除机器人自己）戳一下。
-
-        复用 ``group_poke`` 动作与 ``group_poke_enabled`` 开关；任何一步失败都安静
-        返回 False，让上层把它当作一次未执行的主动事件，而不是抛出异常。
-        """
-        if not getattr(self.config, "group_poke_enabled", True):
-            return False
-        if websocket is None or group_id in (None, ""):
-            return False
-        try:
-            result = await self.call_action_and_wait(
-                websocket,
-                "get_group_member_list",
-                {"group_id": int(group_id)},
-                8.0,
-            )
-        except Exception as exc:
-            LOGGER.warning("主动戳人读取群成员列表失败 group=%s: %s", group_id, exc)
-            return False
-        data = result.get("data") if isinstance(result, dict) else None
-        if not isinstance(data, list):
-            return False
-        candidates: list[int] = []
-        for member in data:
-            if not isinstance(member, dict):
-                continue
-            member_id = member.get("user_id")
-            if not member_id or int(member_id) == int(self.config.bot_qq):
-                continue
-            candidates.append(int(member_id))
-        if not candidates:
-            return False
-        target_id = random.choice(candidates)
-        return await self._send_group_poke(websocket, group_id, target_id)
 
     def _with_group_reply_prefix(
         self,

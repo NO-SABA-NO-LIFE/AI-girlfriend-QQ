@@ -681,6 +681,9 @@ class OneBotEventMixin(OneBotServerMixin):
         if call_request is not None and not is_event_modality_allowed(event, "voice"):
             LOGGER.info("语音白名单拒绝通话邀请：user=%s group=%s", event.get("user_id"), event.get("group_id"))
             call_request = None
+        # 模型在对话中因情绪自主决定要戳当前对话者，这里取出后在回复发送成功时执行。
+        consume_poke = getattr(self.reply_engine, "consume_poke_request", None)
+        poke_requested = consume_poke(conversation_id) if callable(consume_poke) else False
         spoken_text = ""
         voice_streamed = False
         delivered_text = ""
@@ -760,6 +763,19 @@ class OneBotEventMixin(OneBotServerMixin):
                 )
             return
         self._mark_smart_group_reply(event, conversation_id, plain_text)
+        if poke_requested and event.get("message_type") == "group":
+            # 回复已成功发出，再执行模型自主决定的戳一戳；戳的是当前对话者。
+            try:
+                await self._send_group_poke(
+                    websocket, event.get("group_id"), event.get("user_id")
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "对话中主动戳人失败 user=%s group=%s: %s",
+                    event.get("user_id"),
+                    event.get("group_id"),
+                    exc,
+                )
         if strategy_limits is not None:
             # 只在真正把消息发出去之后才计数，失败/空回复不消耗配额。
             record_reply(
