@@ -191,3 +191,128 @@ _valid_preference_value = _memory_core._valid_preference_value
 _is_noisy_for_long_memory = _memory_core._is_noisy_for_long_memory
 _is_negative_quality_complaint = _memory_core._is_negative_quality_complaint
 
+
+# ---------------------------------------------------------------------------
+# 全局人物身份：以 QQ 号为稳定锚点，跨私聊/群聚合同一个人的公开信息，
+# 不改变任何写入结构，只在读取时构建一张“人物卡”。
+# ---------------------------------------------------------------------------
+
+def parse_identity_user_id(profile_id: str) -> str | None:
+    """从 private:qq 或 group:gid:user:qq 解析出 QQ 号；其它形态返回 None。"""
+    text = str(profile_id or "")
+    private_match = re.fullmatch(r"private:([^:]+)", text)
+    if private_match:
+        return private_match.group(1)
+    member = _group_member_identity(text)
+    if member:
+        return member[1]
+    return None
+
+
+def _identity_scopes_for_user(conversations: dict, user_id: str) -> list[str]:
+    """该用户的私聊会话 + 所有群成员会话。"""
+    scopes = [f"private:{user_id}"]
+    prefix = ":user:" + user_id
+    for cid in conversations:
+        if cid.endswith(prefix) and cid.startswith("group:"):
+            scopes.append(cid)
+    return scopes
+
+
+def _identity_entry_visible(
+    entry: dict, source_cid: str, is_private: bool, current_group: str | None
+) -> bool:
+    """按当前场景判断一条记忆是否可用，私密/跨群内容不泄露。"""
+    visibility = entry.get("visibility")
+    is_public = visibility == "public" or (
+        isinstance(visibility, list) and "public" in visibility
+    )
+    if is_private:
+        # 私聊里：本人私聊会话全部可见；群里的话只取标记为公开的。
+        if source_cid.startswith("private:"):
+            return True
+        return is_public
+    # 群聊里：本群说的可见；公开项可见；明确授权本群的可见。
+    if entry.get("source_context") == current_group:
+        return True
+    if is_public:
+        return True
+    return visibility == current_group or (
+        isinstance(visibility, list) and current_group in visibility
+    )
+
+
+def _dedupe_identity_entries(entries: list[dict], limit: int) -> list[dict]:
+    """按 key+value 去重，保留最近更新的条目，再截断。"""
+    unique: dict[tuple, dict] = {}
+    for entry in entries:
+        key = (str(entry.get("category")), str(entry.get("key")), str(entry.get("value")))
+        previous = unique.get(key)
+        if previous is None or float(entry.get("updated_at") or 0) >= float(
+            previous.get("updated_at") or 0
+        ):
+            unique[key] = entry
+    ordered = sorted(
+        unique.values(),
+        key=lambda item: float(item.get("updated_at") or item.get("at") or 0),
+        reverse=True,
+    )
+    return ordered[:limit]
+
+
+def build_global_identity(
+    data: dict, profile_id: str, current_nickname: str | None = None
+) -> dict:
+    """构建以 QQ 号为准的全局人物卡；没有可用信息时返回空 dict。"""
+    user_id = parse_identity_user_id(profile_id)
+    if not user_id:
+        return {}
+    conversations = data.get("conversations", {})
+    is_private = str(profile_id).startswith("private:")
+    current_group = None if is_private else f"group:{_group_member_identity(profile_id)[0]}"
+
+    l1_entries: list[dict] = []
+    l2_entries: list[dict] = []
+    nicknames: list[str] = []
+
+    def remember_nickname(name: Any) -> None:
+        name = str(name or "").strip()
+        if name and name not in nicknames:
+            nicknames.append(name)
+
+    if current_nickname:
+        remember_nickname(current_nickname)
+
+    for scope in _identity_scopes_for_user(conversations, user_id):
+        item = conversations.get(scope)
+        if not isinstance(item, dict):
+            continue
+        memory = item.get("structured_memory")
+        if isinstance(memory, dict):
+            for entry in memory.get("l1", []) or []:
+                if isinstance(entry, dict) and _identity_entry_visible(
+                    entry, scope, is_private, current_group
+                ):
+                    l1_entries.append(entry)
+            for entry in memory.get("l2", []) or []:
+                if isinstance(entry, dict) and _identity_entry_visible(
+                    entry, scope, is_private, current_group
+                ):
+                    l2_entries.append(entry)
+        for history_entry in item.get("history", []) or []:
+            if isinstance(history_entry, dict):
+                remember_nickname(history_entry.get("nickname"))
+
+    # 当前昵称固定排在最前，其余作为曾用昵称。
+    known_nicknames = nicknames[:6]
+    result = {
+        "user_id": user_id,
+        "current_nickname": current_nickname or (known_nicknames[0] if known_nicknames else ""),
+        "known_nicknames": known_nicknames,
+        "l1": _dedupe_identity_entries(l1_entries, 8),
+        "l2": _dedupe_identity_entries(l2_entries, 6),
+    }
+    if not result["l1"] and not result["l2"] and not result["current_nickname"]:
+        return {}
+    return result
+

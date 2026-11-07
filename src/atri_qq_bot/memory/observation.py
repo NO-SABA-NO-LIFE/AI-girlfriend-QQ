@@ -497,6 +497,43 @@ class MemoryObservationMixin(MemoryMixin):
             LOGGER.warning("knowledge recall failed: %s", exc)
             return context
 
+    def global_identity_context(
+        self, profile_id: str, current_nickname: str | None = None
+    ) -> str:
+        """把以 QQ 号为准的全局人物卡渲染成提示文本；无信息时返回空串。"""
+        from .helpers import build_global_identity
+
+        self._reload_if_changed()
+        identity = build_global_identity(self._data, profile_id, current_nickname)
+        if not identity:
+            return ""
+
+        def fact_line(entry: dict[str, Any]) -> str:
+            key = str(entry.get("key") or entry.get("category") or "").split(":", 1)[0]
+            value = str(entry.get("value") or "").strip()
+            return f"{key}：{value}" if key else value
+
+        lines = [
+            "【人物身份卡】这是你对眼前这个人的整体认识，用来确保不管昵称怎么改、在哪个群，你都认得是同一个人。",
+            f"当前昵称：{identity['current_nickname'] or '未知'}",
+        ]
+        extra_names = [
+            name
+            for name in identity.get("known_nicknames", [])
+            if name != identity["current_nickname"]
+        ]
+        if extra_names:
+            lines.append("曾用昵称：" + "、".join(extra_names))
+        if identity["l1"]:
+            lines.append("你对 TA 的稳定了解：" + "；".join(fact_line(e) for e in identity["l1"]))
+        if identity["l2"]:
+            lines.append("最近和 TA 相关的事：" + "；".join(fact_line(e) for e in identity["l2"]))
+        lines.append(
+            "自然地使用这些信息，像本来就认识一样；不要逐条复述、不要说这是身份卡或数据库，"
+            "也不要把 QQ 号念出来；私密的事只在合适的场景提，别对外声张。"
+        )
+        return "\n".join(lines)
+
     def retrieval_status(self) -> dict[str, Any]:
         """为 WebUI/诊断提供索引状态，不暴露任何跨会话的记忆内容。"""
 

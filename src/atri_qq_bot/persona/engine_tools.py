@@ -282,6 +282,13 @@ class EngineToolsMixin(PersonaEngineMixin):
             messages.append(
                 {"role": "system", "content": nickname_hint}
             )
+        # 以 QQ 号为准的全局人物卡：跨私聊/群稳定识别同一个人并记住其公开信息。
+        if not repair_mode:
+            identity_context = self.memory.global_identity_context(
+                profile_id or conversation_id, nickname
+            )
+            if identity_context:
+                messages.append({"role": "system", "content": identity_context})
         if not human_pipeline and not visual_turn:
             messages.extend(self._history[conversation_id])
         if tool_context is not None:
