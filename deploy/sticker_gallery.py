@@ -26,6 +26,9 @@ import html
 import json
 import mimetypes
 import sys
+import threading
+import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
@@ -35,6 +38,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 IMAGE_SUFFIXES = {".gif", ".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 REVIEW_DIR = "_review"
+# Pending review images older than this are removed automatically.
+REVIEW_TTL_SECONDS = 2 * 60 * 60
+# How often the background cleanup thread scans the review area.
+REVIEW_SWEEP_SECONDS = 10 * 60
 
 # Manual classification choices (the core 12 emotions).
 MANUAL_EMOTIONS = [
@@ -87,6 +94,42 @@ def _move_with_sidecar(source: Path, target: Path) -> None:
         sidecar.rename(_unique_target(target.parent, target.name + ".json"))
 
 
+def _delete_image_and_sidecar(image: Path) -> None:
+    image.unlink()
+    sidecar = image.with_suffix(image.suffix + ".json")
+    if sidecar.exists():
+        sidecar.unlink()
+
+
+def purge_expired_review(sticker_dir: Path, ttl_seconds: int) -> int:
+    """Delete review images older than ttl; return the number removed."""
+    review = sticker_dir / REVIEW_DIR
+    if not review.exists():
+        return 0
+    now = time.time()
+    removed = 0
+    for image in review.iterdir():
+        if not image.is_file() or image.suffix.lower() not in IMAGE_SUFFIXES:
+            continue
+        age = now - image.stat().st_mtime
+        if age > ttl_seconds:
+            _delete_image_and_sidecar(image)
+            removed += 1
+    return removed
+
+
+def _start_review_sweeper(sticker_dir: Path, ttl_seconds: int) -> None:
+    def loop() -> None:
+        while True:
+            time.sleep(REVIEW_SWEEP_SECONDS)
+            try:
+                purge_expired_review(sticker_dir, ttl_seconds)
+            except Exception as exc:
+                sys.stderr.write(f"[gallery] review sweep failed: {exc}\n")
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
 class GalleryHandler(BaseHTTPRequestHandler):
     # Subclasses set these on the server object; keep defaults for typing.
     sticker_dir = Path(".")
@@ -128,6 +171,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
                     self._handle_approve(form)
                 elif parsed.path == "/api/manual":
                     self._handle_manual(form)
+                elif parsed.path == "/api/reclassify":
+                    self._handle_reclassify(form)
                 elif parsed.path == "/api/delete":
                     self._handle_delete(form)
                 else:
@@ -207,6 +252,21 @@ class GalleryHandler(BaseHTTPRequestHandler):
         _move_with_sidecar(image, target)
         self._send_json(200, {"ok": True, "emotion": emotion})
 
+    def _handle_reclassify(self, form: dict) -> None:
+        image = self._resolve_inside_root(form.get("path", ""))
+        if image is None:
+            raise ValueError("invalid image path")
+        if image.parent.name == REVIEW_DIR:
+            raise ValueError("review images use manual classification")
+        emotion = _normalize_emotion(form.get("emotion", ""))
+        if emotion not in MANUAL_EMOTIONS:
+            raise ValueError("invalid emotion")
+        if emotion == image.parent.name:
+            raise ValueError("image is already in that category")
+        target = _unique_target(self.server.sticker_dir / emotion, image.name)
+        _move_with_sidecar(image, target)
+        self._send_json(200, {"ok": True, "emotion": emotion})
+
     def _handle_delete(self, form: dict) -> None:
         image = self._resolve_inside_root(form.get("path", ""))
         if image is None:
@@ -269,9 +329,14 @@ class GalleryHandler(BaseHTTPRequestHandler):
             '</div>'
         )
 
-    def _delete_action(self, rel: str) -> str:
+    def _library_actions(self, rel: str) -> str:
+        options = "".join(
+            f'<option value="{em}">{em}</option>' for em in MANUAL_EMOTIONS
+        )
         return (
             '<div class="actions">'
+            f'<select class="pick">{options}</select>'
+            f'<button class="ghost" onclick="reclassify(this,\'{rel}\')">移动</button>'
             f'<button class="danger" onclick="del(this,\'{rel}\')">删除</button>'
             '</div>'
         )
@@ -311,7 +376,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
                     f'value="{html.escape(rel)}" onchange="updateBar()"></label>'
                     f'<a target="_blank" href="/img?path={quote(rel)}">'
                     f'<img loading="lazy" src="/img?path={quote(rel)}"></a>'
-                    f'{self._delete_action(rel)}</div>'
+                    f'{self._library_actions(rel)}</div>'
                 )
             cards.append("</div>")
 
@@ -390,6 +455,12 @@ function manual(btn, path) {{
     if (res.ok) location.reload(); else alert(res.error);
   }});
 }}
+function reclassify(btn, path) {{
+  const emotion = btn.parentElement.querySelector('.pick').value;
+  post('/api/reclassify', {{path, emotion}}).then(res => {{
+    if (res.ok) location.reload(); else alert(res.error);
+  }});
+}}
 function del(btn, path) {{
   if (!confirm('确定删除这张图？此操作不可恢复。')) return;
   post('/api/delete', {{path}}).then(res => {{
@@ -434,6 +505,10 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8788)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--dir", default="", help="sticker directory")
+    parser.add_argument(
+        "--review-ttl", type=int, default=REVIEW_TTL_SECONDS,
+        help="seconds before a pending review image is auto-deleted",
+    )
     args = parser.parse_args()
 
     sticker_dir = Path(args.dir).resolve() if args.dir else _default_sticker_dir().resolve()
@@ -441,9 +516,16 @@ def main() -> int:
         print(f"sticker dir not found: {sticker_dir}")
         return 1
 
+    # Purge anything already overdue, then keep sweeping in the background.
+    purged = purge_expired_review(sticker_dir, args.review_ttl)
+    if purged:
+        print(f"removed {purged} expired review image(s)")
+    _start_review_sweeper(sticker_dir, args.review_ttl)
+
     server = ThreadingHTTPServer((args.host, args.port), GalleryHandler)
     server.sticker_dir = sticker_dir
     print(f"serving {sticker_dir}")
+    print(f"review images auto-delete after {args.review_ttl}s")
     print(f"open http://<server-ip>:{args.port} in your local browser")
     print("press Ctrl+C to stop")
     try:
