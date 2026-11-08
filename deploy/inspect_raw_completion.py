@@ -40,20 +40,39 @@ def main() -> int:
     print("endpoint:", url)
     print("model:", config.openai_model)
     print("=" * 60)
-    with httpx.Client(timeout=30.0) as client:
-        response = client.post(url, headers=headers, json=payload)
-        print("HTTP", response.status_code)
-        if response.status_code != 200:
-            print(response.text[:500])
-            return 1
-        data = response.json()
 
-    # Print the top-level and message keys, then the full message object.
-    print("top-level keys:", list(data.keys()))
-    message = data["choices"][0]["message"]
-    print("message keys:", list(message.keys()))
-    print("=" * 60)
-    print(json.dumps(message, ensure_ascii=False, indent=2)[:2500])
+    # Each candidate reasoning-control parameter is tried in turn. The first
+    # request is the plain baseline. We print content as repr so CJK characters
+    # survive the VNC terminal as \\uXXXX escapes.
+    variants: list[tuple[str, dict]] = [
+        ("baseline", {}),
+        ("reasoning_effort=none", {"reasoning_effort": "none"}),
+        ("reasoning_effort=minimal", {"reasoning_effort": "minimal"}),
+        ("thinking.disabled", {"thinking": {"type": "disabled"}}),
+        ("extra_body google budget 0", {"extra_body": {"google": {"thinking_config": {"thinking_budget": 0}}}}),
+    ]
+
+    with httpx.Client(timeout=30.0) as client:
+        for label, extra in variants:
+            run_payload = dict(payload)
+            run_payload.update(extra)
+            try:
+                response = client.post(url, headers=headers, json=run_payload)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[{label}] request error: {exc!r}")
+                print("-" * 60)
+                continue
+            print(f"[{label}] HTTP {response.status_code}")
+            if response.status_code != 200:
+                print("  body:", response.text[:300])
+                print("-" * 60)
+                continue
+            body = response.json()
+            msg = body["choices"][0]["message"]
+            print("  message keys:", list(msg.keys()))
+            content = str(msg.get("content") or "")
+            print("  content repr:", repr(content[:900]))
+            print("-" * 60)
     return 0
 
 
