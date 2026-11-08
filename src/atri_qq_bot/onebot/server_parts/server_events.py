@@ -592,6 +592,21 @@ class OneBotEventMixin(OneBotServerMixin):
                 model_type=("vision" if has_current_visual or getattr(tool_context, "visual_data", None) else "chat"),
                 model_name=self._delivery_model_name("vision" if has_current_visual or getattr(tool_context, "visual_data", None) else "chat"),
             )
+            # 2026-11-07 改动：回复失败不再完全静默。
+            # 旧逻辑记录后直接 return，用户侧收不到任何东西（表现为“AI 卡住”，
+            # 日志只有 ReadTimeout）。现在发一句降级话术，让用户知道这轮没接住、
+            # 可以再说一次，而不是干等。只发文字，不带引用、不延迟，避免二次阻塞。
+            try:
+                await self.send_reply(
+                    websocket,
+                    event,
+                    "唔……这轮我想太久，脑袋卡了一下。你再说一遍？",
+                    model_type="chat",
+                    first_delay=False,
+                    group_quote=False,
+                )
+            except Exception as send_exc:  # noqa: BLE001
+                LOGGER.warning("失败兜底消息发送失败：%s", send_exc)
             if self.cognition_shadow is not None:
                 self.cognition_shadow.record_live_outcome(
                     turn_id,
