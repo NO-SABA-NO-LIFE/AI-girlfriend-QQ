@@ -296,6 +296,22 @@ def _strip_placeholder_text(text: str) -> str:
     return _PLACEHOLDER_RE.sub("", str(text or "")).strip()
 
 
+def _quoted_sender_is_bot(event: dict[str, Any], bot_qq: int) -> bool | None:
+    """判断被引用消息的发送者是不是机器人。
+
+    与 reply_policy 中的同名函数逻辑一致（在此本地实现以避免循环导入）。
+    NapCat 通常在事件顶层附带 ``reply`` 对象（含 sender）。无法确认时返回
+    None，而不是猜测，由调用方按保守策略处理。
+    """
+    reply = event.get("reply")
+    if not isinstance(reply, dict):
+        return None
+    sender = reply.get("sender")
+    if not isinstance(sender, dict) or sender.get("user_id") in (None, ""):
+        return None
+    return str(sender.get("user_id")) == str(bot_qq)
+
+
 def _looks_like_direct_continuation(
     event: dict[str, Any],
     text: str,
@@ -319,10 +335,11 @@ def _looks_like_direct_continuation(
     if mentions_other and not has_reply:
         return False
 
-    # 引用回复明确是在对机器人说话；其余情况先剥掉图片/表情占位符，
-    # 只看用户有没有输入真实文字。
+    # 引用回复：只有引用的是机器人时才明确是在对机器人说话。能确认引用的是
+    # 别人（不是机器人）时，这是在和别人对话，不当成续聊；无法确认被引用者
+    # 时按保守策略触发，避免漏回。
     if has_reply:
-        return True
+        return _quoted_sender_is_bot(event, bot_qq) is not False
     normalized = str(text or "").replace("@群友", "").strip()
     real_text = _strip_placeholder_text(normalized)
     if not real_text:

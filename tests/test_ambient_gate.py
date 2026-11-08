@@ -99,10 +99,11 @@ def test_gate_fails_closed_on_network_error(monkeypatch) -> None:
 def test_ambient_reply_triggers_when_gate_true() -> None:
     server = _make_server()
 
-    async def fake_gate(text: str) -> bool:
+    async def fake_gate(text: str, group_context: str = "") -> bool:
         return True
 
     server._llm_ambient_gate_should_reply = fake_gate
+    server._format_ambient_group_context = lambda event: ""
     event = _base_event()
     assert asyncio.run(server._maybe_ambient_group_reply(event, "有人在吗")) is True
 
@@ -111,11 +112,12 @@ def test_ambient_reply_respects_cooldown() -> None:
     server = _make_server()
     gate_calls: list[str] = []
 
-    async def fake_gate(text: str) -> bool:
+    async def fake_gate(text: str, group_context: str = "") -> bool:
         gate_calls.append(text)
         return True
 
     server._llm_ambient_gate_should_reply = fake_gate
+    server._format_ambient_group_context = lambda event: ""
     event = _base_event()
     first = asyncio.run(server._maybe_ambient_group_reply(event, "第一条"))
     second = asyncio.run(server._maybe_ambient_group_reply(event, "第二条"))

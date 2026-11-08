@@ -144,6 +144,40 @@ def test_active_session_expires_and_does_not_intercept_other_mentions() -> None:
     )
 
 
+def test_continuation_quoting_other_member_is_not_bot_dialogue() -> None:
+    store = GroupReplyFocusStore(active_session_ttl_seconds=300)
+    # 该成员此前和机器人有过对话，会话仍在有效期内。
+    mention = _group_event(10001, _at_bot(), _text("在吗"))
+    store.open_session(mention, nickname="A", now=10)
+
+    # 新消息引用了别人、并 @ 别人，是在和别人说话，不能当成对机器人的续聊。
+    quoting_other = _group_event(
+        10001,
+        {"type": "reply", "data": {"id": "555"}},
+        {"type": "at", "data": {"qq": "10002"}},
+        _text("把你的给我"),
+    )
+    quoting_other["reply"] = {"sender": {"user_id": 10002}}
+    assert not store.is_active_continuation(
+        quoting_other,
+        "@群友 把你的给我",
+        now=20,
+    )
+
+    # 对照：引用机器人时仍应触发续聊。
+    quoting_bot = _group_event(
+        10001,
+        {"type": "reply", "data": {"id": "556"}},
+        _text("那你说呢"),
+    )
+    quoting_bot["reply"] = {"sender": {"user_id": BOT_QQ}}
+    assert store.is_active_continuation(
+        quoting_bot,
+        "那你说呢",
+        now=21,
+    )
+
+
 def test_group_prompt_marks_same_sender_focus_as_mandatory(monkeypatch, tmp_path) -> None:
     config = BotConfig(
         bot_qq=BOT_QQ,

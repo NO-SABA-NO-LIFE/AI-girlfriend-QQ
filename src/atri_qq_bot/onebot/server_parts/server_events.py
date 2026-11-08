@@ -867,16 +867,53 @@ class OneBotEventMixin(OneBotServerMixin):
         if now - float(self._last_ambient_group_reply_at.get(group_id, 0.0)) < cooldown:
             return False
         # 不再随机掷骰子：交给模型结合聊天内容判断这句话值不值得接。
-        if not await self._llm_ambient_gate_should_reply(plain_text):
+        # 传入近期群聊上下文，让模型能分辨这条消息是不是别人之间的对话。
+        group_context = self._format_ambient_group_context(event)
+        if not await self._llm_ambient_gate_should_reply(plain_text, group_context):
             return False
         self._last_ambient_group_reply_at[group_id] = now
         return True
 
-    async def _llm_ambient_gate_should_reply(self, plain_text: str) -> bool:
+    def _format_ambient_group_context(
+        self,
+        event: dict[str, Any],
+        limit: int = 8,
+    ) -> str:
+        """格式化近期群聊记录（带说话人昵称），供接话判断理解对话对象。
+
+        当前消息在后续流程才写入历史，因此这里取到的都是它之前的记录，
+        无需排除当前消息。任何读取失败都返回空串，退化为只看单条文本。
+        """
+        group_id = str(event.get("group_id") or "")
+        if not group_id:
+            return ""
+        try:
+            entries = self.reply_engine.memory.recent_history(
+                f"group:{group_id}", limit=limit
+            )
+        except Exception:
+            LOGGER.debug("读取近期群聊上下文失败", exc_info=True)
+            return ""
+        lines: list[str] = []
+        for entry in entries:
+            text = str(entry.get("text") or "").strip()
+            if not text:
+                continue
+            if entry.get("role") == "assistant":
+                speaker = "亚托莉"
+            else:
+                speaker = str(entry.get("nickname") or "群友").strip() or "群友"
+            lines.append(f"{speaker}: {text[:120]}")
+        return "\n".join(lines)
+
+    async def _llm_ambient_gate_should_reply(
+        self, plain_text: str, group_context: str = ""
+    ) -> bool:
         """调用模型判断当前这条群消息是否值得接话。
 
         走一次很轻的 chat 调用（只要求回答“接/不接”，max_tokens 极小）。
-        任何网络、模型或解析异常都保守返回 False（默认不接），只记日志，
+        若有近期群聊记录则一并提供，帮助模型判断这条消息是不是别人之间的
+        对话。任何网络、模型或解析异常都保守返回 False（默认不接），只记日志，
         绝不让接话判断的故障影响主消息链路。
         """
         try:
@@ -884,11 +921,21 @@ class OneBotEventMixin(OneBotServerMixin):
             import httpx
 
             system_prompt = load_prompt("ambient_gate")
+            new_message = str(plain_text or "")[:500]
+            if group_context:
+                user_content = (
+                    "近期群聊记录：\n"
+                    f"{group_context}\n\n"
+                    "现在收到的新消息（没有艾特你）：\n"
+                    f"{new_message}"
+                )
+            else:
+                user_content = new_message
             payload = {
                 "model": self.config.openai_model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": str(plain_text or "")[:500]},
+                    {"role": "user", "content": user_content},
                 ],
                 "max_tokens": 10,
                 "temperature": 0.2,
