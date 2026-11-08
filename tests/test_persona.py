@@ -410,6 +410,59 @@ def test_normalize_reply_removes_ollama_thinking_trace() -> None:
     assert reply == "我只发最终回复。"
 
 
+def test_normalize_reply_strips_markdown_but_keeps_words() -> None:
+    raw = (
+        "### **推荐方案：拉面**\n\n"
+        "**推荐理由：**\n"
+        "- **方便快手**：好做又省事\n"
+        "- **营养均衡**：有蛋白质\n\n"
+        "---\n\n"
+        "热乎的拉面最适合你。"
+    )
+    reply = _normalize_reply(raw)
+
+    assert "###" not in reply
+    assert "**" not in reply
+    assert "---" not in reply
+    assert "推荐方案：拉面" in reply
+    assert "方便快手：好做又省事" in reply
+    assert "热乎的拉面最适合你。" in reply
+
+
+def test_normalize_reply_removes_english_reasoning_before_chinese() -> None:
+    raw = (
+        'I see a playful image from "Wild Great YY" with a dinner query. '
+        "My response must be short and sassy. I'll keep it punchy."
+        "喂，开场叫谁猪公呢！本机可是高性能机器人。"
+    )
+    reply = _normalize_reply(raw)
+
+    assert reply == "喂，开场叫谁猪公呢！本机可是高性能机器人。"
+
+
+def test_normalize_reply_keeps_legitimate_english_terms_in_chinese() -> None:
+    raw = "这个 API 的 timeout 设成 10 秒就好，我帮你看看代码。"
+    reply = _normalize_reply(raw)
+
+    assert reply == raw
+
+
+def test_normalize_reply_keeps_pure_english_answer() -> None:
+    raw = "Sure, I can help you with that. Let me know the details."
+    reply = _normalize_reply(raw)
+
+    assert reply == raw
+
+
+def test_normalize_reply_drops_bold_english_thinking_title() -> None:
+    raw = "@野生大YY **Considering Dinner Choices**"
+    reply = _normalize_reply(raw)
+
+    assert "**" not in reply
+    assert "Considering" not in reply
+    assert "@野生大YY" in reply
+
+
 def test_env_file_overrides_user_environment(monkeypatch, tmp_path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(

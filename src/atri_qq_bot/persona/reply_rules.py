@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from typing import Any
 
 from . import core as _core
@@ -12,6 +14,116 @@ def _sync_module_globals() -> None:
 
 
 _sync_module_globals()
+
+# Markdown heading hashes at the start of a line, e.g. "### 标题".
+_MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*", flags=re.MULTILINE)
+# Bold / italic paired markers; bold is handled before single markers.
+_MD_BOLD_RE = re.compile(r"\*\*\s*(.+?)\s*\*\*|__\s*(.+?)\s*__", flags=re.DOTALL)
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*\s*([^*\n]+?)\s*\*(?!\*)|(?<!_)_\s*([^_\n]+?)\s*_(?!_)", flags=re.DOTALL)
+# A horizontal rule occupying its own line: ---, ***, ___ (3+ chars).
+_MD_RULE_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$", flags=re.MULTILINE)
+# Bullet marker at the start of a line: "- ", "* ", "+ ".
+_MD_BULLET_RE = re.compile(r"^\s{0,3}[-*+]\s+", flags=re.MULTILINE)
+# Inline code backticks; keep the text, drop the backticks.
+_MD_CODE_RE = re.compile(r"`+([^`]+?)`+")
+# Leftover stray bold/italic marker characters that were not paired.
+_MD_STRAY_STAR_RE = re.compile(r"\*{1,2}|_{1,2}")
+
+# Reasoning phrases that mark an English paragraph as internal reasoning rather
+# than a user-facing answer. Matched case-insensitively against the English head.
+_REASONING_HINT_WORDS = (
+    "i need to",
+    "i'll",
+    "i will",
+    "i must",
+    "i see",
+    "i'm",
+    "my response",
+    "my answer",
+    "my reply",
+    "let me",
+    "considering",
+    "analyze",
+    "analyse",
+    "the user",
+    "response must",
+    "i should",
+    "first,",
+    "step 1",
+    "plan:",
+)
+# A run of English/ASCII text (letters, digits, spaces, common punctuation).
+_ENGLISH_RUN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ,.!?;:'\"()\-/&%+]*")
+
+
+def _strip_markdown_for_chat(text: str) -> str:
+    """Remove Markdown formatting so the message reads as plain chat text.
+
+    The words themselves are preserved; only structural markers (headings,
+    bold/italic stars, rules, bullets, code backticks) are removed.
+    """
+    text = _MD_RULE_RE.sub("", text)
+    text = _MD_HEADING_RE.sub("", text)
+
+    # Paired markers: replace with the captured inner text.
+    def _bold_repl(match: re.Match) -> str:
+        return match.group(1) if match.group(1) is not None else match.group(2)
+
+    text = _MD_BOLD_RE.sub(_bold_repl, text)
+    text = _MD_ITALIC_RE.sub(
+        lambda m: m.group(1) if m.group(1) is not None else m.group(2),
+        text,
+    )
+    text = _MD_CODE_RE.sub(lambda m: m.group(1), text)
+    text = _MD_BULLET_RE.sub("", text)
+    # Any unpaired marker left behind is dropped outright.
+    text = _MD_STRAY_STAR_RE.sub("", text)
+    return text
+
+
+def _strip_english_reasoning(text: str) -> str:
+    """Drop a leading English internal-reasoning paragraph.
+
+    Only triggers when the message also contains a Chinese answer: the English
+    head must look like first-person reasoning (not a legitimate English reply).
+    Pure English conversations are left untouched.
+    """
+    if not re.search(r"[\u4e00-\u9fff]", text):
+        return text
+
+    # Walk the text from the start, skipping leading whitespace and any leading
+    # mention such as "@昵称" (which may itself be Chinese).
+    pos = 0
+    length = len(text)
+    while pos < length:
+        ch = text[pos]
+        if ch.isspace():
+            pos += 1
+            continue
+        # Allow a leading "@昵称 " mention before the English run.
+        if ch == "@":
+            mention_end = pos + 1
+            while mention_end < length and not text[mention_end].isspace() and text[mention_end] not in ".,!?":
+                mention_end += 1
+            pos = mention_end
+            continue
+        break
+
+    match = _ENGLISH_RUN_RE.match(text, pos)
+    if not match:
+        return text
+    head = match.group(0)
+    # Require a substantial English run (>= 3 words) carrying a reasoning cue.
+    word_count = len(re.findall(r"[A-Za-z]+", head))
+    lowered = head.lower()
+    looks_like_reasoning = any(hint in lowered for hint in _REASONING_HINT_WORDS)
+    if word_count >= 3 and looks_like_reasoning:
+        remainder = text[match.end():]
+        # Keep the leading mention (if any); drop only the English reasoning run.
+        prefix = text[:pos].rstrip()
+        cleaned = (prefix + " " + remainder).strip() if prefix else remainder.strip()
+        return cleaned
+    return text
 
 def _scene_control_prompt(
     conversation_id: str,
@@ -383,9 +495,12 @@ def _normalize_reply(text: str) -> str:
     )
     text = re.sub(r"^\s*(Thinking|思考过程|分析过程)[:：]?.*?\n+", "", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"^\s*(意图识别|分析|思考过程)[:：].*?\n+", "", text, flags=re.DOTALL)
+    # Remove Markdown structure, then any leaked English reasoning paragraph.
+    text = _strip_markdown_for_chat(text)
+    text = _strip_english_reasoning(text)
     text = text.strip()
     text = re.sub(r"^(亚托莉[:：]\s*)", "", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+\n", "\n", text))
     return text.strip()
 
 
