@@ -117,17 +117,21 @@ class GalleryHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length).decode("utf-8") if length else ""
-        form = {k: v[0] for k, v in parse_qs(raw).items()}
         parsed = urlparse(self.path)
         try:
-            if parsed.path == "/api/approve":
-                self._handle_approve(form)
-            elif parsed.path == "/api/manual":
-                self._handle_manual(form)
-            elif parsed.path == "/api/delete":
-                self._handle_delete(form)
+            if parsed.path == "/api/batch-delete":
+                # JSON body: {"paths": ["rel1", "rel2", ...]}
+                self._handle_batch_delete(json.loads(raw or "{}"))
             else:
-                self._send_json(404, {"ok": False, "error": "not found"})
+                form = {k: v[0] for k, v in parse_qs(raw).items()}
+                if parsed.path == "/api/approve":
+                    self._handle_approve(form)
+                elif parsed.path == "/api/manual":
+                    self._handle_manual(form)
+                elif parsed.path == "/api/delete":
+                    self._handle_delete(form)
+                else:
+                    self._send_json(404, {"ok": False, "error": "not found"})
         except Exception as exc:  # never leak a traceback to the browser
             self._send_json(500, {"ok": False, "error": str(exc)})
 
@@ -213,6 +217,24 @@ class GalleryHandler(BaseHTTPRequestHandler):
             sidecar.unlink()
         self._send_json(200, {"ok": True})
 
+    def _handle_batch_delete(self, body: dict) -> None:
+        paths = body.get("paths") or []
+        if not isinstance(paths, list) or not paths:
+            raise ValueError("no paths provided")
+        deleted = 0
+        failed: list[str] = []
+        for rel in paths:
+            image = self._resolve_inside_root(rel)
+            if image is None:
+                failed.append(str(rel))
+                continue
+            image.unlink()
+            sidecar = image.with_suffix(image.suffix + ".json")
+            if sidecar.exists():
+                sidecar.unlink()
+            deleted += 1
+        self._send_json(200, {"ok": True, "deleted": deleted, "failed": failed})
+
     def _send_image(self, query: dict[str, list[str]]) -> None:
         target = self._resolve_inside_root((query.get("path") or [""])[0])
         if target is None:
@@ -269,6 +291,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 rel = path.relative_to(root).as_posix()
                 cards.append(
                     '<div class="cell review">'
+                    f'<label class="check"><input type="checkbox" class="pickbox" '
+                    f'value="{html.escape(rel)}" onchange="updateBar()"></label>'
                     f'<img loading="lazy" src="/img?path={quote(rel)}">'
                     f'{self._review_actions(rel)}</div>'
                 )
@@ -283,6 +307,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
                 rel = path.relative_to(root).as_posix()
                 cards.append(
                     '<div class="cell">'
+                    f'<label class="check"><input type="checkbox" class="pickbox" '
+                    f'value="{html.escape(rel)}" onchange="updateBar()"></label>'
                     f'<a target="_blank" href="/img?path={quote(rel)}">'
                     f'<img loading="lazy" src="/img?path={quote(rel)}"></a>'
                     f'{self._delete_action(rel)}</div>'
@@ -327,9 +353,24 @@ class GalleryHandler(BaseHTTPRequestHandler):
   button.ghost {{ background:#3a4150; }}
   button.danger {{ background:#b0413e; }}
   .pick {{ font-size:11px; flex:1; min-width:64px; }}
+  .check {{ position:absolute; top:6px; left:6px; z-index:5; padding:3px;
+           background:rgba(0,0,0,.55); border-radius:5px; line-height:0; }}
+  .cell {{ position:relative; }}
+  .check input {{ width:15px; height:15px; cursor:pointer; margin:0; }}
+  #batchbar {{ position:fixed; left:0; right:0; bottom:0; z-index:20;
+              display:none; background:#232733; border-top:1px solid #3a4150;
+              padding:10px 18px; align-items:center; gap:14px; font-size:13px; }}
+  #batchbar button {{ font-size:12px; padding:7px 12px; }}
+  #batchbar .spacer {{ flex:1; }}
 </style></head><body>
 <header><h1>Sticker Gallery — {total} images</h1><nav>{nav}</nav></header>
 <main>{''.join(cards)}</main>
+<div id="batchbar">
+  <span id="batchcount">已选 0 张</span>
+  <button class="ghost" onclick="toggleAll()">全选/取消全选</button>
+  <span class="spacer"></span>
+  <button class="danger" onclick="batchDelete()">批量删除</button>
+</div>
 <script>
 function post(url, data) {{
   return fetch(url, {{method:'POST',
@@ -354,6 +395,35 @@ function del(btn, path) {{
   post('/api/delete', {{path}}).then(res => {{
     if (res.ok) location.reload(); else alert(res.error);
   }});
+}}
+function selectedPaths() {{
+  return Array.from(document.querySelectorAll('.pickbox:checked')).map(c => c.value);
+}}
+function updateBar() {{
+  const n = selectedPaths().length;
+  const bar = document.getElementById('batchbar');
+  bar.style.display = n ? 'flex' : 'none';
+  document.getElementById('batchcount').textContent = '已选 ' + n + ' 张';
+}}
+function toggleAll() {{
+  const boxes = Array.from(document.querySelectorAll('.pickbox'));
+  const anyUnchecked = boxes.some(c => !c.checked);
+  boxes.forEach(c => {{ c.checked = anyUnchecked; }});
+  updateBar();
+}}
+function batchDelete() {{
+  const paths = selectedPaths();
+  if (!paths.length) return;
+  if (!confirm('确定批量删除选中的 ' + paths.length + ' 张图？此操作不可恢复。')) return;
+  fetch('/api/batch-delete', {{method:'POST',
+    headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{paths}})}})
+    .then(r => r.json()).then(res => {{
+      if (res.ok) {{
+        if (res.failed && res.failed.length) alert('部分删除失败：' + res.failed.join(', '));
+        location.reload();
+      }} else alert(res.error);
+    }}).catch(alert);
 }}
 </script></body></html>"""
         self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
