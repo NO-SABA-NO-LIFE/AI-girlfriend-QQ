@@ -635,6 +635,59 @@ def test_group_smart_mode_does_not_reply_to_random_group_chatter() -> None:
     assert not should_reply(event, 100000001, "smart")
 
 
+def test_group_smart_mode_quoting_other_member_is_not_replied() -> None:
+    # 无 at 段、引用的是别人（场景2）：这是在回应别人，不该抢答。
+    event = {
+        "post_type": "message",
+        "self_id": 100000001,
+        "message_type": "group",
+        "group_id": 20001,
+        "user_id": 10001,
+        "message": [
+            {"type": "reply", "data": {"id": "777"}},
+            {"type": "text", "data": {"text": "叫我干嘛"}},
+        ],
+        "reply": {"sender": {"user_id": 10002}},
+    }
+
+    assert not should_reply(event, 100000001, "smart")
+
+
+def test_group_smart_mode_quoting_bot_is_replied() -> None:
+    # 引用机器人：明确是在对机器人说话，应回复。
+    event = {
+        "post_type": "message",
+        "self_id": 100000001,
+        "message_type": "group",
+        "group_id": 20001,
+        "user_id": 10001,
+        "message": [
+            {"type": "reply", "data": {"id": "778"}},
+            {"type": "text", "data": {"text": "那你说呢"}},
+        ],
+        "reply": {"sender": {"user_id": 100000001}},
+    }
+
+    assert should_reply(event, 100000001, "smart")
+
+
+def test_group_smart_mode_quoting_unconfirmed_sender_is_not_replied() -> None:
+    # 引用但无法确认被引用者（get_msg 也失败）：默认不抢话。
+    event = {
+        "post_type": "message",
+        "self_id": 100000001,
+        "message_type": "group",
+        "group_id": 20001,
+        "user_id": 10001,
+        "message": [
+            {"type": "reply", "data": {"id": "779"}},
+            {"type": "text", "data": {"text": "叫我干嘛"}},
+        ],
+    }
+
+    assert not should_reply(event, 100000001, "smart")
+
+
 def test_group_message_replies_when_bot_is_mentioned() -> None:
     event = {
         "post_type": "message",

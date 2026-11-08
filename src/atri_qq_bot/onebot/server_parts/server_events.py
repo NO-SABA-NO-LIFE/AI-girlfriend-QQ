@@ -8,7 +8,10 @@ from .server_support import OneBotServerMixin, _sync_server_globals
 # 显式导入而不是依赖 _sync_server_globals 的全局注入：注入只在**实例**属性访问时
 # 才把 server.py 的名字塞进本模块，直接以类方法调用（测试、脚本）时会 NameError。
 from .helpers import _conversation_id
-from ..message_parser import group_increase_text  # type: ignore[import-not-found]
+from ..message_parser import (  # type: ignore[import-not-found]
+    extract_reply_message_id,
+    group_increase_text,
+)
 from ..reply_policy import (  # type: ignore[import-not-found]
     _at_segment_targets,
     _has_reply_segment,
@@ -132,6 +135,11 @@ class OneBotEventMixin(OneBotServerMixin):
                 event.get("user_id"),
             )
             return
+
+        # 触发判断前先确定被引用者：能补齐 event.reply 时，后续"引用了谁"的
+        # 判断就是确定值，而不是在信息缺失时盲目抢答。
+        if is_message and _has_reply_segment(event):
+            await self._ensure_quoted_sender_id(websocket, event)
 
         preliminary_reply = push_event or poke_command_hit or should_reply(
             event,
@@ -838,6 +846,51 @@ class OneBotEventMixin(OneBotServerMixin):
                     model_name=delivery_model_name,
                 )
             )
+
+    async def _ensure_quoted_sender_id(
+        self,
+        websocket: Any,
+        event: dict[str, Any],
+    ) -> str | None:
+        """在触发判断前确定被引用消息的发送者 QQ。
+
+        优先使用 NapCat 顶层附带的 reply 对象；若缺失则用 reply 段里的消息
+        ID 调 get_msg 拉取，并把 sender 回填到 event["reply"]，让后续判断函数
+        读到确定值。任何失败都返回 None，绝不根据 ID 猜测。
+        """
+        existing = event.get("reply")
+        if isinstance(existing, dict):
+            sender = existing.get("sender")
+            if isinstance(sender, dict) and sender.get("user_id") not in (None, ""):
+                return str(sender.get("user_id"))
+
+        message_id = extract_reply_message_id(event.get("message"))
+        if not message_id:
+            return None
+        request_id = int(message_id) if str(message_id).isdigit() else message_id
+        try:
+            result = await self.call_action_and_wait(
+                websocket,
+                "get_msg",
+                {"message_id": request_id},
+                3.0,
+            )
+        except Exception:
+            LOGGER.debug("get_msg 拉取被引用消息失败", exc_info=True)
+            return None
+        data = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(data, dict):
+            return None
+        sender = data.get("sender")
+        if not isinstance(sender, dict) or sender.get("user_id") in (None, ""):
+            return None
+        # 回填 event["reply"]，让现有 _quoted_sender_is_bot 逻辑复用确定值。
+        reply_obj = dict(existing) if isinstance(existing, dict) else {}
+        reply_obj["sender"] = sender
+        if data.get("message") is not None:
+            reply_obj["message"] = data.get("message")
+        event["reply"] = reply_obj
+        return str(sender.get("user_id"))
 
     async def _maybe_ambient_group_reply(
         self,

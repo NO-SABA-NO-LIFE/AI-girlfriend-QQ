@@ -332,14 +332,15 @@ def _looks_like_direct_continuation(
         not in {"", str(bot_qq)}
         for segment in segments
     )
-    if mentions_other and not has_reply:
+    # 消息明确 @ 了别人（且没 @ 机器人）：这是在对别人说话，不抢话，
+    # 无论是否同时带引用。
+    if mentions_other:
         return False
 
-    # 引用回复：只有引用的是机器人时才明确是在对机器人说话。能确认引用的是
-    # 别人（不是机器人）时，这是在和别人对话，不当成续聊；无法确认被引用者
-    # 时按保守策略触发，避免漏回。
+    # 引用回复：只在能确认引用的是机器人时才是对机器人说话；引用别人、或
+    # 无法确认被引用者时都不抢话，避免把别人之间的对话误当成续聊。
     if has_reply:
-        return _quoted_sender_is_bot(event, bot_qq) is not False
+        return _quoted_sender_is_bot(event, bot_qq) is True
     normalized = str(text or "").replace("@群友", "").strip()
     real_text = _strip_placeholder_text(normalized)
     if not real_text:

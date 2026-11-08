@@ -289,3 +289,73 @@ def test_server_routes_previous_share_and_focus_to_same_reply(monkeypatch, tmp_p
         "share",
         "at",
     ]
+
+
+# --- 触发前被引用者解析（_ensure_quoted_sender_id）---
+
+def _bare_server():
+    import sys as _sys
+
+    server = object.__new__(OneBotServer)
+    return server
+
+
+def test_ensure_quoted_sender_uses_inline_reply_without_get_msg() -> None:
+    server = _bare_server()
+
+    async def boom(target, action, params, timeout):
+        raise AssertionError("已有顶层 reply，不应调用 get_msg")
+
+    server.call_action_and_wait = boom
+    event = _group_event(
+        10001,
+        {"type": "reply", "data": {"id": "555"}},
+        _text("在吗"),
+    )
+    event["reply"] = {"sender": {"user_id": 10002}}
+    result = asyncio.run(server._ensure_quoted_sender_id(object(), event))
+    assert result == "10002"
+
+
+def test_ensure_quoted_sender_fetches_and_backfills_via_get_msg() -> None:
+    server = _bare_server()
+    fetched: list[dict] = []
+
+    async def fake_call(target, action, params, timeout):
+        assert action == "get_msg"
+        fetched.append(dict(params))
+        return {
+            "data": {
+                "sender": {"user_id": 10002},
+                "message": [_text("原本的话")],
+            }
+        }
+
+    server.call_action_and_wait = fake_call
+    event = _group_event(
+        10001,
+        {"type": "reply", "data": {"id": "777"}},
+        _text("叫我干嘛"),
+    )
+    result = asyncio.run(server._ensure_quoted_sender_id(object(), event))
+    assert result == "10002"
+    assert fetched == [{"message_id": 777}]
+    # 回填后现有判断函数能读到确定的 sender。
+    assert event["reply"]["sender"]["user_id"] == 10002
+
+
+def test_ensure_quoted_sender_returns_none_when_get_msg_fails() -> None:
+    server = _bare_server()
+
+    async def fake_call(target, action, params, timeout):
+        raise RuntimeError("napcat unavailable")
+
+    server.call_action_and_wait = fake_call
+    event = _group_event(
+        10001,
+        {"type": "reply", "data": {"id": "777"}},
+        _text("叫我干嘛"),
+    )
+    result = asyncio.run(server._ensure_quoted_sender_id(object(), event))
+    assert result is None
+    assert "reply" not in event

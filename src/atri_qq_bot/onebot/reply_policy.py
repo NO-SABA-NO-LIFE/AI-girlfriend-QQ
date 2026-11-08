@@ -157,11 +157,11 @@ def _should_reply_smart_group(
     if at_bot:
         return True
 
-    # 2) 引用/回复：能确认被引用者时只在引用机器人时触发；无法确认时，
-    #    引用回复本身是强互动信号，保守触发。
+    # 2) 引用/回复：只在能确认引用的是机器人时触发。进入这里前已尽力解析
+    #    被引用者（event.reply 或 get_msg）；若仍无法确认，默认不抢话，避免
+    #    把别人之间的引用对话误当成对自己说话。
     if _has_reply_segment(event):
-        quoted_is_bot = _quoted_sender_is_bot(event, bot_qq)
-        return True if quoted_is_bot is None else quoted_is_bot
+        return _quoted_sender_is_bot(event, bot_qq) is True
 
     # 3) 称呼/身份关键词：亚托莉、atri（is_bot_mentioned 文本兜底）、
     #    机器人、人工智能、萝卜子、高性能，以及独立单词 ai。
