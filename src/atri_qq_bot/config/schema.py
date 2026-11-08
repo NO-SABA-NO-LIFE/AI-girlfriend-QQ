@@ -63,6 +63,8 @@ class BotConfig:
     sticker_capture_max_bytes: int = 3_000_000
     # Classify captured stickers with the vision model instead of text only.
     sticker_vision_classify_enabled: bool = True
+    # Hold new stickers in the review area until the owner approves them.
+    sticker_review_enabled: bool = True
     # 群聊回复时引用原消息并 @ 对方（reply + at 段）。
     group_reply_quote_enabled: bool = True
     # 被 @ 回复时，顺带把群里近期图片/表情合并进本次分析（平时不主动分析）。

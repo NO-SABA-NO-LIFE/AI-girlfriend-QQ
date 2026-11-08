@@ -151,6 +151,7 @@ def _build_config(root: Path) -> BotConfig:
         sticker_vision_classify_enabled=_env_bool(
             "STICKER_VISION_CLASSIFY_ENABLED", True
         ),
+        sticker_review_enabled=_env_bool("STICKER_REVIEW_ENABLED", True),
         group_reply_quote_enabled=_env_bool("GROUP_REPLY_QUOTE_ENABLED", True),
         group_recent_visual_enabled=_env_bool("GROUP_RECENT_VISUAL_ENABLED", True),
         group_recent_visual_ttl_seconds=_env_int("GROUP_RECENT_VISUAL_TTL_SECONDS", 300),

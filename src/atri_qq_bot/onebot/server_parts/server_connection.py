@@ -133,6 +133,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
             config.sticker_trigger_file,
             config.sticker_capture_dir,
             emotion_classifier=_build_sticker_emotion_classifier(config),
+            review_enabled=bool(getattr(config, "sticker_review_enabled", True)),
         )
         self.tools = ToolAnalyzer(config)
         self.voice = VoiceManager(config)

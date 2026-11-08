@@ -119,6 +119,7 @@ class StickerManager:
         trigger_file: Path | None = None,
         capture_dir: Path | None = None,
         emotion_classifier: Any = None,
+        review_enabled: bool = False,
     ) -> None:
         self.sticker_dir = sticker_dir
         self.trigger_file = trigger_file or sticker_dir / "triggers.json"
@@ -126,6 +127,12 @@ class StickerManager:
         # account-scoped so direct construction can never write into the model
         # source directory.
         self.capture_dir = capture_dir or _default_capture_dir()
+        # When True, new stickers wait in the review area instead of being
+        # classified immediately.
+        self.review_enabled = bool(review_enabled)
+        # New stickers wait here for review. The underscore prefix is ignored by
+        # every sending/selection path, so pending images are never auto-sent.
+        self.review_dir = self.sticker_dir / "_review"
         # Optional async callable (image_bytes, mime_type, hint_text) -> emotion
         # label. Injected by the server layer so this manager stays decoupled
         # from the vision client. None means text-only classification.
@@ -417,6 +424,7 @@ class StickerManager:
         if not isinstance(message, list):
             return []
 
+        review_enabled = bool(getattr(self, "review_enabled", False))
         # Text-based emotion is both the vision hint and the safe fallback.
         text_emotion = self.detect_emotion(context_text)
         if text_emotion == "neutral":
@@ -438,16 +446,41 @@ class StickerManager:
                 continue
             content, content_type, suffix = fetched
 
-            emotion = await self._classify_sticker_emotion(
-                content, content_type, context_text, text_emotion
-            )
-            path = self._write_sticker_bytes(
-                content, suffix, emotion, index, url, content_type
-            )
+            if review_enabled:
+                # Pending review: store as-is in the review area, no classification.
+                path = self._write_review_bytes(
+                    content, suffix, index, url, content_type
+                )
+            else:
+                emotion = await self._classify_sticker_emotion(
+                    content, content_type, context_text, text_emotion
+                )
+                path = self._write_sticker_bytes(
+                    content, suffix, emotion, index, url, content_type
+                )
             if path:
                 saved.append(path)
 
         return saved
+
+    def _write_review_bytes(
+        self,
+        content: bytes,
+        suffix: str,
+        index: int,
+        url: str,
+        content_type: str,
+    ) -> Path | None:
+        """Persist a new sticker in the review area pending approval."""
+        digest = hashlib.sha1(content).hexdigest()[:12]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.review_dir.mkdir(parents=True, exist_ok=True)
+        target = self.review_dir / f"chat_{timestamp}_{index}_{digest}{suffix}"
+        if not target.exists():
+            target.write_bytes(content)
+            _write_capture_metadata(target, url, "review", content_type)
+            print(f"[stickers] captured sticker for review: {target}")
+        return target
 
     async def _classify_sticker_emotion(
         self,
