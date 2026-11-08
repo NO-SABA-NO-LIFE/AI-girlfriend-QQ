@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import time
 
@@ -46,6 +47,62 @@ ACCOUNT_DRAIN_TIMEOUT_SECONDS = 5.0
 ACCOUNT_DRAIN_POLL_SECONDS = 0.05
 
 
+def _build_sticker_emotion_classifier(config: Any):
+    """Return an async vision classifier closure, or None when disabled.
+
+    The closure sends the captured image (base64) to the configured vision
+    model with the sticker-emotion prompt and returns a single emotion label.
+    It is built here so StickerManager stays decoupled from the vision client.
+    """
+    if not bool(getattr(config, "sticker_vision_classify_enabled", True)):
+        return None
+
+    async def _classify(image_bytes: bytes, mime_type: str, hint_text: str) -> str:
+        import httpx
+
+        from ...prompting import load_prompt
+
+        system_prompt = load_prompt("sticker_emotion")
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        mime = mime_type or "image/jpeg"
+        payload = {
+            "model": config.toolbox_vision_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{encoded}"},
+                        }
+                    ],
+                },
+            ],
+            "temperature": 0.1,
+            "max_tokens": 12,
+        }
+        headers = {
+            "Authorization": f"Bearer {config.toolbox_vision_api_key or 'ollama'}"
+        }
+        url = f"{str(config.toolbox_vision_base_url).rstrip('/')}/chat/completions"
+        async with httpx.AsyncClient(
+            timeout=float(getattr(config, "toolbox_vision_timeout_seconds", 30.0)),
+            headers=headers,
+        ) as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            body = response.json()
+        label = str(
+            ((body.get("choices") or [{}])[0].get("message") or {}).get("content")
+            or ""
+        ).strip()
+        # The prompt asks for one bare token; keep only the first word defensively.
+        return label.split()[0] if label else ""
+
+    return _classify
+
+
 class OneBotConnectionMixin(OneBotServerMixin):
     def __init__(
         self,
@@ -75,6 +132,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
             config.sticker_dir,
             config.sticker_trigger_file,
             config.sticker_capture_dir,
+            emotion_classifier=_build_sticker_emotion_classifier(config),
         )
         self.tools = ToolAnalyzer(config)
         self.voice = VoiceManager(config)

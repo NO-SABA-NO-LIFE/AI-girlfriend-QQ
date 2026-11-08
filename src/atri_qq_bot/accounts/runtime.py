@@ -62,10 +62,17 @@ def _build_stickers(
 ) -> Any:
     from ..stickers import StickerManager
 
+    # Delayed import keeps the accounts layer free of the onebot dependency at
+    # module import time while still enabling vision-based sticker emotion.
+    from ..onebot.server_parts.server_connection import (
+        _build_sticker_emotion_classifier,
+    )
+
     return StickerManager(
         config.sticker_dir,
         config.sticker_trigger_file,
         config.sticker_capture_dir,
+        emotion_classifier=_build_sticker_emotion_classifier(config),
     )
 
 

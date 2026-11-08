@@ -118,6 +118,7 @@ class StickerManager:
         sticker_dir: Path,
         trigger_file: Path | None = None,
         capture_dir: Path | None = None,
+        emotion_classifier: Any = None,
     ) -> None:
         self.sticker_dir = sticker_dir
         self.trigger_file = trigger_file or sticker_dir / "triggers.json"
@@ -125,6 +126,10 @@ class StickerManager:
         # account-scoped so direct construction can never write into the model
         # source directory.
         self.capture_dir = capture_dir or _default_capture_dir()
+        # Optional async callable (image_bytes, mime_type, hint_text) -> emotion
+        # label. Injected by the server layer so this manager stays decoupled
+        # from the vision client. None means text-only classification.
+        self.emotion_classifier = emotion_classifier
         self._custom = self._load_custom_config()
 
     def detect_emotion(self, user_text: str, reply_text: str = "") -> str:
@@ -412,9 +417,10 @@ class StickerManager:
         if not isinstance(message, list):
             return []
 
-        emotion = self.detect_emotion(context_text)
-        if emotion == "neutral":
-            emotion = "unsorted"
+        # Text-based emotion is both the vision hint and the safe fallback.
+        text_emotion = self.detect_emotion(context_text)
+        if text_emotion == "neutral":
+            text_emotion = "unsorted"
         saved: list[Path] = []
         for index, segment in enumerate(message):
             if not isinstance(segment, dict):
@@ -427,19 +433,50 @@ class StickerManager:
             if not url:
                 continue
 
-            path = await self._download_sticker_url(url, emotion, index, max_bytes)
+            fetched = await self._fetch_sticker_bytes(url, max_bytes)
+            if fetched is None:
+                continue
+            content, content_type, suffix = fetched
+
+            emotion = await self._classify_sticker_emotion(
+                content, content_type, context_text, text_emotion
+            )
+            path = self._write_sticker_bytes(
+                content, suffix, emotion, index, url, content_type
+            )
             if path:
                 saved.append(path)
 
         return saved
 
-    async def _download_sticker_url(
+    async def _classify_sticker_emotion(
+        self,
+        content: bytes,
+        content_type: str,
+        context_text: str,
+        fallback_emotion: str,
+    ) -> str:
+        """Return the vision label when available, else the text fallback."""
+        if self.emotion_classifier is None:
+            return fallback_emotion
+        try:
+            raw_label = await self.emotion_classifier(
+                content, content_type, context_text
+            )
+        except Exception as exc:
+            print(f"[stickers] vision emotion classify failed: {exc}")
+            return fallback_emotion
+        emotion = _normalize_emotion(str(raw_label or ""))
+        if emotion in {"neutral", "unsorted"}:
+            return "unsorted"
+        return emotion
+
+    async def _fetch_sticker_bytes(
         self,
         url: str,
-        emotion: str,
-        index: int,
         max_bytes: int,
-    ) -> Path | None:
+    ) -> tuple[bytes, str, str] | None:
+        """Download and validate a sticker, returning bytes and mime info."""
         import httpx
 
         parsed = urlparse(url)
@@ -464,7 +501,18 @@ class StickerManager:
             suffix = _suffix_from_url(url)
         if suffix not in IMAGE_EXTENSIONS:
             return None
+        return content, content_type, suffix
 
+    def _write_sticker_bytes(
+        self,
+        content: bytes,
+        suffix: str,
+        emotion: str,
+        index: int,
+        url: str,
+        content_type: str,
+    ) -> Path | None:
+        """Persist a validated sticker under its emotion subdirectory."""
         digest = hashlib.sha1(content).hexdigest()[:12]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         target_dir = self.capture_dir / emotion
