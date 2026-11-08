@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import random
 import time
 
 from .server_support import OneBotServerMixin, _sync_server_globals
@@ -166,9 +165,9 @@ class OneBotEventMixin(OneBotServerMixin):
                 plain_text,
             )
             preliminary_reply = preliminary_reply or active_group_continuation
-            # 没有任何明确触发时，普通群聊允许低概率偶尔搭话（带冷却）。
+            # 没有任何明确触发时，普通群聊由模型按内容判断是否搭话（带冷却）。
             if not preliminary_reply:
-                preliminary_reply = self._maybe_ambient_group_reply(event, plain_text)
+                preliminary_reply = await self._maybe_ambient_group_reply(event, plain_text)
         voice_transcript = None
         voice_error: Exception | None = None
         if is_message and (event.get("message_type") == "private" or preliminary_reply):
@@ -825,12 +824,12 @@ class OneBotEventMixin(OneBotServerMixin):
                 )
             )
 
-    def _maybe_ambient_group_reply(
+    async def _maybe_ambient_group_reply(
         self,
         event: dict[str, Any],
         plain_text: str,
     ) -> bool:
-        """普通群聊里低概率主动搭话，带冷却；只对有真实文字的普通消息生效。"""
+        """普通群聊里由模型按内容判断是否主动搭话，带冷却；只对有真实文字的普通消息生效。"""
         if not getattr(self.config, "group_ambient_reply_enabled", True):
             return False
         if event.get("message_type") != "group":
@@ -852,11 +851,51 @@ class OneBotEventMixin(OneBotServerMixin):
         )
         if now - float(self._last_ambient_group_reply_at.get(group_id, 0.0)) < cooldown:
             return False
-        chance = float(getattr(self.config, "group_ambient_reply_chance", 0.08))
-        if random.random() > chance:
+        # 不再随机掷骰子：交给模型结合聊天内容判断这句话值不值得接。
+        if not await self._llm_ambient_gate_should_reply(plain_text):
             return False
         self._last_ambient_group_reply_at[group_id] = now
         return True
+
+    async def _llm_ambient_gate_should_reply(self, plain_text: str) -> bool:
+        """调用模型判断当前这条群消息是否值得接话。
+
+        走一次很轻的 chat 调用（只要求回答“接/不接”，max_tokens 极小）。
+        任何网络、模型或解析异常都保守返回 False（默认不接），只记日志，
+        绝不让接话判断的故障影响主消息链路。
+        """
+        try:
+            from ...prompting import load_prompt
+            import httpx
+
+            system_prompt = load_prompt("ambient_gate")
+            payload = {
+                "model": self.config.openai_model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": str(plain_text or "")[:500]},
+                ],
+                "max_tokens": 10,
+                "temperature": 0.2,
+            }
+            headers = {"Authorization": f"Bearer {self.config.openai_api_key}"}
+            url = f"{self.config.openai_base_url}/chat/completions"
+            async with httpx.AsyncClient(
+                timeout=float(getattr(self.config, "chat_request_timeout_seconds", 25.0)),
+            ) as client:
+                response = await client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+            content = str(
+                data["choices"][0].get("message", {}).get("content") or ""
+            ).strip()
+            # 明确“不接”优先；否则只要结论里含“接”即视为接话。
+            if "不接" in content:
+                return False
+            return "接" in content
+        except Exception:
+            LOGGER.exception("接话判断模型调用失败，默认不接话")
+            return False
 
     def _evaluate_reply_strategy(
         self,
