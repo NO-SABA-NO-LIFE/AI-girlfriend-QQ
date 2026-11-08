@@ -71,7 +71,10 @@ def main() -> int:
             msg = body["choices"][0]["message"]
             print("  message keys:", list(msg.keys()))
             content = str(msg.get("content") or "")
-            print("  content repr:", repr(content[:900]))
+            # unicode_escape turns every CJK character into literal \\uXXXX ASCII
+            # text, which survives the VNC terminal so it can be decoded here.
+            ascii_safe = content.encode("unicode_escape").decode("ascii")
+            print("  content ascii:", ascii_safe[:1200])
             print("-" * 60)
     return 0
 
