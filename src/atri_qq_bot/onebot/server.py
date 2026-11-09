@@ -126,7 +126,10 @@ from .server_parts.helpers import (
 )
 
 from .server_parts.server_connection import OneBotConnectionMixin
-from .server_parts.server_delivery import OneBotDeliveryMixin
+from .server_parts.server_delivery import (
+    OneBotDeliveryMixin,
+    cached_origin_name,
+)
 from .server_parts.server_events import OneBotEventMixin
 from .server_parts.server_proactive import OneBotProactiveMixin
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 
@@ -428,7 +429,12 @@ class OneBotEventMixin(OneBotServerMixin):
         # 被 @ 回复时，顺带把群里近期图片/表情合并进本次分析（平时不主动分析）。
         analysis_event = self._event_with_recent_group_visuals(analysis_event)
 
-        quoted_message_id, quoted_text, quoted_segments = await self._resolve_quoted_message(
+        (
+            quoted_message_id,
+            quoted_text,
+            quoted_segments,
+            quoted_sender_name,
+        ) = await self._resolve_quoted_message(
             websocket,
             event,
         )
@@ -436,6 +442,7 @@ class OneBotEventMixin(OneBotServerMixin):
             analysis_event = self._event_with_quoted_message(
                 analysis_event,
                 quoted_segments,
+                quoted_sender_name,
             )
         model_input_text = _compose_model_input(plain_text, quoted_text)
         if poke_action_done:
@@ -512,23 +519,58 @@ class OneBotEventMixin(OneBotServerMixin):
         ):
             cached = self._recent_visual_contexts.get(conversation_id)
             if cached and time.time() - cached[0] <= VISUAL_CONTEXT_TTL_SECONDS:
+                # 兼容旧的 2 元组缓存：缺失发送者时留空，按“非本人”处理而不猜测。
+                cached_context = cached[1]
+                # 别人发的图才标注归属；本人发的图返回空串。
+                origin_name = cached_origin_name(
+                    cached, str(event.get("user_id") or "")
+                )
                 try:
-                    if getattr(cached[1], "visual_data", None):
-                        tool_context = await self.tools.analyze_visual_followup(
-                            cached[1],
+                    if getattr(cached_context, "visual_data", None):
+                        followup = await self.tools.analyze_visual_followup(
+                            cached_context,
                             model_input_text,
                             allow_vision=vision_allowed,
                         )
+                        if followup is not None and origin_name:
+                            # 追问生成的是新结果，用 replace 补上归属字段。
+                            tool_context = dataclasses.replace(
+                                followup, sender_origin_name=origin_name
+                            )
+                        else:
+                            tool_context = followup
                 except Exception as exc:
                     LOGGER.warning("图片追问分析失败：conversation=%s error=%s", conversation_id, exc)
                 if tool_context is None:
-                    tool_context = cached[1]
+                    # 直接复用旧结果时同样补上归属字段。
+                    tool_context = (
+                        dataclasses.replace(
+                            cached_context, sender_origin_name=origin_name
+                        )
+                        if origin_name
+                        else cached_context
+                    )
             elif cached:
                 self._recent_visual_contexts.pop(conversation_id, None)
         if tool_context is not None and (
             has_current_visual or getattr(tool_context, "visual_data", None)
         ):
-            self._recent_visual_contexts[conversation_id] = (time.time(), tool_context)
+            # 确定图片真实发送者：当前事件带图则是当前人；复用别人图的结果
+            # 已带 sender_origin_name，沿用其归属，避免在多轮追问里被当前人认领。
+            if getattr(tool_context, "sender_origin_name", ""):
+                store_sender_id = ""
+                store_sender_name = str(tool_context.sender_origin_name)
+            else:
+                store_sender_id = str(event.get("user_id") or "")
+                store_sender_name = str(
+                    _nickname(event) or store_sender_id
+                )
+            self._recent_visual_contexts[conversation_id] = (
+                time.time(),
+                tool_context,
+                store_sender_id,
+                store_sender_name,
+            )
             if len(self._recent_visual_contexts) > 256:
                 oldest = min(
                     self._recent_visual_contexts,

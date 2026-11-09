@@ -17,6 +17,44 @@ LOGGER = logging.getLogger("atri.onebot")
 SENDER_NAME_META_KEY = "_atri_sender_name"
 
 
+def cached_origin_name(cached: Any, current_person_id: str) -> str:
+    """从视觉缓存条目计算需要标注的发送者名（空串表示无需标注）。
+
+    缓存条目为 (时间戳, 结果, 发送者QQ, 发送者昵称)，兼容旧的 2 元组。
+    能确认发送者时：本人发的图返回空、别人发的图返回昵称（缺昵称退回 QQ）；
+    发送者 ID 缺失但留有昵称时按昵称标注，绝不默认成当前人。
+    """
+
+    if not isinstance(cached, tuple):
+        return ""
+    sender_id = cached[2] if len(cached) > 2 else ""
+    sender_name = cached[3] if len(cached) > 3 else ""
+    if sender_id:
+        if sender_id == current_person_id:
+            return ""
+        return str(sender_name or sender_id)
+    return str(sender_name or "")
+
+
+def _sender_display_name(sender: Any) -> str:
+    """从 OneBot sender dict 提取显示名：群名片优先，昵称次之，都没有则空串。
+
+    引用消息的 sender 可能缺失字段，这里统一做防御性提取，不抛异常。
+    """
+
+    if not isinstance(sender, dict):
+        return ""
+    for key in ("card", "nickname"):
+        value = sender.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    user_id = sender.get("user_id")
+    return str(user_id).strip() if user_id not in (None, "") else ""
+
+
 def _history_event_time(event: dict[str, Any]) -> datetime | None:
     """读取 OneBot 历史消息的 epoch 秒，异常记录不参与时间范围判断。"""
 
@@ -101,12 +139,13 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         self,
         websocket: Any,
         event: dict[str, Any],
-    ) -> tuple[str, str, list[dict[str, Any]]]:
+    ) -> tuple[str, str, list[dict[str, Any]], str]:
         """解析用户引用的消息，供本轮模型和多模态工具共同使用。
 
         QQ/OneBot 的 reply 消息段通常只携带目标消息 ID；若事件没有直接
         附带原文，就按需调用 ``get_msg``。读取失败时保留“存在引用”的
-        明确信息，但绝不根据 ID 猜测原文。
+        明确信息，但绝不根据 ID 猜测原文。返回值最后一项是被引用者的
+        显示昵称（拿不到为空串），用于标注引用图片的真实发送者。
         """
 
         message_id = extract_reply_message_id(event.get("message"))
@@ -117,14 +156,21 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                 if value not in (None, ""):
                     message_id = str(value)
         if not message_id:
-            return "", "", []
+            return "", "", [], ""
 
         inline_message = extract_reply_inline_message(event)
         if inline_message is not None:
+            reply_payload = event.get("reply")
+            inline_sender = (
+                reply_payload.get("sender")
+                if isinstance(reply_payload, dict)
+                else None
+            )
             return (
                 message_id,
                 extract_plain_text(inline_message),
                 _message_to_segments(inline_message),
+                _sender_display_name(inline_sender),
             )
 
         request_id: int | str = int(message_id) if message_id.isdigit() else message_id
@@ -142,26 +188,48 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                     message_id,
                     extract_plain_text(quoted_message),
                     _message_to_segments(quoted_message),
+                    _sender_display_name(
+                        data.get("sender") if isinstance(data, dict) else None
+                    ),
                 )
         except Exception as exc:
             LOGGER.warning("引用消息读取失败：message_id=%s error=%s", message_id, exc)
 
-        return message_id, "[引用消息原文暂时无法读取]", []
+        return message_id, "[引用消息原文暂时无法读取]", [], ""
 
     def _event_with_quoted_message(
         self,
         event: dict[str, Any],
         quoted_segments: list[dict[str, Any]],
+        quoted_sender_name: str = "",
     ) -> dict[str, Any]:
-        """把引用消息的媒体段合并到本轮分析事件，不改变原始事件。"""
+        """把引用消息的媒体段合并到本轮分析事件，不改变原始事件。
+
+        若引用的是别人发的图片，在图片段内部字段标注真实发送者，下游
+        toolbox 会生成归属提示，避免把引用图片当成当前用户发的。
+        """
 
         if not quoted_segments:
             return event
+        # 给引用消息里的图片段标注发送者（深拷贝，不污染原始 segment）。
+        marked_segments: list[dict[str, Any]] = []
+        for segment in quoted_segments:
+            copied = copy.deepcopy(segment)
+            if (
+                quoted_sender_name
+                and isinstance(copied, dict)
+                and str(copied.get("type") or "").lower()
+                in {"image", "mface", "marketface"}
+            ):
+                copied.setdefault("data", {})[SENDER_NAME_META_KEY] = (
+                    quoted_sender_name
+                )
+            marked_segments.append(copied)
         merged = dict(event)
         current_segments = _message_to_segments(event.get("message"))
         merged["message"] = (
             [{"type": "text", "data": {"text": "[引用消息]"}}]
-            + quoted_segments
+            + marked_segments
             + [{"type": "text", "data": {"text": "\n[当前消息]"}}]
             + current_segments
         )

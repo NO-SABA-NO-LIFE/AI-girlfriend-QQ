@@ -382,7 +382,12 @@ def test_server_resolves_quoted_message_through_get_msg() -> None:
             "data": {
                 "message": [
                     {"type": "text", "data": {"text": "被引用的原文"}},
-                ]
+                ],
+                "sender": {
+                    "user_id": 200001,
+                    "card": "栞栞",
+                    "nickname": "shiori",
+                },
             },
         }
 
@@ -394,13 +399,15 @@ def test_server_resolves_quoted_message_through_get_msg() -> None:
         ]
     }
 
-    message_id, text, segments = asyncio.run(
+    message_id, text, segments, sender_name = asyncio.run(
         server._resolve_quoted_message(object(), event)
     )
 
     assert message_id == "1001"
     assert text == "被引用的原文"
     assert segments[0]["type"] == "text"
+    # 群名片优先于昵称，用于标注引用图片的真实发送者。
+    assert sender_name == "栞栞"
 def test_extract_plain_text_from_string() -> None:
     assert extract_plain_text("你好，亚托莉") == "你好，亚托莉"
 

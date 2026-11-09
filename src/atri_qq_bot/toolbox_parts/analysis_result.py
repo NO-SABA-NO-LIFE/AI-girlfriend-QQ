@@ -33,6 +33,10 @@ class ToolAnalysisResult:
     # 视频降级链路提供了可引用的 OCR 或标题时，允许交给对话模型继续回答。
     # 图片视觉失败不设置此标记，继续保持原有的防幻觉静默保护。
     visual_fallback_available: bool = False
+    # 图片真实发送者昵称：群里追问“刚才那张图”时，若图是别人发的，这里记录
+    # 发送者昵称，prompt_context 据此提示归属，避免模型把别人的图当成当前用户发的。
+    # 默认空串表示“当前用户本人发的图/无需标注”，42 处现有构造无需改动。
+    sender_origin_name: str = ""
     # Archival evidence is deliberately excluded from prompt_context and repr.
     knowledge_materials: list[dict[str, Any]] = field(default_factory=list, repr=False, compare=False)
 
@@ -154,6 +158,14 @@ class ToolAnalysisResult:
                     "\n用户问人物、文字、含义或情绪时必须直接回答，不要反问用户想让你识别还是描述。"
                     "视觉结果要求联网核验时直接使用搜索工具，不要先索要搜索许可。"
                 )
+        # 图片是别人发的、当前用户只是在追问时，明确归属，避免张冠李戴。
+        origin_rule = ""
+        if self.sender_origin_name:
+            origin_rule = (
+                "\n图片归属：这张图是群友“"
+                f"{self.sender_origin_name}”发的，不是当前说话的人发的；"
+                "不要把图里的内容当成当前用户说的或做的，回答时注意区分发送者。"
+            )
         return (
             "你已获得用户发来的外部材料读取结果。不要说“我调用了工具”，不要输出技术流程；"
             "只把这些信息自然用于回答。"
@@ -168,6 +180,7 @@ class ToolAnalysisResult:
             "\n禁止把没有读取到的内容编造成事实；不确定就说明只能基于当前可见信息判断。"
             f"{visibility_rule}"
             f"{visual_rule}"
+            f"{origin_rule}"
             f"\n来源：{source_text}"
             f"\n可用信息：\n{finding_text}"
             f"\n限制：\n{limitation_text}"
