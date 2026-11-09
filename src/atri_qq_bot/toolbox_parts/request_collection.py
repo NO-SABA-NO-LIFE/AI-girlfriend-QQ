@@ -11,6 +11,10 @@ from urllib.parse import unquote, urlparse
 from .formatting import _clean_html_text, _shorten
 
 
+# 内部约定字段：onebot 层合并“别人发的群图”时写入真实发送者昵称。
+# 与 onebot/server_parts/server_delivery.py 的 SENDER_NAME_META_KEY 保持一致。
+SENDER_NAME_META_KEY = "_atri_sender_name"
+
 URL_RE = re.compile(r"https?://[^\s<>\]）)\"']+", re.IGNORECASE)
 WINDOWS_PATH_RE = re.compile(r"(?:[A-Za-z]:\\[^\r\n\"'<>]+)")
 TEXT_EXTENSIONS = {".txt", ".md", ".log", ".csv", ".tsv", ".json"}
@@ -74,6 +78,22 @@ class _MaterialRequest:
         )
 
 
+def _append_sender_origin_hint(request: "_MaterialRequest", data: dict[str, Any]) -> None:
+    """图片段带真实发送者标注时，生成明确的归属提示，防止模型张冠李戴。
+
+    只有 onebot 层确认“这是别人发的图”时才会写入该字段，因此这里直接把
+    发送者昵称转成一条 share_hint；没有标注（本人发的图）则不添加。
+    """
+
+    sender_name = _first_text(data, SENDER_NAME_META_KEY)
+    if not sender_name:
+        return
+    request.share_hints.append(
+        f"图片归属：这张图是群友“{sender_name}”发的，不是当前说话的人发的，"
+        "不要把图里的内容当成当前用户说的或做的。"
+    )
+
+
 def _collect_request(event: dict[str, Any], plain_text: str) -> _MaterialRequest:
     request = _MaterialRequest()
     request.urls.extend(_extract_urls(plain_text))
@@ -94,6 +114,7 @@ def _collect_request(event: dict[str, Any], plain_text: str) -> _MaterialRequest
                 request.has_image_only = True
                 image_ref = _segment_ref("image", data, event)
                 request.image_refs.append(image_ref)
+                _append_sender_origin_hint(request, data)
             elif segment_type == "file":
                 request.file_refs.append(_segment_ref("file", data, event))
             elif segment_type == "video":
@@ -110,6 +131,7 @@ def _collect_request(event: dict[str, Any], plain_text: str) -> _MaterialRequest
                     request.image_refs.append(face_ref)
                 if face_ref.summary or face_ref.name:
                     request.share_hints.append(f"动画表情摘要：{face_ref.summary or face_ref.name}")
+                _append_sender_origin_hint(request, data)
             elif segment_type in {"json", "xml", "share"}:
                 _collect_share_segment(request, data)
             else:

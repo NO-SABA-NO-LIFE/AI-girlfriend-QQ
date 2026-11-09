@@ -11,6 +11,11 @@ from ...message_plan import outgoing_to_segments  # type: ignore[import-not-foun
 
 LOGGER = logging.getLogger("atri.onebot")
 
+# 内部约定字段：合并“别人发的群图”时，把真实发送者昵称写进图片段的 data 里。
+# 命名以下划线开头，避免与 OneBot 原始字段冲突；toolbox 读取后转成归属提示。
+# 注意：toolbox_parts/request_collection.py 用同名字符串读取，修改需两处同步。
+SENDER_NAME_META_KEY = "_atri_sender_name"
+
 
 def _history_event_time(event: dict[str, Any]) -> datetime | None:
     """读取 OneBot 历史消息的 epoch 秒，异常记录不参与时间范围判断。"""
@@ -215,6 +220,9 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         ttl = max(30, int(getattr(self.config, "group_recent_visual_ttl_seconds", 300)))
         max_count = max(1, int(getattr(self.config, "group_recent_visual_max", 3)))
         bucket = self._recent_group_visuals.setdefault(str(group_id), [])
+        # 记录图片真实发送者：昵称拿不到时退回 QQ 号，保证归属始终有值。
+        sender_id = str(event.get("user_id") or "")
+        sender_name = str(_nickname(event) or sender_id or "群友")
         # 收集本条消息里的图片/动画表情段（深拷贝，避免后续 event 被修改影响存档）。
         for segment in message:
             if not isinstance(segment, dict):
@@ -222,7 +230,9 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             if str(segment.get("type") or "").lower() in {
                 "image", "mface", "marketface"
             }:
-                bucket.append((now, copy.deepcopy(segment)))
+                bucket.append(
+                    (now, copy.deepcopy(segment), sender_id, sender_name)
+                )
         # 先按 TTL 淘汰过期项，再限制张数，始终保留时间最新的若干张。
         fresh = [item for item in bucket if now - item[0] <= ttl]
         if len(fresh) > max_count:
@@ -242,11 +252,13 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         ttl = max(30, int(getattr(self.config, "group_recent_visual_ttl_seconds", 300)))
         max_count = max(1, int(getattr(self.config, "group_recent_visual_max", 3)))
         bucket = self._recent_group_visuals.get(group_id, [])
-        recent_segments = [
-            segment for stored_at, segment in bucket if now - stored_at <= ttl
+        # 兼容旧的 2 元组存档：缺失发送者时按“未知群友”处理，不猜测成当前人。
+        recent_entries = [
+            item for item in bucket if now - item[0] <= ttl
         ][-max_count:]
-        if not recent_segments:
+        if not recent_entries:
             return event
+        current_id = str(event.get("user_id") or "")
         current_segments = (
             event.get("message")
             if isinstance(event.get("message"), list)
@@ -258,12 +270,26 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             for seg in current_segments
             if isinstance(seg, dict)
         }
-        extra = [
-            copy.deepcopy(seg)
-            for seg in recent_segments
-            if str((seg.get("data") or {}).get("file") or (seg.get("data") or {}).get("url"))
-            not in existing_keys
-        ]
+        extra: list[dict[str, Any]] = []
+        for entry in recent_entries:
+            # 兼容旧的 2 元组存档：缺失发送者时留空，按“非本人”处理而不猜测成当前人。
+            stored_at, segment = entry[0], entry[1]
+            sender_id = entry[2] if len(entry) > 2 else ""
+            sender_name = entry[3] if len(entry) > 3 else ""
+            seg_key = str(
+                (segment.get("data") or {}).get("file")
+                or (segment.get("data") or {}).get("url")
+            )
+            if seg_key in existing_keys:
+                continue
+            copied = copy.deepcopy(segment)
+            # 别人发的图：在内部字段标注真实发送者，下游把它转成明确的归属提示，
+            # 模型就不会把这张图当成当前触发者发的。本人发的图无需标注。
+            if sender_id and sender_id != current_id:
+                copied.setdefault("data", {})[SENDER_NAME_META_KEY] = (
+                    sender_name or sender_id
+                )
+            extra.append(copied)
         if not extra:
             return event
         merged = dict(event)

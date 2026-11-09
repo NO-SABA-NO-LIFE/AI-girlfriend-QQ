@@ -160,9 +160,12 @@ class OneBotConnectionMixin(OneBotServerMixin):
             str,
             tuple[float, dict[str, Any]],
         ] = {}
-        # 群维度的近期视觉素材：key=群号，value=按时间排列的 (时间戳, 图片段)。
-        # 只在机器人被 @ 回复时才合并分析，平时不调用视觉模型。
-        self._recent_group_visuals: dict[str, list[tuple[float, dict[str, Any]]]] = {}
+        # 群维度的近期视觉素材：key=群号，value=按时间排列的
+        # (时间戳, 图片段, 发送者QQ, 发送者昵称)。保留发送者归属，避免别人发的图
+        # 在合并时被当前触发者“认领”。只在机器人被 @ 回复时才合并分析，平时不调用视觉模型。
+        self._recent_group_visuals: dict[
+            str, list[tuple[float, dict[str, Any], str, str]]
+        ] = {}
         # 普通群聊偶尔搭话的上次时间记录：key=群号，用于冷却控制。
         self._last_ambient_group_reply_at: dict[str, float] = {}
         self._event_log = PROJECT_ROOT / "logs" / "onebot-events.log"
