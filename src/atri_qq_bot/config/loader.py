@@ -237,7 +237,7 @@ def _build_config(root: Path) -> BotConfig:
         toolbox_vision_max_bytes=_env_int("TOOLBOX_VISION_MAX_BYTES", 8_000_000),
         toolbox_vision_retry_count=max(
             0,
-            min(3, _env_int("TOOLBOX_VISION_RETRY_COUNT", 1)),
+            min(3, _env_int("TOOLBOX_VISION_RETRY_COUNT", 2)),
         ),
         toolbox_vision_resource_wait_seconds=max(
             5.0,

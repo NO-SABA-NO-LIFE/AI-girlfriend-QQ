@@ -536,11 +536,12 @@ class ToolboxVisionMixin(ToolboxMixin):
             for encoded_image, mime_type in zip(encoded_images, mime_types)
         ]
         # 与 Ollama 原生路径一致：多帧（视频抽样帧）需要更大输出预算，
-        # 避免 max_tokens 截断导致视觉输出被判无效。
+        # 避免 max_tokens 截断导致视觉输出被判无效。单图也从 480 提到 700，
+        # 给文字密集截图的 visible_text 留余量，降低长 JSON 被截断的概率。
         max_tokens = (
             getattr(self, "vision_video_num_predict", 800)
             if len(encoded_images) > 1
-            else 480
+            else 700
         )
         payload = {
             "model": model or self.vision_model,
@@ -578,8 +579,9 @@ class ToolboxVisionMixin(ToolboxMixin):
             )
             response.raise_for_status()
             body = response.json()
+        first_choice = (body.get("choices") or [{}])[0]
         content = (
-            ((body.get("choices") or [{}])[0].get("message") or {}).get("content")
+            (first_choice.get("message") or {}).get("content")
             or ""
         ).strip()
         return _VisionModelResponse(
@@ -587,6 +589,8 @@ class ToolboxVisionMixin(ToolboxMixin):
             {
                 "provider": "openai-compatible",
                 "usage": body.get("usage") if isinstance(body.get("usage"), dict) else {},
+                # 映射 OpenAI 的 finish_reason，让 length 截断能被失败判定正确识别。
+                "done_reason": first_choice.get("finish_reason"),
             },
         )
 

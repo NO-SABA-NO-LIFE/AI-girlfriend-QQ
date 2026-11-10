@@ -333,6 +333,105 @@ def _search_result_supports_query(search_result: str, query: str) -> bool:
     )
 
 
+# 视觉模型经第三方中转时，可能返回被截断或带轻微语法错误的 JSON，
+# 严格 json.loads 会失败。这里用字段级正则尽量挽救已生成的内容，
+# 避免把其实可用的 direct_answer/emotion 等一刀切判为无效。
+_VISUAL_JSON_STRING_KEYS = (
+    "direct_answer",
+    "visible_text",
+    "subjects",
+    "identity",
+    "emotion",
+    "social_intent",
+    "evidence",
+    "confidence",
+)
+
+
+def _unescape_json_fragment(value: str) -> str:
+    # 还原 JSON 字符串里常见的转义序列；先处理转义引号，再处理反斜杠。
+    text = str(value or "")
+    text = text.replace('\\"', '"').replace("\\n", " ").replace("\\r", " ")
+    text = text.replace("\\t", " ").replace("\\\\", "\\")
+    return text
+
+
+def _extract_json_string_field(text: str, key: str) -> tuple[str, bool] | None:
+    escaped = re.escape(key)
+    # 正常闭合的字符串值：内部允许转义字符（含转义引号 \"）。
+    closed = re.search(
+        r'"' + escaped + r'"\s*:\s*"((?:[^"\\]|\\.)*)"',
+        text,
+        flags=re.DOTALL,
+    )
+    if closed:
+        return closed.group(1), True
+    # 截断场景：值没有闭合引号，一直延伸到文本末尾；is_closed=False 标记残片。
+    dangling = re.search(
+        r'"' + escaped + r'"\s*:\s*"((?:[^"\\]|\\.)*)\s*$',
+        text,
+        flags=re.DOTALL,
+    )
+    if dangling:
+        return dangling.group(1), False
+    return None
+
+
+def _extract_json_array_field(text: str, key: str) -> list[str] | None:
+    escaped = re.escape(key)
+    closed = re.search(
+        r'"' + escaped + r'"\s*:\s*\[(.*?)\]',
+        text,
+        flags=re.DOTALL,
+    )
+    body = closed.group(1) if closed else None
+    if body is None:
+        # 截断的数组：左括号之后到文本末尾。
+        dangling = re.search(
+            r'"' + escaped + r'"\s*:\s*\[(.*)$',
+            text,
+            flags=re.DOTALL,
+        )
+        if not dangling:
+            return None
+        body = dangling.group(1)
+    items = re.findall(r'"((?:[^"\\]|\\.)*)"', body, flags=re.DOTALL)
+    return [_unescape_json_fragment(item) for item in items]
+
+
+def _recover_visual_json_fields(candidate: str) -> dict[str, Any] | None:
+    """从损坏/截断的视觉 JSON 中提取字段；一个字段都拿不到则返回 None。"""
+    text = str(candidate or "")
+    if not text:
+        return None
+    payload: dict[str, Any] = {}
+    for key in _VISUAL_JSON_STRING_KEYS:
+        extracted = _extract_json_string_field(text, key)
+        if extracted is None:
+            continue
+        value, is_closed = extracted
+        cleaned_value = _unescape_json_fragment(value)
+        if not is_closed and key in {"identity", "subjects"}:
+            # 身份/主体在输出末尾被截断，残片不可靠，安全降级为未确认，
+            # 避免把半个字符当事实、或触发不必要的联网核验。
+            cleaned_value = "未确认（原始输出被截断）"
+        payload[key] = cleaned_value
+    keywords = _extract_json_array_field(text, "search_keywords")
+    if keywords is not None:
+        payload["search_keywords"] = keywords
+    web_match = re.search(
+        r'"needs_web_verification"\s*:\s*(true|false)',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if web_match:
+        payload["needs_web_verification"] = web_match.group(1).casefold() == "true"
+    # 至少要有一个非空字符串字段，才认为这次挽救有意义。
+    if not any(str(payload.get(key) or "").strip() for key in _VISUAL_JSON_STRING_KEYS):
+        return None
+    return payload
+
+
 def _normalize_visual_model_output(raw_text: str) -> str:
     raw = str(raw_text or "").strip()
     if not raw:
@@ -343,8 +442,15 @@ def _normalize_visual_model_output(raw_text: str) -> str:
         if match:
             candidate = match.group(0)
     try:
-        payload = json.loads(candidate)
+        parsed = json.loads(candidate)
     except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = None
+    if isinstance(parsed, dict):
+        payload = parsed
+    else:
+        # 严格解析失败时，字段级容错挽救截断/损坏的 JSON，而不是直接判死。
+        payload = _recover_visual_json_fields(candidate)
+    if payload is None:
         return _sanitize_vision_text(raw)
     if not isinstance(payload, dict):
         return ""

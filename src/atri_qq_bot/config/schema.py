@@ -132,7 +132,8 @@ class BotConfig:
     toolbox_vision_fallback_base_url: str = ""
     toolbox_vision_api_key: str | None = None
     toolbox_vision_max_bytes: int = 8_000_000
-    toolbox_vision_retry_count: int = 1
+    # 重试次数（不含首次）。2 次重试可吸收 ReadTimeout/偶发空响应等抖动。
+    toolbox_vision_retry_count: int = 2
     toolbox_vision_resource_wait_seconds: float = 10.0
     toolbox_vision_timeout_seconds: float = 55.0
     toolbox_vision_unload_other_ollama_models: bool = False

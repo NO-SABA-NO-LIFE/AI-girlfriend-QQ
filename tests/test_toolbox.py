@@ -818,6 +818,60 @@ def test_glm_46v_visual_request_disables_reasoning(monkeypatch, tmp_path) -> Non
     assert captured["thinking"] == {"type": "disabled"}
 
 
+def test_openai_compatible_vision_maps_finish_reason_to_done_reason(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import httpx
+
+    analyzer = ToolAnalyzer(_config(tmp_path))
+    analyzer.vision_model = "gemini-3.7-flash"
+    analyzer.vision_base_url = "https://api.example.com/v1"
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            # OpenAI 标准完成原因在 choices[0].finish_reason；这里模拟长度截断。
+            return {
+                "choices": [
+                    {
+                        "message": {"content": "不完整内容"},
+                        "finish_reason": "length",
+                    }
+                ],
+                "usage": {},
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        async def post(self, url: str, json: dict) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = asyncio.run(
+        analyzer._analyze_image_with_openai_compatible(
+            ["base64-image"],
+            ["image/png"],
+            "system",
+            "user",
+        )
+    )
+
+    assert result.content == "不完整内容"
+    assert result.metrics["done_reason"] == "length"
+
+
 def test_ollama_vision_switches_to_fallback_after_empty_truncated_output(
     monkeypatch,
     tmp_path,
@@ -895,6 +949,45 @@ def test_ollama_vision_switches_to_fallback_after_empty_truncated_output(
     assert "测试成功" in text
     assert limitation == ""
     assert called_models == ["qwen3-vl:8b", "qwen3-vl:4b-instruct"]
+
+
+def test_truncated_visual_json_recovers_existing_fields() -> None:
+    # 模型在 identity 字段中途被截断，JSON 无法 json.loads，但前面的字段仍可用。
+    truncated = (
+        '{"direct_answer": "用户在认真表达观点", "emotion": "认真坚定", '
+        '"social_intent": "回应讨论", "visible_text": "第一行文字\\n第二行文字", '
+        '"subjects": "问答截图", "identity": " ['
+    )
+    out = toolbox_module._normalize_visual_model_output(truncated)
+
+    assert toolbox_module._is_complete_visual_analysis(out)
+    assert "直接回答：用户在认真表达观点" in out
+    assert "表情/情绪：认真坚定" in out
+    # 截断的身份字段安全降级，不把残片 "[" 当事实。
+    assert "身份/出处：未确认（原始输出被截断）" in out
+
+
+def test_truncated_visual_json_demotes_dangling_subjects() -> None:
+    out = toolbox_module._normalize_visual_model_output(
+        '{"direct_answer": "测试", "emotion": "困惑", "subjects": "残'
+    )
+    assert "人物/主体：未确认（原始输出被截断）" in out
+    assert toolbox_module._is_complete_visual_analysis(out)
+
+
+def test_recover_visual_json_fields_handles_truncated_keywords() -> None:
+    # search_keywords 数组在闭合前被截断，已写出的元素仍应被提取。
+    payload = toolbox_module._recover_visual_json_fields(
+        '{"direct_answer": "开心", "search_keywords": ["怪物", "手绘", '
+    )
+    assert payload is not None
+    assert payload["direct_answer"] == "开心"
+    assert payload["search_keywords"] == ["怪物", "手绘"]
+
+
+def test_recover_visual_json_fields_returns_none_without_any_field() -> None:
+    # 没有任何可识别的字符串字段时，挽救失败，让上层走原有兜底。
+    assert toolbox_module._recover_visual_json_fields("{not a json at all") is None
 
 
 def test_unavailable_visual_evidence_requires_deterministic_fail_safe() -> None:

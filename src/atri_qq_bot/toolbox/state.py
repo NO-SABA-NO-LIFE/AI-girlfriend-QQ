@@ -34,7 +34,7 @@ class ToolboxStateMixin(ToolboxMixin):
         self.vision_max_bytes = int(getattr(config, "toolbox_vision_max_bytes", 8_000_000))
         self.vision_retry_count = max(
             0,
-            min(3, int(getattr(config, "toolbox_vision_retry_count", 1))),
+            min(3, int(getattr(config, "toolbox_vision_retry_count", 2))),
         )
         self.vision_resource_wait_seconds = max(
             5.0,
