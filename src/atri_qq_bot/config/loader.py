@@ -207,6 +207,16 @@ def _build_config(root: Path) -> BotConfig:
         idle_cooldown_minutes=_env_int("IDLE_COOLDOWN_MINUTES", 720),
         idle_check_seconds=_env_int("IDLE_CHECK_SECONDS", 60),
         group_context_enabled=_env_bool("GROUP_CONTEXT_ENABLED", True),
+        private_group_bridge_enabled=_env_bool("PRIVATE_GROUP_BRIDGE_ENABLED", True),
+        private_group_bridge_window_seconds=max(
+            60, _env_int("PRIVATE_GROUP_BRIDGE_WINDOW_SECONDS", 21_600)
+        ),
+        private_group_bridge_max_entries=max(
+            1, min(30, _env_int("PRIVATE_GROUP_BRIDGE_MAX_ENTRIES", 15))
+        ),
+        private_group_bridge_reply_lookahead=max(
+            1, min(10, _env_int("PRIVATE_GROUP_BRIDGE_REPLY_LOOKAHEAD", 3))
+        ),
         group_proactive_enabled=_env_bool("GROUP_PROACTIVE_ENABLED", True),
         group_proactive_idle_minutes=_env_int("GROUP_PROACTIVE_IDLE_MINUTES", 90),
         group_proactive_cooldown_minutes=_env_int("GROUP_PROACTIVE_COOLDOWN_MINUTES", 240),

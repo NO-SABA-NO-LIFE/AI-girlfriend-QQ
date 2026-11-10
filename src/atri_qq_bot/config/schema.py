@@ -108,6 +108,11 @@ class BotConfig:
     idle_cooldown_minutes: int = 720
     idle_check_seconds: int = 60
     group_context_enabled: bool = True
+    # 私聊桥接：把该用户近期在群里本人参与的话题片段带到私聊，消除场景割裂。
+    private_group_bridge_enabled: bool = True
+    private_group_bridge_window_seconds: int = 21_600  # 最近 6 小时
+    private_group_bridge_max_entries: int = 15
+    private_group_bridge_reply_lookahead: int = 3  # 本人发言后多少条内配对亚托莉回复
     group_proactive_enabled: bool = True
     group_proactive_idle_minutes: int = 90
     group_proactive_cooldown_minutes: int = 240

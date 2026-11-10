@@ -534,6 +534,49 @@ class MemoryObservationMixin(MemoryMixin):
         )
         return "\n".join(lines)
 
+    def group_bridge_context(
+        self,
+        profile_id: str,
+        now: float | None = None,
+        *,
+        window_seconds: int,
+        max_entries: int,
+        reply_lookahead: int,
+    ) -> str:
+        """把该用户近期在群里本人参与的话题片段渲染成私聊提示文本；无内容时返回空串。"""
+        from .helpers import build_group_bridge_for_private
+
+        self._reload_if_changed()
+        current = now or time.time()
+        entries = build_group_bridge_for_private(
+            self._data,
+            profile_id,
+            current,
+            window_seconds=window_seconds,
+            max_entries=max_entries,
+            reply_lookahead=reply_lookahead,
+        )
+        if not entries:
+            return ""
+
+        lines = [
+            "【不久前在群里的对话片段】下面是这个用户最近在群聊中本人参与的话题，"
+            "用来避免群聊和私聊之间的割裂，让你能自然承接他刚聊过的内容。"
+        ]
+        for entry in entries:
+            text = str(entry.get("text") or "").strip()
+            if entry.get("kind") == "self_speech":
+                lines.append(f"用户在群里说：{text}")
+            else:
+                lines.append(f"亚托莉当时在群里的回复：{text}")
+        lines.append(
+            "这些是有其他群友在场的群话题：亚托莉的回复可能也回应了当时的其他人，"
+            "不代表只对当前用户一人的承诺。私聊里自然承接话题即可，"
+            "不要把群里的称呼、对别人说的话直接套用到当前一对一对话，"
+            "也不要主动复述这是来自群里的片段，更不要念出群号。"
+        )
+        return "\n".join(lines)
+
     def retrieval_status(self) -> dict[str, Any]:
         """为 WebUI/诊断提供索引状态，不暴露任何跨会话的记忆内容。"""
 

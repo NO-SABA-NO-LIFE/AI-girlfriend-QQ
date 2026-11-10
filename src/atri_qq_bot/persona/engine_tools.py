@@ -226,6 +226,22 @@ class EngineToolsMixin(PersonaEngineMixin):
                     }
                 )
                 messages.extend(recent_private)
+            # 私聊桥接：把该用户近期在群里本人参与的话题片段带过来，消除场景割裂。
+            if getattr(self.config, "private_group_bridge_enabled", False):
+                bridge_text = self.memory.group_bridge_context(
+                    profile_id or conversation_id,
+                    window_seconds=int(
+                        getattr(self.config, "private_group_bridge_window_seconds", 21_600)
+                    ),
+                    max_entries=int(
+                        getattr(self.config, "private_group_bridge_max_entries", 15)
+                    ),
+                    reply_lookahead=int(
+                        getattr(self.config, "private_group_bridge_reply_lookahead", 3)
+                    ),
+                )
+                if bridge_text:
+                    messages.append({"role": "system", "content": bridge_text})
         if memory_context:
             messages.append(
                 {

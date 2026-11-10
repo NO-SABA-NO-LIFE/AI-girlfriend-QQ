@@ -316,3 +316,105 @@ def build_global_identity(
         return {}
     return result
 
+
+# ---------------------------------------------------------------------------
+# 私聊桥接：把该用户近期在群里本人参与的话题片段带到私聊。
+# ---------------------------------------------------------------------------
+
+
+def build_group_bridge_for_private(
+    data: dict[str, Any],
+    profile_id: str,
+    now: float,
+    *,
+    window_seconds: int,
+    max_entries: int,
+    reply_lookahead: int,
+) -> list[dict[str, Any]]:
+    """构建私聊用的群话题桥接片段，按时间正序返回；没有可用内容时返回空列表。
+
+    隐私与 fail-closed 边界：
+    - 只取 ``actor_id`` 等于本人的 user 消息（可靠的 QQ 号匹配，不依赖昵称）；
+    - 亚托莉回复取本人发言后 ``reply_lookahead`` 条内出现的 assistant，容忍中间
+      别人插话，但标注为“群话题回复”，不假装是只对本人说的；
+    - 时间窗口外、以及早期没有 actor_id 的旧消息一律不纳入，宁可不带也不带错；
+    - 其他群友的发言本身不纳入，只围绕本人参与的话题。
+    """
+    user_id = parse_identity_user_id(profile_id)
+    if not user_id:
+        return []
+    conversations = data.get("conversations", {})
+    if not isinstance(conversations, dict):
+        return []
+    cutoff = float(now) - max(0, int(window_seconds))
+    suffix = ":user:" + user_id
+    member_scopes = [
+        cid
+        for cid in conversations
+        if str(cid).startswith("group:") and str(cid).endswith(suffix)
+    ]
+
+    collected: list[dict[str, Any]] = []
+    matched_reply_ids: set[int] = set()
+    for scope in member_scopes:
+        identity = _group_member_identity(scope)
+        if identity is None:
+            continue
+        group_id = identity[0]
+        group_cid = f"group:{group_id}"
+        group_item = conversations.get(group_cid)
+        if not isinstance(group_item, dict):
+            continue
+        history = group_item.get("history")
+        if not isinstance(history, list):
+            continue
+        for idx, entry in enumerate(history):
+            if not isinstance(entry, dict):
+                continue
+            at = float(entry.get("at") or 0)
+            if at < cutoff:
+                continue
+            role = entry.get("role")
+            if role != "user" or str(entry.get("actor_id") or "") != user_id:
+                continue
+            text = str(entry.get("text") or "").strip()
+            if not text:
+                continue
+            collected.append(
+                {
+                    "at": at,
+                    "role": "user",
+                    "kind": "self_speech",
+                    "group_id": group_id,
+                    "text": text,
+                }
+            )
+            # 向后看 reply_lookahead 条，容忍别人插话，找到该话题下亚托莉的回复。
+            upper = min(len(history), idx + 1 + max(1, int(reply_lookahead)))
+            for j in range(idx + 1, upper):
+                nxt = history[j]
+                if not isinstance(nxt, dict) or nxt.get("role") != "assistant":
+                    continue
+                if id(nxt) in matched_reply_ids:
+                    break
+                reply_text = str(nxt.get("text") or "").strip()
+                if not reply_text:
+                    break
+                matched_reply_ids.add(id(nxt))
+                collected.append(
+                    {
+                        "at": float(nxt.get("at") or 0),
+                        "role": "assistant",
+                        "kind": "topic_reply",
+                        "group_id": group_id,
+                        "text": reply_text,
+                    }
+                )
+                break
+
+    # 按时间正序；保留最近的 max_entries 条（先倒序截断再转回正序）。
+    ordered = sorted(collected, key=lambda item: float(item.get("at") or 0))
+    if len(ordered) > max_entries:
+        ordered = ordered[-max_entries:]
+    return ordered
+
