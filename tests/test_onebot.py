@@ -14,7 +14,10 @@ from atri_qq_bot.onebot import (
     normalize_poke_event,
     should_reply,
 )
-from atri_qq_bot.onebot.reply_policy import poke_command_target
+from atri_qq_bot.onebot.reply_policy import (
+    normalize_dedup_key,
+    poke_command_target,
+)
 from atri_qq_bot.onebot.server import (
     OneBotServer,
     _compose_model_input,
@@ -351,6 +354,56 @@ def test_poke_command_self_pronoun_ignored_when_verb_targets_other() -> None:
         ],
     }
     assert poke_command_target(event, 100000001) is None
+
+
+def test_normalize_dedup_key_ignores_punctuation_and_spaces() -> None:
+    a = normalize_dedup_key("@群友 放弃吧，@群友 根本不爱你")
+    b = normalize_dedup_key("@群友放弃吧@群友根本不爱你\n")
+    assert a == b == "群友放弃吧群友根本不爱你"
+
+
+def _dedup_server() -> OneBotServer:
+    server = object.__new__(OneBotServer)
+    server._recent_group_reply_keys = {}
+    return server
+
+
+def _group_event(user_id: int) -> dict[str, object]:
+    return {"message_type": "group", "group_id": 20001, "user_id": user_id}
+
+
+def test_duplicate_group_content_only_replies_once() -> None:
+    server = _dedup_server()
+    cid = "group:20001"
+    plain = "@群友 放弃吧，根本不爱你"
+    # 三个不同成员发送意思相同的消息：第一条回复，后两条判为重复。
+    first = server._duplicate_group_content(_group_event(10001), cid, plain)
+    server._remember_group_reply_key(_group_event(10001), cid, plain)
+    second = server._duplicate_group_content(_group_event(10002), cid, plain)
+    third = server._duplicate_group_content(_group_event(10003), cid, plain)
+    assert first is False
+    assert second is True
+    assert third is True
+
+
+def test_duplicate_group_content_allows_different_message() -> None:
+    server = _dedup_server()
+    cid = "group:20001"
+    server._remember_group_reply_key(
+        _group_event(10001), cid, "@群友 放弃吧，根本不爱你"
+    )
+    other = server._duplicate_group_content(
+        _group_event(10002), cid, "@群友 今天天气真好"
+    )
+    assert other is False
+
+
+def test_duplicate_group_content_ignored_in_private_chat() -> None:
+    server = _dedup_server()
+    event = {"message_type": "private", "user_id": 10001}
+    cid = "private:10001"
+    server._remember_group_reply_key(event, cid, "戳一下我")
+    assert server._duplicate_group_content(event, cid, "戳一下我") is False
 
 
 def test_handle_payload_ignores_valid_json_that_is_not_an_event_object() -> None:

@@ -152,6 +152,9 @@ class OneBotConnectionMixin(OneBotServerMixin):
         # 戳一戳不应因重复通知触发连续大模型请求；按会话做轻量冷却。
         self._last_poke_reply_at: dict[str, float] = {}
         self._last_smart_group_reply_at: dict[str, float] = {}
+        # 群内重复内容去重：key=群会话ID，value=[(时间戳, 归一化文本)]，
+        # 多个成员发送意思相同的消息时只回复一次。
+        self._recent_group_reply_keys: dict[str, list[tuple[float, str]]] = {}
         # 视觉缓存：value=(时间戳, 分析结果, 发送者QQ, 发送者昵称)，保留归属
         # 以便追问“刚才那张图”时区分图片是不是当前用户发的。
         self._recent_visual_contexts: dict[

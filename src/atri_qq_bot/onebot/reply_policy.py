@@ -237,3 +237,12 @@ def poke_command_target(
     if self_target and sender_id not in (None, ""):
         return str(sender_id)
     return None
+
+
+def normalize_dedup_key(plain_text: str) -> str:
+    """归一化文本用于群内重复内容去重。
+
+    去掉标点、空白、@、换行等非单词字符（保留中文/字母/数字），再转小写，
+    使“@群友 放弃吧，@群友 根本不爱你”这类仅标点/空格不同的消息得到同一 key。
+    """
+    return re.sub(r"[\W_]+", "", str(plain_text or ""), flags=re.UNICODE).lower()

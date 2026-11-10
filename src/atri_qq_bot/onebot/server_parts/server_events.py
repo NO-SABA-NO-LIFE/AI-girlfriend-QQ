@@ -225,6 +225,15 @@ class OneBotEventMixin(OneBotServerMixin):
             )
         ):
             should_send_reply = False
+        # 群内重复内容去重：多个成员发送意思相同的消息时，窗口内只回复一次；
+        # 入群/戳一戳等事件（push_event）不参与去重。
+        if (
+            should_send_reply
+            and not active_group_continuation
+            and not push_event
+            and self._duplicate_group_content(event, conversation_id, plain_text)
+        ):
+            should_send_reply = False
         profile_id = _profile_id(event)
         nickname = _nickname(event)
         is_owner = _as_int(event.get("user_id")) in set(self.config.owner_qqs)
@@ -403,6 +412,7 @@ class OneBotEventMixin(OneBotServerMixin):
                     voice_mode="singing" if singing_decision.song else "",
                 )
             self._mark_smart_group_reply(event, conversation_id, plain_text)
+            self._remember_group_reply_key(event, conversation_id, plain_text)
             self.reply_engine.record_bot_reply(
                 conversation_id,
                 recorded_reply,
@@ -827,6 +837,7 @@ class OneBotEventMixin(OneBotServerMixin):
                 )
             return
         self._mark_smart_group_reply(event, conversation_id, plain_text)
+        self._remember_group_reply_key(event, conversation_id, plain_text)
         if poke_requested and event.get("message_type") == "group":
             # 回复已成功发出，再执行模型自主决定的戳一戳；戳的是当前对话者。
             try:

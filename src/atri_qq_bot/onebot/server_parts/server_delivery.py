@@ -7,9 +7,13 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from .server_support import OneBotServerMixin, _sync_server_globals
+from ..reply_policy import normalize_dedup_key
 from ...message_plan import outgoing_to_segments  # type: ignore[import-not-found]
 
 LOGGER = logging.getLogger("atri.onebot")
+
+# 群内重复内容去重窗口：该秒数内意思相同的消息只回复一次。
+GROUP_DEDUP_WINDOW_SECONDS = 120.0
 
 # 内部约定字段：合并“别人发的群图”时，把真实发送者昵称写进图片段的 data 里。
 # 命名以下划线开头，避免与 OneBot 原始字段冲突；toolbox 读取后转成归属提示。
@@ -657,6 +661,45 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         if is_bot_mentioned(event, self.config.bot_qq, plain_text):
             return
         self._last_smart_group_reply_at[conversation_id] = datetime.now().timestamp()
+
+    def _duplicate_group_content(
+        self,
+        event: dict[str, Any],
+        conversation_id: str,
+        plain_text: str,
+    ) -> bool:
+        """群里窗口内是否已对意思相同的内容回复过；命中则本次不再回复。"""
+        if event.get("message_type") != "group":
+            return False
+        key = normalize_dedup_key(plain_text)
+        if not key:
+            return False
+        now = datetime.now().timestamp()
+        for ts, old_key in self._recent_group_reply_keys.get(conversation_id, []):
+            if now - ts <= GROUP_DEDUP_WINDOW_SECONDS and old_key == key:
+                return True
+        return False
+
+    def _remember_group_reply_key(
+        self,
+        event: dict[str, Any],
+        conversation_id: str,
+        plain_text: str,
+    ) -> None:
+        """回复成功后记录本次内容的归一化 key，并清理过期记录。"""
+        if event.get("message_type") != "group":
+            return
+        key = normalize_dedup_key(plain_text)
+        if not key:
+            return
+        now = datetime.now().timestamp()
+        items = [
+            (ts, old_key)
+            for ts, old_key in self._recent_group_reply_keys.get(conversation_id, [])
+            if now - ts <= GROUP_DEDUP_WINDOW_SECONDS
+        ]
+        items.append((now, key))
+        self._recent_group_reply_keys[conversation_id] = items
 
     def _group_reply_prefix_segments(
         self, event: dict[str, Any]
