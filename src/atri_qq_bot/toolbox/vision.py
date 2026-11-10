@@ -536,12 +536,12 @@ class ToolboxVisionMixin(ToolboxMixin):
             for encoded_image, mime_type in zip(encoded_images, mime_types)
         ]
         # 与 Ollama 原生路径一致：多帧（视频抽样帧）需要更大输出预算，
-        # 避免 max_tokens 截断导致视觉输出被判无效。单图也从 480 提到 700，
-        # 给文字密集截图的 visible_text 留余量，降低长 JSON 被截断的概率。
+        # 避免 max_tokens 截断导致视觉输出被判无效。单图保持 480，不增加成本；
+        # 文字密集截图改用 prompt 限制 visible_text 长度来避免截断。
         max_tokens = (
             getattr(self, "vision_video_num_predict", 800)
             if len(encoded_images) > 1
-            else 700
+            else 480
         )
         payload = {
             "model": model or self.vision_model,
