@@ -38,22 +38,28 @@ _REASONING_HINT_WORDS = (
     "i must",
     "i see",
     "i'm",
+    "i've",
+    "i note",
     "my response",
     "my answer",
     "my reply",
     "let me",
     "considering",
-    "analyze",
-    "analyse",
+    # 用词根匹配，覆盖 analyze/analyzing/analysis 与 analyse/analysing 等词形。
+    "analyz",
+    "analys",
     "the user",
     "response must",
     "i should",
     "first,",
     "step 1",
     "plan:",
+    "group chat",
+    "observation",
+    "noted",
+    "referencing",
+    "indicated",
 )
-# A run of English/ASCII text (letters, digits, spaces, common punctuation).
-_ENGLISH_RUN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ,.!?;:'\"()\-/&%+]*")
 
 
 def _strip_markdown_for_chat(text: str) -> str:
@@ -81,18 +87,12 @@ def _strip_markdown_for_chat(text: str) -> str:
     return text
 
 
-def _strip_english_reasoning(text: str) -> str:
-    """Drop a leading English internal-reasoning paragraph.
+def _has_cjk(text: str) -> bool:
+    return bool(re.search(r"[一-鿿]", text))
 
-    Only triggers when the message also contains a Chinese answer: the English
-    head must look like first-person reasoning (not a legitimate English reply).
-    Pure English conversations are left untouched.
-    """
-    if not re.search(r"[\u4e00-\u9fff]", text):
-        return text
 
-    # Walk the text from the start, skipping leading whitespace and any leading
-    # mention such as "@昵称" (which may itself be Chinese).
+def _leading_mention_end(text: str) -> int:
+    """Position after a leading "@昵称" mention and surrounding whitespace."""
     pos = 0
     length = len(text)
     while pos < length:
@@ -100,7 +100,6 @@ def _strip_english_reasoning(text: str) -> str:
         if ch.isspace():
             pos += 1
             continue
-        # Allow a leading "@昵称 " mention before the English run.
         if ch == "@":
             mention_end = pos + 1
             while mention_end < length and not text[mention_end].isspace() and text[mention_end] not in ".,!?":
@@ -108,22 +107,63 @@ def _strip_english_reasoning(text: str) -> str:
             pos = mention_end
             continue
         break
+    return pos
 
-    match = _ENGLISH_RUN_RE.match(text, pos)
-    if not match:
+
+def _looks_like_reasoning(text: str) -> bool:
+    lowered = text.lower()
+    return any(hint in lowered for hint in _REASONING_HINT_WORDS)
+
+
+def _strip_english_reasoning(text: str) -> str:
+    """Remove internal English reasoning while keeping the Chinese answer.
+
+    Handles multi-line thinking (a title line plus a body), English runs glued
+    directly to the Chinese answer, and a leading "@昵称" mention. Pure English
+    messages are left untouched so legitimate English conversations are kept.
+    """
+    if not _has_cjk(text):
         return text
-    head = match.group(0)
-    # Require a substantial English run (>= 3 words) carrying a reasoning cue.
-    word_count = len(re.findall(r"[A-Za-z]+", head))
-    lowered = head.lower()
-    looks_like_reasoning = any(hint in lowered for hint in _REASONING_HINT_WORDS)
-    if word_count >= 3 and looks_like_reasoning:
-        remainder = text[match.end():]
-        # Keep the leading mention (if any); drop only the English reasoning run.
-        prefix = text[:pos].rstrip()
-        cleaned = (prefix + " " + remainder).strip() if prefix else remainder.strip()
-        return cleaned
-    return text
+
+    raw_lines = [line.strip() for line in text.split("\n") if line.strip()]
+
+    def line_has_real_answer(line: str) -> bool:
+        return _has_cjk(line[_leading_mention_end(line):])
+
+    has_real_answer = any(line_has_real_answer(line) for line in raw_lines)
+
+    kept: list[str] = []
+    for line in raw_lines:
+        mention_end = _leading_mention_end(line)
+        prefix = line[:mention_end].rstrip()
+        rest = line[mention_end:]
+        if not rest:
+            if prefix:
+                kept.append(prefix)
+            continue
+        if _has_cjk(rest):
+            # This line carries the Chinese answer. Drop an English head before
+            # the first Chinese character when it reads as reasoning; English
+            # terms inside/after the Chinese (API, timeout, ...) are preserved.
+            cjk_pos = re.search(r"[一-鿿]", rest).start()
+            head, tail = rest[:cjk_pos], rest[cjk_pos:]
+            if head.strip() and _looks_like_reasoning(head):
+                cleaned = (prefix + " " + tail).strip() if prefix else tail.strip()
+            else:
+                cleaned = line
+            kept.append(cleaned)
+        elif _looks_like_reasoning(rest):
+            # English-only reasoning line. When a real Chinese answer exists on
+            # another line, drop the whole title line (including its mention);
+            # otherwise keep the mention so the reply still addresses someone.
+            if has_real_answer:
+                continue
+            if prefix:
+                kept.append(prefix)
+        else:
+            kept.append(line)
+    return "\n".join(kept)
+
 
 def _scene_control_prompt(
     conversation_id: str,

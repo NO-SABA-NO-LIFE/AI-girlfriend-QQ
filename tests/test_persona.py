@@ -463,6 +463,21 @@ def test_normalize_reply_drops_bold_english_thinking_title() -> None:
     assert "@野生大YY" in reply
 
 
+def test_normalize_reply_drops_multiline_english_thinking_title_and_body() -> None:
+    # 真实复现：入群欢迎把"思考标题行 + 换行 + 英文正文"和中文答案一起输出。
+    raw = (
+        "@小花 Analyzing Group Chat Context\n\n"
+        "I'm currently analyzing a group chat interaction. Initial observations "
+        "include requests for administrator approval. I've noted a mention to the "
+        "group as a whole.欢迎新朋友！小"
+    )
+    reply = _normalize_reply(raw)
+
+    assert reply == "欢迎新朋友！小"
+    assert "Analyzing" not in reply
+    assert "observations" not in reply
+
+
 def test_env_file_overrides_user_environment(monkeypatch, tmp_path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
