@@ -185,18 +185,21 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
-# “戳一下/戳一戳/戳他/戳她”等戳人指令。
-_POKE_COMMAND_RE = re.compile(r"戳(?:一?[下戳]|[他她它])")
+# “戳一下/戳一戳/戳他/戳她/戳我”等戳人指令。
+_POKE_COMMAND_RE = re.compile(r"戳(?:一?[下戳]|[他她它我])")
+# 目标是说话者本人：“戳我/戳下我/戳一下我/戳一戳我”（不匹配“叫我”等）。
+_POKE_SELF_RE = re.compile(r"戳(?:一?[下戳])?我")
 
 
 def poke_command_target(
     event: dict[str, Any], bot_qq: int
 ) -> str | None:
-    """识别对机器人下达的“戳一下 @某人”指令，返回目标 QQ；否则返回 None。
+    """识别对机器人下达的戳人指令，返回目标 QQ；否则返回 None。
 
     fail-closed：群聊里只有明确 @ 机器人（或文本点名“亚托莉/atri”）才算指令，
-    仅 @ 别人、没 @ 机器人的消息是群友之间的对话，不触发。目标取“戳一下”
-    动词之后出现的第一个有效 @，跳过动词之前作为呼语的 @，避免戳错对象。
+    仅 @ 别人、没 @ 机器人的消息是群友之间的对话，不触发。目标优先取“戳一下”
+    动词之后出现的第一个有效 @，跳过动词之前作为呼语的 @；没有 @ 段但文本是
+    “戳我/戳一下我”时，目标解析为说话者本人（event 的 user_id）。
     """
     message = event.get("message")
     if not isinstance(message, list):
@@ -211,8 +214,10 @@ def poke_command_target(
         if not (at_bot or "亚托莉" in plain or "atri" in plain.lower()):
             return None
 
+    sender_id = event.get("user_id")
     # 按段顺序：先看到“戳一下”动词，再取其后第一个有效 @ 作为目标。
     seen_verb = False
+    self_target = False
     for segment in message:
         if not isinstance(segment, dict):
             continue
@@ -221,8 +226,14 @@ def poke_command_target(
             text = str((segment.get("data") or {}).get("text") or "")
             if _POKE_COMMAND_RE.search(text):
                 seen_verb = True
+            # 动词后（含同段）出现“戳我/戳一下我”，目标是说话者本人。
+            if seen_verb and _POKE_SELF_RE.search(text):
+                self_target = True
         elif seg_type == "at" and seen_verb:
             qq = str((segment.get("data") or {}).get("qq") or "")
             if qq and qq != "all" and qq != str(bot_qq):
                 return qq
+    # 没有有效 @ 段，但明确说“戳我”，戳说话者本人。
+    if self_target and sender_id not in (None, ""):
+        return str(sender_id)
     return None

@@ -325,6 +325,34 @@ def test_poke_command_works_in_private_chat() -> None:
     assert poke_command_target(event, 100000001) == "10002"
 
 
+def test_poke_command_self_pronoun_targets_sender() -> None:
+    # “@亚托莉 那你戳一下我，叫我一声哥哥”：没有@目标段，目标解析为说话者本人。
+    sender = 10001
+    event = {
+        "message_type": "group",
+        "user_id": sender,
+        "message": [
+            {"type": "at", "data": {"qq": "100000001"}},
+            {"type": "text", "data": {"text": " 那你戳一下我，叫我一声"}},
+            {"type": "text", "data": {"text": "哥哥"}},
+        ],
+    }
+    assert poke_command_target(event, 100000001) == str(sender)
+
+
+def test_poke_command_self_pronoun_ignored_when_verb_targets_other() -> None:
+    # “我”出现在动词之前（“我要戳一下”）不能当成戳自己；且无@目标时不触发。
+    event = {
+        "message_type": "group",
+        "user_id": 10001,
+        "message": [
+            {"type": "at", "data": {"qq": "100000001"}},
+            {"type": "text", "data": {"text": "我要戳一下"}},
+        ],
+    }
+    assert poke_command_target(event, 100000001) is None
+
+
 def test_handle_payload_ignores_valid_json_that_is_not_an_event_object() -> None:
     server = object.__new__(OneBotServer)
     server.config = SimpleNamespace(bot_qq=100000001)
