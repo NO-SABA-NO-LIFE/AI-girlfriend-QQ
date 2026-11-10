@@ -538,6 +538,60 @@ def test_reply_with_api_runs_tool_call_loop(monkeypatch) -> None:
     assert len(posted_payloads) == 2
 
 
+def test_reply_with_api_time_hint_guides_daily_time_awareness(monkeypatch) -> None:
+    posted_payloads: list[dict[str, Any]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"choices": [{"message": {"role": "assistant", "content": "上午好呀。"}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> FakeResponse:
+            posted_payloads.append(json)
+            return FakeResponse()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key="test-key",
+        openai_base_url="https://example.com/v1",
+        openai_model="test-model",
+        temperature=0.8,
+        max_tokens=350,
+    )
+    engine = AtriReplyEngine(config)
+
+    reply = asyncio.run(engine._reply_with_api("private:10001", "你好", None))
+
+    assert reply == "上午好呀。"
+    system_texts = [
+        str(message.get("content", ""))
+        for message in posted_payloads[0]["messages"]
+        if message.get("role") == "system"
+    ]
+    time_hint = next(text for text in system_texts if "系统运行时刻" in text)
+    assert "该不该睡" in time_hint
+    assert "历史对话可能来自更早的时间" in time_hint
+    assert "跨过午夜即为新的一天" in time_hint
+
+
 def test_reply_with_api_supports_two_sequential_tool_rounds(monkeypatch) -> None:
     posted_payloads: list[dict[str, Any]] = []
 
