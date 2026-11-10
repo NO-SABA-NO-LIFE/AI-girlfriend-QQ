@@ -14,6 +14,7 @@ from atri_qq_bot.onebot import (
     normalize_poke_event,
     should_reply,
 )
+from atri_qq_bot.onebot.reply_policy import poke_command_target
 from atri_qq_bot.onebot.server import (
     OneBotServer,
     _compose_model_input,
@@ -281,6 +282,47 @@ def test_handle_payload_routes_poke_as_a_normal_message(monkeypatch) -> None:
     assert captured[0]["post_type"] == "message"
     assert captured[0]["message_type"] == "private"
     assert captured[0]["_atri_poke_event"] is True
+
+
+def test_poke_command_ignored_when_bot_not_addressed() -> None:
+    # 天心没@亚托莉，只在让小花去戳小鱿鱼：群友之间的对话，不能触发指令。
+    bot_qq = 100000001
+    event = {
+        "message_type": "group",
+        "message": [
+            {"type": "at", "data": {"qq": "10001"}},        # 小花（呼语）
+            {"type": "text", "data": {"text": " 戳一下"}},
+            {"type": "at", "data": {"qq": "10002"}},        # 小鱿鱼（真正目标）
+            {"type": "text", "data": {"text": " 叫她一声小肥鱼"}},
+        ],
+    }
+    assert poke_command_target(event, bot_qq) is None
+
+
+def test_poke_command_targets_at_after_verb_when_addressed() -> None:
+    # 被@后，目标必须是“戳一下”动词之后的@，而不是开头的呼语@。
+    bot_qq = 100000001
+    event = {
+        "message_type": "group",
+        "message": [
+            {"type": "at", "data": {"qq": str(bot_qq)}},
+            {"type": "text", "data": {"text": " 戳一下"}},
+            {"type": "at", "data": {"qq": "10002"}},
+            {"type": "text", "data": {"text": " 叫她一声小肥鱼"}},
+        ],
+    }
+    assert poke_command_target(event, bot_qq) == "10002"
+
+
+def test_poke_command_works_in_private_chat() -> None:
+    event = {
+        "message_type": "private",
+        "message": [
+            {"type": "text", "data": {"text": "戳一下"}},
+            {"type": "at", "data": {"qq": "10002"}},
+        ],
+    }
+    assert poke_command_target(event, 100000001) == "10002"
 
 
 def test_handle_payload_ignores_valid_json_that_is_not_an_event_object() -> None:

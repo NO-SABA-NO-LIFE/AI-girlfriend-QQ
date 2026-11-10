@@ -192,16 +192,37 @@ _POKE_COMMAND_RE = re.compile(r"戳(?:一?[下戳]|[他她它])")
 def poke_command_target(
     event: dict[str, Any], bot_qq: int
 ) -> str | None:
-    """识别“戳一下 @某人”指令，返回目标 QQ；不是戳人指令或无有效目标返回 None。"""
+    """识别对机器人下达的“戳一下 @某人”指令，返回目标 QQ；否则返回 None。
+
+    fail-closed：群聊里只有明确 @ 机器人（或文本点名“亚托莉/atri”）才算指令，
+    仅 @ 别人、没 @ 机器人的消息是群友之间的对话，不触发。目标取“戳一下”
+    动词之后出现的第一个有效 @，跳过动词之前作为呼语的 @，避免戳错对象。
+    """
     message = event.get("message")
     if not isinstance(message, list):
         return None
-    if not _POKE_COMMAND_RE.search(extract_plain_text(message)):
+    plain = extract_plain_text(message)
+    if not _POKE_COMMAND_RE.search(plain):
         return None
+
+    if event.get("message_type") != "private":
+        at_bot, _at_other = _at_segment_targets(event, bot_qq)
+        # 群聊必须明确呼叫机器人；只 @ 别人、没 @ 机器人也没点名时不触发。
+        if not (at_bot or "亚托莉" in plain or "atri" in plain.lower()):
+            return None
+
+    # 按段顺序：先看到“戳一下”动词，再取其后第一个有效 @ 作为目标。
+    seen_verb = False
     for segment in message:
-        if not isinstance(segment, dict) or str(segment.get("type") or "") != "at":
+        if not isinstance(segment, dict):
             continue
-        qq = str((segment.get("data") or {}).get("qq") or "")
-        if qq and qq != "all" and qq != str(bot_qq):
-            return qq
+        seg_type = str(segment.get("type") or "")
+        if seg_type == "text":
+            text = str((segment.get("data") or {}).get("text") or "")
+            if _POKE_COMMAND_RE.search(text):
+                seen_verb = True
+        elif seg_type == "at" and seen_verb:
+            qq = str((segment.get("data") or {}).get("qq") or "")
+            if qq and qq != "all" and qq != str(bot_qq):
+                return qq
     return None
