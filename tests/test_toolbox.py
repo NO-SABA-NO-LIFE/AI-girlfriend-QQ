@@ -1797,3 +1797,57 @@ def test_toolbox_treats_mface_summary_as_context(tmp_path) -> None:
 
     assert context is not None
     assert "动画表情摘要：亚托莉叉腰生气" in context.prompt_context()
+
+
+def test_vision_slow_timeout_splits_budget_so_all_retries_run(
+    monkeypatch, tmp_path
+) -> None:
+    # 回归：单次 httpx 超时曾等于整个 deadline，首次 ReadTimeout 耗尽预算后，
+    # 后续重试因 remaining<=1 直接 break，重试在慢超时场景下名存实亡。
+    import httpx
+    from PIL import Image
+
+    config = replace(
+        _config(tmp_path),
+        toolbox_vision_enabled=True,
+        toolbox_vision_model="m",
+        toolbox_vision_fallback_model="",
+        toolbox_vision_retry_count=2,
+        toolbox_vision_timeout_seconds=55.0,
+    )
+    analyzer = ToolAnalyzer(config)
+
+    # 用可控时钟模拟“每次调用挂到自身超时”，并跳过真实退避等待。
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(toolbox_module.time, "monotonic", lambda: clock["t"])
+
+    async def fake_sleep(seconds) -> None:
+        clock["t"] += seconds
+
+    monkeypatch.setattr(toolbox_module.asyncio, "sleep", fake_sleep)
+
+    seen_timeouts: list[float] = []
+
+    async def fake_openai(encoded_images, mimes, system_prompt, user_prompt, **kw):
+        attempt_timeout = analyzer._vision_attempt_timeout_seconds
+        seen_timeouts.append(attempt_timeout)
+        clock["t"] += attempt_timeout  # 模拟本次调用一直挂到超时
+        # 真实 httpx.ReadTimeout 无自定义消息，摘要回退类名，命中 timeout 可重试。
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(
+        analyzer, "_analyze_image_with_openai_compatible", fake_openai
+    )
+
+    source = io.BytesIO()
+    Image.new("RGB", (32, 32), "white").save(source, format="PNG")
+    output, hint = asyncio.run(
+        analyzer._analyze_image_with_vision(source.getvalue(), "test")
+    )
+
+    # 三次调用都必须真正发起，而不是被预算检查提前 break。
+    assert len(seen_timeouts) == 3
+    # 首次把 55 秒均分给 3 次尝试，约 18.3 秒，为重试留出时间。
+    assert abs(seen_timeouts[0] - 55.0 / 3) < 0.5
+    assert output == ""
+    assert hint

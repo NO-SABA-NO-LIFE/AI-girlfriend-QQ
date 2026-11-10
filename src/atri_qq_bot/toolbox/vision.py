@@ -307,7 +307,13 @@ class ToolboxVisionMixin(ToolboxMixin):
             remaining = deadline - time.monotonic()
             if remaining <= 1.0:
                 break
-            self._vision_attempt_timeout_seconds = max(1.0, remaining)
+            # 把剩余预算均分给包括本轮在内的剩余尝试次数，为后续重试留出时间。
+            # 否则单次超时会占满整个 deadline，首次 ReadTimeout 后剩余轮次因
+            # remaining<=1 直接 break，重试在慢超时场景下名存实亡。
+            attempts_left = retry_count + 1 - attempt
+            self._vision_attempt_timeout_seconds = max(
+                1.0, remaining / max(1, attempts_left)
+            )
             try:
                 active_base_url = (
                     self.vision_base_url
