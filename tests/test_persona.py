@@ -478,6 +478,27 @@ def test_normalize_reply_drops_multiline_english_thinking_title_and_body() -> No
     assert "observations" not in reply
 
 
+def test_normalize_reply_strips_english_reasoning_between_chinese() -> None:
+    # 真实复现：3.6 在敏感话题上把英文风险评估夹在中文之间输出，旧逻辑
+    # 只剥第一个中文之前的英文段，导致整段分析泄漏到群聊。
+    raw = (
+        '@喵呜呜喵 喵呜呜喵" followed by "腾子坏事做尽啊," indicates potential '
+        "criticism or complaint about Tencent, likely concerning QQ bot interfaces "
+        "or AI. This seems to be happening in a tech-focused group, so I should "
+        "assess the risk with regard to their concerns with the bots.腾子这种"
+    )
+    reply = _normalize_reply(raw)
+
+    assert "followed by" not in reply
+    assert "indicates" not in reply
+    assert "criticism" not in reply
+    assert "complaint" not in reply
+    assert "Tencent" not in reply
+    assert "I should" not in reply
+    # 中文内容仍在，正常英文短词不被误删。
+    assert "腾子坏事做尽啊" in reply
+
+
 def test_env_file_overrides_user_environment(monkeypatch, tmp_path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(

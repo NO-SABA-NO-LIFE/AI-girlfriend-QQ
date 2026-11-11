@@ -58,7 +58,48 @@ _REASONING_HINT_WORDS = (
     "observation",
     "noted",
     "referencing",
-    "indicated",
+    # 用词根覆盖 indicate/indicates/indicated/indication 等词形。
+    "indicat",
+    # 风险评估/元叙述式泄漏：模型在敏感话题上用英文做内部分析时的高频词。
+    "followed by",
+    "potential",
+    "criticism",
+    "complaint",
+    "concerning",
+    "seems",
+    "assess",
+    "the risk",
+    "with regard",
+    "happening",
+)
+
+# 强分析/元话语词：正常口语基本不出现，命中即判定该英文段为内部推理，
+# 不依赖长度阈值，以便剥掉 "followed by" 这类较短的分析片段。
+_STRONG_REASONING_WORDS = (
+    "indicat",
+    "followed by",
+    "potential",
+    "criticism",
+    "complaint",
+    "concerning",
+    "seems",
+    "assess",
+    "the risk",
+    "with regard",
+    "happening",
+    "analyz",
+    "analys",
+    "let me",
+    "my response",
+    "my answer",
+    "my reply",
+    "i should",
+    "i'll",
+    "i'm",
+    "i've",
+    "i need to",
+    "i must",
+    "i note",
 )
 
 
@@ -163,6 +204,43 @@ def _strip_english_reasoning(text: str) -> str:
         else:
             kept.append(line)
     return "\n".join(kept)
+
+
+def _strip_english_reasoning_runs(text: str) -> str:
+    """剥除夹在中文之间/之后的英文推理段，保留短英文术语。
+
+    现有 _strip_english_reasoning 只处理第一个中文字符之前的英文段；
+    模型在敏感话题上会把英文风险评估插在中文之间，需要按连续英文段
+    再做一次剥离。纯英文消息整体保留，避免误伤正常英文对话。
+    """
+    if not _has_cjk(text):
+        return text
+
+    parts = re.split(r"([一-鿿]+)", text)
+    kept: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if _has_cjk(part):
+            kept.append(part)
+            continue
+        lowered = part.lower()
+        words = part.split()
+        strong_hit = any(s in lowered for s in _STRONG_REASONING_WORDS)
+        hint_hits = sum(
+            1 for h in _REASONING_HINT_WORDS if h in lowered
+        )
+        weak_leak = _looks_like_reasoning(part) and (
+            hint_hits >= 2 or len(words) >= 6
+        )
+        if strong_hit or weak_leak:
+            continue
+        kept.append(part)
+    cleaned = "".join(kept)
+    # 清理剥离后残留的多余空格与紧贴中文的孤立标点。
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\s+([，。！？、,.!?])", r"\1", cleaned)
+    return cleaned.strip()
 
 
 def _scene_control_prompt(
@@ -538,6 +616,8 @@ def _normalize_reply(text: str) -> str:
     # Remove Markdown structure, then any leaked English reasoning paragraph.
     text = _strip_markdown_for_chat(text)
     text = _strip_english_reasoning(text)
+    # 再剥除夹在中文之间/之后的英文推理段（敏感话题风险评估式泄漏）。
+    text = _strip_english_reasoning_runs(text)
     text = text.strip()
     text = re.sub(r"^(亚托莉[:：]\s*)", "", text)
     text = re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+\n", "\n", text))
