@@ -87,7 +87,7 @@ from .message_parser import (
 )
 from .reply_policy import _as_int, is_bot_mentioned, should_reply
 
-SMART_GROUP_REPLY_COOLDOWN_SECONDS = 75.0
+SMART_GROUP_REPLY_COOLDOWN_SECONDS = 100.0
 MESSAGE_DEBOUNCE_SECONDS = 1.2
 QUEUE_IDLE_TIMEOUT_SECONDS = 20.0
 CONVERSATION_QUEUE_MAXSIZE = 64
