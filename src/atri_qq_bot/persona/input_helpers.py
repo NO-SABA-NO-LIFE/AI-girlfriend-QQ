@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -28,6 +29,38 @@ def _chat_http_timeout(config: Any) -> float:
         5.0,
         min(60.0, float(getattr(config, "chat_request_timeout_seconds", 25.0))),
     )
+
+
+def new_chat_deadline(config: Any) -> float:
+    """本轮主聊天的单调截止时刻；同一轮的所有串行子调用都必须在它之前返回。"""
+
+    return time.monotonic() + _chat_http_timeout(config)
+
+
+def chat_attempt_timeout(
+    config: Any,
+    deadline: float | None,
+    *,
+    attempt_index: int,
+    total_attempts: int,
+) -> float:
+    """分配给单次聊天请求的 httpx 超时（秒）。
+
+    剩余预算在尚未执行的 attempt 间均分，保证后面的重试或修复阶段仍能拿到
+    时间，而不是让第一个慢调用吃光整轮预算后把后续调用全部拖成 ReadTimeout。
+    剩余时间不足 1 秒时返回 0，调用方据此跳过本次请求（fail-closed），
+    不再发起注定要超时的调用。
+    """
+
+    budget = _chat_http_timeout(config)
+    if deadline is None:
+        # 主动消息等独立调用没有本轮 deadline，保持固定预算的旧行为。
+        return budget
+    remaining = deadline - time.monotonic()
+    attempts_left = max(1, total_attempts - attempt_index)
+    if remaining <= 1.0:
+        return 0.0
+    return max(1.0, min(budget, remaining / attempts_left))
 
 
 def _intent_text(text: str) -> str:

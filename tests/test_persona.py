@@ -756,7 +756,9 @@ def test_history_claim_is_reviewed_against_actual_roles(monkeypatch, tmp_path) -
         attempts += 1
         return "因为上次某人选角色就选了半小时。"
 
-    async def fake_history_review(user_text, candidate_reply, recent_messages):
+    async def fake_history_review(
+        user_text, candidate_reply, recent_messages, chat_deadline=None
+    ):
         reviewed.append((user_text, candidate_reply, recent_messages))
         return "是我刚才乱猜了。你只说准备玩会儿游戏，我不该直接给你贴标签。"
 

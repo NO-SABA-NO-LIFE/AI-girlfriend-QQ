@@ -90,6 +90,10 @@ class EngineReplyMixin(PersonaEngineMixin):
 
         if self.config.ai_enabled:
             try:
+                # 本轮所有串行子调用（主生成、历史审校、现实/证据修复、重写）
+                # 共享同一个单调截止时刻，避免每个调用都按完整预算发起，
+                # 模型一慢就层层累积成 ReadTimeout。
+                chat_deadline = new_chat_deadline(self.config)
                 voice_policy = load_voice_behavior()
                 voice_profile = (
                     context_profile
@@ -138,6 +142,7 @@ class EngineReplyMixin(PersonaEngineMixin):
                     tool_context=tool_context,
                     reply_focus=reply_focus,
                     allow_reply_voice=allow_reply_voice,
+                    chat_deadline=chat_deadline,
                 )
                 human_pipeline = bool(
                     getattr(self.config, "human_reply_pipeline_enabled", True)
@@ -161,6 +166,7 @@ class EngineReplyMixin(PersonaEngineMixin):
                         clean_text,
                         api_reply,
                         recent_messages,
+                        chat_deadline=chat_deadline,
                     )
                     if reviewed_reply:
                         api_reply = reviewed_reply
@@ -197,6 +203,7 @@ class EngineReplyMixin(PersonaEngineMixin):
                         tool_context=tool_context,
                         reply_focus=reply_focus,
                         allow_reply_voice=False,
+                        chat_deadline=chat_deadline,
                     )
                     if reality_reply and not _needs_hard_reality_repair(reality_reply):
                         api_reply = reality_reply
@@ -241,6 +248,7 @@ class EngineReplyMixin(PersonaEngineMixin):
                         tool_context=tool_context,
                         reply_focus=reply_focus,
                         allow_reply_voice=False,
+                        chat_deadline=chat_deadline,
                     )
                     if grounded_reply and not grounding_check(grounded_reply):
                         api_reply = grounded_reply
@@ -277,6 +285,7 @@ class EngineReplyMixin(PersonaEngineMixin):
                             tool_context=tool_context,
                             reply_focus=reply_focus,
                             allow_reply_voice=allow_reply_voice,
+                            chat_deadline=chat_deadline,
                         )
                         if rewritten:
                             api_reply = rewritten

@@ -19,6 +19,7 @@ class EngineToolsMixin(PersonaEngineMixin):
         temperature_override: float | None = None,
         frequency_penalty_override: float | None = None,
         allow_reply_voice: bool | None = None,
+        request_timeout: float | None = None,
     ) -> str:
         import httpx
 
@@ -354,7 +355,11 @@ class EngineToolsMixin(PersonaEngineMixin):
 
         if not agent_protocol_enabled:
             async with httpx.AsyncClient(
-                timeout=_chat_http_timeout(self.config)
+                timeout=(
+                    request_timeout
+                    if request_timeout is not None
+                    else _chat_http_timeout(self.config)
+                )
             ) as client:
                 runner = AutomaticToolRunner(
                     self.config,
@@ -390,7 +395,11 @@ class EngineToolsMixin(PersonaEngineMixin):
         external_calls = 0
         force_final_answer = False
         async with httpx.AsyncClient(
-            timeout=_chat_http_timeout(self.config)
+            timeout=(
+                request_timeout
+                if request_timeout is not None
+                else _chat_http_timeout(self.config)
+            )
         ) as client:
             for _ in range(max_steps):
                 request_payload = dict(payload)
@@ -722,6 +731,7 @@ class EngineToolsMixin(PersonaEngineMixin):
         user_text: str,
         candidate_reply: str,
         recent_messages: list[dict[str, str]],
+        chat_deadline: float | None = None,
     ) -> str:
         import httpx
 
@@ -769,9 +779,15 @@ class EngineToolsMixin(PersonaEngineMixin):
         ):
             payload["thinking"] = {"type": "enabled"}
         headers = {"Authorization": f"Bearer {self.config.openai_api_key}"}
-        async with httpx.AsyncClient(
-            timeout=_chat_http_timeout(self.config)
-        ) as client:
+        review_timeout = chat_attempt_timeout(
+            self.config,
+            chat_deadline,
+            attempt_index=0,
+            total_attempts=1,
+        )
+        if review_timeout <= 0.0:
+            return ""
+        async with httpx.AsyncClient(timeout=review_timeout) as client:
             data = await self._post_chat_completion(client, headers, payload)
         raw = str(data["choices"][0]["message"].get("content") or "").strip()
         match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
@@ -867,6 +883,7 @@ class EngineToolsMixin(PersonaEngineMixin):
         tool_context: Any | None = None,
         reply_focus: GroupReplyFocus | None = None,
         allow_reply_voice: bool | None = None,
+        chat_deadline: float | None = None,
     ) -> str:
         last_reply = ""
         visual_temperature = (
@@ -879,7 +896,18 @@ class EngineToolsMixin(PersonaEngineMixin):
             min(0.45, float(getattr(self.config, "temperature", 0.6))),
             0.30,
         )[: 1 + max(0, min(2, int(getattr(self.config, "chat_quality_retries", 1))))]
+        total_attempts = len(retry_temperatures)
         for attempt, temperature in enumerate(retry_temperatures):
+            # 把本轮剩余预算在尚未执行的 attempt 间均分；deadline 已耗尽就
+            # 不再发起注定超时的请求，直接落到循环末尾的失败处理。
+            request_timeout = chat_attempt_timeout(
+                self.config,
+                chat_deadline,
+                attempt_index=attempt,
+                total_attempts=total_attempts,
+            )
+            if request_timeout <= 0.0:
+                break
             retry_system = extra_system
             if attempt:
                 parts = [extra_system, LANGUAGE_RETRY_PROMPT]
@@ -908,6 +936,7 @@ class EngineToolsMixin(PersonaEngineMixin):
                         + 0.15 * attempt,
                     )
                 ),
+                request_timeout=request_timeout,
             )
             last_reply = reply
             if reply and not has_illegal_language_or_garbage(reply):

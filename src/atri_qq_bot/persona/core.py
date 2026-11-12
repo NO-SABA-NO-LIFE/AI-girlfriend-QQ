@@ -552,6 +552,8 @@ from .input_helpers import (
     _parse_affection_set_value,
     _shorten,
     _user_id_from_profile_id,
+    chat_attempt_timeout,
+    new_chat_deadline,
 )
 
 from . import reply_fallbacks as _reply_fallbacks
