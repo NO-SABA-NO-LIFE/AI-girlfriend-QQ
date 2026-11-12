@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import random
 import time
 
 from .server_support import OneBotServerMixin, _sync_server_globals
@@ -27,6 +28,15 @@ from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
 # 运行时会由 _sync_server_globals 注入 server.py 的同名 logger；这里显式声明一份，
 # 便于模块被单独导入（单元测试）时也能正常记录。
 LOGGER = logging.getLogger("atri.onebot")
+
+# 戳一戳动作（指令戳人或被戳回戳）已由系统完成、但配套文字生成超时时，用
+# 这些确定性话术兜底：明确“戳已经成功”，不调用模型、不会再超时，也避免用户
+# 误以为戳失败而重复发指令。
+_POKE_DONE_FALLBACK_REPLIES = (
+    "哼，戳都戳了，还想怎样？",
+    "好啦，戳到了戳到了，别再戳了啊。",
+    "戳一下而已，我可没那么大反应。",
+)
 
 
 class OneBotEventMixin(OneBotServerMixin):
@@ -656,11 +666,17 @@ class OneBotEventMixin(OneBotServerMixin):
             # 旧逻辑记录后直接 return，用户侧收不到任何东西（表现为“AI 卡住”，
             # 日志只有 ReadTimeout）。现在发一句降级话术，让用户知道这轮没接住、
             # 可以再说一次，而不是干等。只发文字，不带引用、不延迟，避免二次阻塞。
+            # 戳一戳动作本身已成功、只是配套文字超时的情况下，回一句不误导的确定性
+            # 俏皮话，而不是让用户以为戳失败而重复发指令。
+            if poke_action_done or poke_back_done:
+                fallback_text = random.choice(_POKE_DONE_FALLBACK_REPLIES)
+            else:
+                fallback_text = "唔……这轮我想太久，脑袋卡了一下。你再说一遍？"
             try:
                 await self.send_reply(
                     websocket,
                     event,
-                    "唔……这轮我想太久，脑袋卡了一下。你再说一遍？",
+                    fallback_text,
                     model_type="chat",
                     first_delay=False,
                     group_quote=False,

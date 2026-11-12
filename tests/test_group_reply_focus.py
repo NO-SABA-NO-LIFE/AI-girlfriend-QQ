@@ -432,3 +432,91 @@ def test_ensure_quoted_sender_returns_none_when_get_msg_fails() -> None:
     result = asyncio.run(server._ensure_quoted_sender_id(object(), event))
     assert result is None
     assert "reply" not in event
+
+
+# --- 戳一戳动作已完成、但配套文字生成超时的兜底话术 ---
+
+def _fallback_server(tmp_path):
+    config = BotConfig(
+        bot_qq=BOT_QQ,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key=None,
+        openai_base_url="https://example.test/v1",
+        openai_model="test-model",
+        temperature=0.4,
+        max_tokens=350,
+        memory_path=tmp_path / "memory.json",
+        voice_tts_enabled=False,
+    )
+    engine = AtriReplyEngine(config)
+    server = OneBotServer(config, engine)
+    server._event_log = tmp_path / "onebot-events.log"
+    server._reply_event_log = tmp_path / "reply-events.jsonl"
+    server._voice_event_log = tmp_path / "voice-events.log"
+    return engine, server
+
+
+def test_poke_command_timeout_sends_poke_done_fallback(monkeypatch, tmp_path) -> None:
+    from atri_qq_bot.onebot.server_parts import server_events
+
+    engine, server = _fallback_server(tmp_path)
+
+    async def fake_send_group_poke(*args, **kwargs):
+        return True
+
+    async def fake_reply(*args, **kwargs):
+        raise RuntimeError("ReadTimeout")
+
+    async def fake_analyze(event, plain_text, call_action, *, allow_vision=True):
+        return None
+
+    sent: list[str] = []
+
+    async def fake_send_reply(websocket, event, text, **kwargs):
+        sent.append(text)
+
+    monkeypatch.setattr(server, "_send_group_poke", fake_send_group_poke)
+    monkeypatch.setattr(server.tools, "analyze", fake_analyze)
+    monkeypatch.setattr(engine, "reply", fake_reply)
+    monkeypatch.setattr(server, "send_reply", fake_send_reply)
+
+    event = _group_event(
+        10001,
+        _at_bot(),
+        _text(" 戳一下 "),
+        {"type": "at", "data": {"qq": "10002"}},
+    )
+    event.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
+
+    asyncio.run(server._handle_event(object(), event))
+
+    assert len(sent) == 1
+    assert sent[0] in server_events._POKE_DONE_FALLBACK_REPLIES
+
+
+def test_non_poke_timeout_still_sends_generic_fallback(monkeypatch, tmp_path) -> None:
+    engine, server = _fallback_server(tmp_path)
+
+    async def fake_reply(*args, **kwargs):
+        raise RuntimeError("ReadTimeout")
+
+    async def fake_analyze(event, plain_text, call_action, *, allow_vision=True):
+        return None
+
+    sent: list[str] = []
+
+    async def fake_send_reply(websocket, event, text, **kwargs):
+        sent.append(text)
+
+    monkeypatch.setattr(server.tools, "analyze", fake_analyze)
+    monkeypatch.setattr(engine, "reply", fake_reply)
+    monkeypatch.setattr(server, "send_reply", fake_send_reply)
+
+    event = _group_event(10001, _at_bot(), _text("你好呀"))
+    event.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
+
+    asyncio.run(server._handle_event(object(), event))
+
+    assert sent == ["唔……这轮我想太久，脑袋卡了一下。你再说一遍？"]
