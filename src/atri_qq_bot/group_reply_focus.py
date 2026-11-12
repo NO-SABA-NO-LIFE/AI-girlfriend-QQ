@@ -92,6 +92,12 @@ class GroupReplyFocusStore:
         )
         self._trim()
 
+    def close_session(self, event: dict[str, Any]) -> None:
+        """主动结束该成员的会话；之后其消息需要重新 @ 才会回复。"""
+        key = _group_member_key(event)
+        if key:
+            self._active.pop(key, None)
+
     def is_active_continuation(
         self,
         event: dict[str, Any],
@@ -110,9 +116,13 @@ class GroupReplyFocusStore:
         if current_time > session.expires_at or current_time >= hard_deadline:
             self._active.pop(key, None)
             return False
+        # 明确表示“不聊了”：结束会话，不再把它当续聊接话。
+        if _looks_like_end_conversation(text):
+            self._active.pop(key, None)
+            return False
         if not _looks_like_direct_continuation(event, text, self.bot_qq):
             return False
-        # 命中续聊，进入下一段：续期时长随段数递减，且无论如何都不能突破
+        # 命中续聊，进入下一段：每段统一时长，且无论如何都不能突破
         # 从开窗时刻起的绝对硬上限。
         next_stage = session.stage + 1
         new_expires = current_time + self._stage_ttl_seconds(next_stage)
@@ -383,3 +393,20 @@ def _looks_like_direct_continuation(
         or compact.endswith(("?", "？", "!", "！"))
         or len(compact) >= 12
     )
+
+
+# 明确表示“不想继续聊”的终止信号：只认明确表达，避免把玩笑或正常对话误判成结束。
+_END_CONVERSATION_CUES = (
+    "不聊了", "别聊了", "不想聊了", "不想聊",
+    "别说了", "不要再说", "不用再说", "别再说",
+    "到此为止", "结束吧", "结束了",
+    "我去忙了", "去忙了", "先忙了", "忙去了",
+)
+
+
+def _looks_like_end_conversation(text: str) -> bool:
+    """识别“明确表示不聊了”的终止信号；只认明确表达，fail-closed，避免误判。"""
+    compact = "".join(str(text or "").split()).lower()
+    if not compact:
+        return False
+    return any(cue in compact for cue in _END_CONVERSATION_CUES)

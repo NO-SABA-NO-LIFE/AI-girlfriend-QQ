@@ -1,7 +1,11 @@
 import asyncio
 
 from atri_qq_bot.config import BotConfig
-from atri_qq_bot.group_reply_focus import GroupReplyFocus, GroupReplyFocusStore
+from atri_qq_bot.group_reply_focus import (
+    GroupReplyFocus,
+    GroupReplyFocusStore,
+    _looks_like_end_conversation,
+)
 from atri_qq_bot.onebot.server import OneBotServer
 from atri_qq_bot.persona import AtriReplyEngine
 
@@ -519,3 +523,89 @@ def test_non_poke_timeout_still_sends_generic_fallback(monkeypatch, tmp_path) ->
     asyncio.run(server._handle_event(object(), event))
 
     assert sent == ["唔……这轮我想太久，脑袋卡了一下。你再说一遍？"]
+
+
+def test_looks_like_end_conversation_detects_explicit_cues() -> None:
+    # 明确终止表达命中。
+    assert _looks_like_end_conversation("不聊了")
+    assert _looks_like_end_conversation("我先去忙了")
+    assert _looks_like_end_conversation("好，到此为止吧")
+    assert _looks_like_end_conversation("你别说了")
+    # 正常对话、玩笑或含“不聊”但不是终止的句子不误判。
+    assert not _looks_like_end_conversation("你吃饭了吗")
+    assert not _looks_like_end_conversation("不聊八卦的话我们聊点别的")
+    assert not _looks_like_end_conversation("")
+
+
+def test_end_conversation_closes_session_and_replies_without_model(
+    monkeypatch, tmp_path
+) -> None:
+    from atri_qq_bot.onebot.server_parts import server_events
+
+    engine, server = _fallback_server(tmp_path)
+    # 先手动打开一个续聊会话，模拟此前被 @ 过。
+    opener = _group_event(10001, _at_bot(), _text("在吗"))
+    server._group_reply_focus.open_session(opener, nickname="A", now=100)
+    key = f"group:{GROUP_ID}:user:10001"
+    assert key in server._group_reply_focus._active
+
+    model_calls: list[bool] = []
+
+    async def fake_reply(*args, **kwargs):
+        model_calls.append(True)
+        return "不该出现"
+
+    async def fake_analyze(*args, **kwargs):
+        model_calls.append(True)
+        return None
+
+    sent: list[str] = []
+
+    async def fake_send_reply(websocket, event, text, **kwargs):
+        sent.append(text)
+
+    monkeypatch.setattr(engine, "reply", fake_reply)
+    monkeypatch.setattr(server.tools, "analyze", fake_analyze)
+    monkeypatch.setattr(server, "send_reply", fake_send_reply)
+
+    event = _group_event(10001, _text("不聊了"))
+    event.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
+    asyncio.run(server._handle_event(object(), event))
+
+    # 回一句确定性俏皮话，且完全没调模型/工具分析。
+    assert len(sent) == 1
+    assert sent[0] in server_events._END_CONVERSATION_FALLBACK_REPLIES
+    assert model_calls == []
+    # 会话已关闭：之后该成员的消息需要重新 @ 才会回。
+    assert key not in server._group_reply_focus._active
+
+
+def test_end_conversation_without_active_session_still_replies(
+    monkeypatch, tmp_path
+) -> None:
+    from atri_qq_bot.onebot.server_parts import server_events
+
+    engine, server = _fallback_server(tmp_path)
+
+    async def fake_reply(*args, **kwargs):
+        raise AssertionError("不应调用模型")
+
+    async def fake_analyze(*args, **kwargs):
+        return None
+
+    sent: list[str] = []
+
+    async def fake_send_reply(websocket, event, text, **kwargs):
+        sent.append(text)
+
+    monkeypatch.setattr(engine, "reply", fake_reply)
+    monkeypatch.setattr(server.tools, "analyze", fake_analyze)
+    monkeypatch.setattr(server, "send_reply", fake_send_reply)
+
+    # 没有活跃会话、也没 @，明确说“不聊了”仍回一句再收。
+    event = _group_event(10001, _text("我去忙了，别再说了"))
+    event.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
+    asyncio.run(server._handle_event(object(), event))
+
+    assert len(sent) == 1
+    assert sent[0] in server_events._END_CONVERSATION_FALLBACK_REPLIES

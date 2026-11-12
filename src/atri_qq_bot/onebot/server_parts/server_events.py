@@ -19,7 +19,10 @@ from ..reply_policy import (  # type: ignore[import-not-found]
     _has_reply_segment,
     poke_command_target,
 )
-from ...group_reply_focus import _strip_placeholder_text  # type: ignore[import-not-found]
+from ...group_reply_focus import (  # type: ignore[import-not-found]
+    _looks_like_end_conversation,
+    _strip_placeholder_text,
+)
 from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
     forced_event_block_reason,
     object_requires_mention,
@@ -36,6 +39,14 @@ _POKE_DONE_FALLBACK_REPLIES = (
     "哼，戳都戳了，还想怎样？",
     "好啦，戳到了戳到了，别再戳了啊。",
     "戳一下而已，我可没那么大反应。",
+)
+
+# 群里有人明确表示“不聊了”时，回一句再收尾：确定性、不调模型，既尊重对方
+# 想停的意愿，又不至于完全静默。
+_END_CONVERSATION_FALLBACK_REPLIES = (
+    "哼，不聊就不聊，谁稀罕。",
+    "好啊，那本机就不奉陪了。",
+    "行吧，到此为止，我还乐得清静。",
 )
 
 
@@ -151,6 +162,28 @@ class OneBotEventMixin(OneBotServerMixin):
         # 判断就是确定值，而不是在信息缺失时盲目抢答。
         if is_message and _has_reply_segment(event):
             await self._ensure_quoted_sender_id(websocket, event)
+
+        # 群里有人明确表示“不聊了”：结束该成员会话，回一句确定性俏皮话后直接
+        # 收尾，不再打开/续期会话，也不走模型与随机搭话，避免对方已经想停却还在接话。
+        if (
+            is_message
+            and event.get("message_type") == "group"
+            and not push_event
+            and _looks_like_end_conversation(plain_text)
+        ):
+            self._group_reply_focus.close_session(event)
+            try:
+                await self.send_reply(
+                    websocket,
+                    event,
+                    random.choice(_END_CONVERSATION_FALLBACK_REPLIES),
+                    model_type="chat",
+                    first_delay=False,
+                    group_quote=False,
+                )
+            except Exception as send_exc:  # noqa: BLE001
+                LOGGER.warning("结束会话兜底消息发送失败：%s", send_exc)
+            return
 
         preliminary_reply = push_event or poke_command_hit or should_reply(
             event,
