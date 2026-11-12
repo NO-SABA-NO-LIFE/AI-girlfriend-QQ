@@ -14,6 +14,9 @@ ACTIVE_SESSION_STAGE_TTL_SECONDS = 1 * 60.0
 DEFAULT_ACTIVE_GROUP_SESSION_TTL_SECONDS = ACTIVE_SESSION_STAGE_TTL_SECONDS
 # 从开窗时刻起的绝对硬上限：3 分钟，阻止滑动续期把会话拉长。
 ACTIVE_SESSION_HARD_CAP_SECONDS = 3 * 60.0
+# “不聊了”收尾后的休眠时长：期间该成员只有 @ 或引用机器人才会被回复，
+# 任何关键词、续聊、随机搭话都不触发；2 小时后自动恢复正常。
+END_CONVERSATION_SUPPRESS_SECONDS = 2 * 60 * 60.0
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,8 @@ class GroupReplyFocusStore:
         self.bot_qq = int(bot_qq)
         self._pending: dict[str, _PendingGroupMessage] = {}
         self._active: dict[str, _ActiveGroupSession] = {}
+        # 成员“不聊了”后的休眠截止时间：key 为 group:user，value 为休眠到期时间戳。
+        self._suppressed: dict[str, float] = {}
 
     def open_session(
         self,
@@ -97,6 +102,38 @@ class GroupReplyFocusStore:
         key = _group_member_key(event)
         if key:
             self._active.pop(key, None)
+
+    def suppress_after_end(
+        self,
+        event: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> None:
+        """记录“不聊了”后的休眠截止时间，休眠期内只认 @ 或引用。"""
+        key = _group_member_key(event)
+        if not key:
+            return
+        current_time = time.time() if now is None else float(now)
+        self._suppressed[key] = current_time + END_CONVERSATION_SUPPRESS_SECONDS
+
+    def is_suppressed(
+        self,
+        event: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """该成员是否处于“不聊了”后的休眠期；过期自动清理并返回 False。"""
+        key = _group_member_key(event)
+        if not key:
+            return False
+        until = self._suppressed.get(key)
+        if until is None:
+            return False
+        current_time = time.time() if now is None else float(now)
+        if current_time >= float(until):
+            self._suppressed.pop(key, None)
+            return False
+        return True
 
     def is_active_continuation(
         self,

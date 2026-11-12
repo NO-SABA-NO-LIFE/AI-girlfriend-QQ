@@ -2,6 +2,7 @@ import asyncio
 
 from atri_qq_bot.config import BotConfig
 from atri_qq_bot.group_reply_focus import (
+    END_CONVERSATION_SUPPRESS_SECONDS,
     GroupReplyFocus,
     GroupReplyFocusStore,
     _looks_like_end_conversation,
@@ -439,12 +440,12 @@ def test_ensure_quoted_sender_returns_none_when_get_msg_fails() -> None:
 
 # --- 戳一戳动作已完成、但配套文字生成超时的兜底话术 ---
 
-def _fallback_server(tmp_path):
+def _fallback_server(tmp_path, reply_mode: str = "mention"):
     config = BotConfig(
         bot_qq=BOT_QQ,
         host="127.0.0.1",
         port=8765,
-        reply_mode="mention",
+        reply_mode=reply_mode,
         openai_api_key=None,
         openai_base_url="https://example.test/v1",
         openai_model="test-model",
@@ -609,3 +610,84 @@ def test_end_conversation_without_active_session_still_replies(
 
     assert len(sent) == 1
     assert sent[0] in server_events._END_CONVERSATION_FALLBACK_REPLIES
+
+
+def test_suppression_store_records_and_expires() -> None:
+    store = GroupReplyFocusStore(bot_qq=BOT_QQ)
+    event = _group_event(10001, _text("不聊了"))
+
+    assert not store.is_suppressed(event, now=100)
+    store.suppress_after_end(event, now=100)
+    # 休眠期内命中。
+    assert store.is_suppressed(event, now=100 + END_CONVERSATION_SUPPRESS_SECONDS - 1)
+    # 到点自动解除并清理。
+    assert not store.is_suppressed(event, now=100 + END_CONVERSATION_SUPPRESS_SECONDS)
+    assert store._suppressed == {}
+
+
+def test_suppressed_member_only_replies_to_mention_or_quote(
+    monkeypatch, tmp_path
+) -> None:
+    from atri_qq_bot.onebot.server_parts import server_events
+
+    engine, server = _fallback_server(tmp_path, reply_mode="smart")
+
+    async def fake_reply(*args, **kwargs):
+        return "模型回复"
+
+    async def fake_analyze(*args, **kwargs):
+        return None
+
+    sent: list[str] = []
+
+    async def fake_send_reply(websocket, event, messages, **kwargs):
+        # 正常流程传入 OutgoingMessage 列表；降级分支传入字符串。统一提取文本。
+        if isinstance(messages, str):
+            sent.append(messages)
+            return
+        for message in messages:
+            if getattr(message, "kind", "") == "text":
+                sent.append(str(message.content))
+
+    monkeypatch.setattr(engine, "reply", fake_reply)
+    monkeypatch.setattr(server.tools, "analyze", fake_analyze)
+    monkeypatch.setattr(server, "send_reply", fake_send_reply)
+
+    # 1) 明确说“不聊了”：回一句俏皮话并进入休眠。
+    end = _group_event(10001, _at_bot(), _text("不聊了"))
+    end.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
+    asyncio.run(server._handle_event(object(), end))
+    assert len(sent) == 1
+    assert sent[0] in server_events._END_CONVERSATION_FALLBACK_REPLIES
+    assert server._group_reply_focus.is_suppressed(end)
+
+    # 2) 休眠期内只发身份关键词（不带 @）：不回。
+    keyword = _group_event(10001, _text("亚托莉，高性能机器人"))
+    keyword.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
+    asyncio.run(server._handle_event(object(), keyword))
+    assert len(sent) == 1
+
+    # 3) 休眠期内普通消息：不回，随机搭话也被压制。
+    normal = _group_event(10001, _text("今天天气真不错"))
+    normal.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
+    asyncio.run(server._handle_event(object(), normal))
+    assert len(sent) == 1
+
+    # 4) 休眠期内 @ 机器人：回。
+    mention = _group_event(10001, _at_bot(), _text("在吗"))
+    mention.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
+    asyncio.run(server._handle_event(object(), mention))
+    assert len(sent) == 2
+    assert sent[1].startswith("模型回复")
+
+    # 5) 休眠期内引用机器人：回。
+    quote = _group_event(
+        10001,
+        {"type": "reply", "data": {"id": "909"}},
+        _text("那这个呢"),
+    )
+    quote["reply"] = {"sender": {"user_id": BOT_QQ}}
+    quote.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
+    asyncio.run(server._handle_event(object(), quote))
+    assert len(sent) == 3
+    assert sent[2].startswith("模型回复")

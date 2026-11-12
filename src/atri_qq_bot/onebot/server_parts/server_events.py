@@ -17,6 +17,7 @@ from ..message_parser import (  # type: ignore[import-not-found]
 from ..reply_policy import (  # type: ignore[import-not-found]
     _at_segment_targets,
     _has_reply_segment,
+    _quoted_sender_is_bot,
     poke_command_target,
 )
 from ...group_reply_focus import (  # type: ignore[import-not-found]
@@ -172,6 +173,8 @@ class OneBotEventMixin(OneBotServerMixin):
             and _looks_like_end_conversation(plain_text)
         ):
             self._group_reply_focus.close_session(event)
+            # 进入两小时休眠：之后只认 @ 或引用，关键词一律不触发。
+            self._group_reply_focus.suppress_after_end(event)
             try:
                 await self.send_reply(
                     websocket,
@@ -185,6 +188,14 @@ class OneBotEventMixin(OneBotServerMixin):
                 LOGGER.warning("结束会话兜底消息发送失败：%s", send_exc)
             return
 
+        # “不聊了”后的休眠期：该成员只有 @ 或引用机器人才会被回复。
+        group_suppressed = bool(
+            is_message
+            and event.get("message_type") == "group"
+            and not push_event
+            and self._group_reply_focus.is_suppressed(event)
+        )
+
         preliminary_reply = push_event or poke_command_hit or should_reply(
             event,
             self.config.bot_qq,
@@ -196,6 +207,7 @@ class OneBotEventMixin(OneBotServerMixin):
             is_message
             and event.get("message_type") == "group"
             and not push_event
+            and not group_suppressed
             and is_bot_mentioned(event, self.config.bot_qq, plain_text)
         )
         if explicit_group_mention:
@@ -212,14 +224,27 @@ class OneBotEventMixin(OneBotServerMixin):
                     nickname=_nickname(event) or "",
                 )
         elif is_message and event.get("message_type") == "group" and not push_event:
-            active_group_continuation = self._group_reply_focus.is_active_continuation(
-                event,
-                plain_text,
+            if not group_suppressed:
+                active_group_continuation = self._group_reply_focus.is_active_continuation(
+                    event,
+                    plain_text,
+                )
+                preliminary_reply = preliminary_reply or active_group_continuation
+                # 没有任何明确触发时，普通群聊由模型按内容判断是否搭话（带冷却）。
+                if not preliminary_reply:
+                    preliminary_reply = await self._maybe_ambient_group_reply(
+                        event, plain_text
+                    )
+        # 休眠期内只放行 @ 或引用机器人：关键词、续聊、随机搭话一律不回。
+        if group_suppressed:
+            at_bot, _at_other = _at_segment_targets(event, self.config.bot_qq)
+            quotes_bot = (
+                _has_reply_segment(event)
+                and _quoted_sender_is_bot(event, self.config.bot_qq) is True
             )
-            preliminary_reply = preliminary_reply or active_group_continuation
-            # 没有任何明确触发时，普通群聊由模型按内容判断是否搭话（带冷却）。
-            if not preliminary_reply:
-                preliminary_reply = await self._maybe_ambient_group_reply(event, plain_text)
+            if not (at_bot or quotes_bot):
+                return
+            preliminary_reply = True
         voice_transcript = None
         voice_error: Exception | None = None
         if is_message and (event.get("message_type") == "private" or preliminary_reply):
