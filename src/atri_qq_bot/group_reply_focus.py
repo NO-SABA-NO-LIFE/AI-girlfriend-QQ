@@ -8,7 +8,12 @@ from typing import Any
 
 
 DEFAULT_GROUP_REPLY_FOCUS_TTL_SECONDS = 120.0
-DEFAULT_ACTIVE_GROUP_SESSION_TTL_SECONDS = 5 * 60.0
+# 开窗第 1 段（被 @ 后）的有效期：3 分钟。
+DEFAULT_ACTIVE_GROUP_SESSION_TTL_SECONDS = 3 * 60.0
+# 续期递减：进入第 2 段给 2 分钟，进入第 3 段起都给 1 分钟。
+ACTIVE_SESSION_RENEWAL_TTL_SECONDS = (2 * 60.0, 1 * 60.0)
+# 从开窗时刻起的绝对硬上限：10 分钟，阻止滑动续期把会话无限拉长。
+ACTIVE_SESSION_HARD_CAP_SECONDS = 10 * 60.0
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,8 @@ class _PendingGroupMessage:
 class _ActiveGroupSession:
     expires_at: float
     nickname: str
+    opened_at: float
+    stage: int = 0
 
 
 class GroupReplyFocusStore:
@@ -80,6 +87,8 @@ class GroupReplyFocusStore:
         self._active[key] = _ActiveGroupSession(
             expires_at=current_time + self.active_session_ttl_seconds,
             nickname=str(nickname or "").strip(),
+            opened_at=current_time,
+            stage=0,
         )
         self._trim()
 
@@ -97,12 +106,18 @@ class GroupReplyFocusStore:
         session = self._active.get(key)
         if session is None:
             return False
-        if current_time > session.expires_at:
+        hard_deadline = session.opened_at + ACTIVE_SESSION_HARD_CAP_SECONDS
+        if current_time > session.expires_at or current_time >= hard_deadline:
             self._active.pop(key, None)
             return False
         if not _looks_like_direct_continuation(event, text, self.bot_qq):
             return False
-        session.expires_at = current_time + self.active_session_ttl_seconds
+        # 命中续聊，进入下一段：续期时长随段数递减，且无论如何都不能突破
+        # 从开窗时刻起的绝对硬上限。
+        next_stage = session.stage + 1
+        new_expires = current_time + self._stage_ttl_seconds(next_stage)
+        session.stage = next_stage
+        session.expires_at = min(new_expires, hard_deadline)
         return True
 
     def remember(
@@ -175,6 +190,18 @@ class GroupReplyFocusStore:
             source="bare_mention",
             analysis_event=event,
         )
+
+    def _stage_ttl_seconds(self, stage: int) -> float:
+        """命中后续期进入第 ``stage`` 段（1-based）时的时长。
+
+        第 1 次续期进入第 2 段，给 2 分钟；第 2 次续期进入第 3 段，给
+        1 分钟；之后每段都保持 1 分钟。开窗的第 1 段时长由
+        ``active_session_ttl_seconds``（默认 180s）决定，不经过这里。
+        """
+
+        if stage <= 1:
+            return ACTIVE_SESSION_RENEWAL_TTL_SECONDS[0]
+        return ACTIVE_SESSION_RENEWAL_TTL_SECONDS[1]
 
     def _trim(self) -> None:
         if len(self._pending) > 256:
