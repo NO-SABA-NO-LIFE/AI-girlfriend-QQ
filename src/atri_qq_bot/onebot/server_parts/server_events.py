@@ -863,12 +863,14 @@ class OneBotEventMixin(OneBotServerMixin):
             voice_streamed = True
         else:
             profile = self.reply_engine.profile_for(profile_id)
+            emotion_label = self.reply_engine.consume_emotion_label(conversation_id)
             outgoing = build_outgoing_messages(
                 reply_text,
                 plain_text,
                 self.stickers,
                 self.config,
                 profile,
+                emotion_label=emotion_label,
             )
         delivery_model_type = (
             "voice"

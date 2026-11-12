@@ -172,6 +172,7 @@ class StickerManager:
         chance: float,
         profile: dict[str, Any] | None = None,
         cooldown_seconds: int = 0,
+        emotion_override: str = "",
     ) -> StickerChoice | None:
         triggered = False
         emotion = "neutral"
@@ -188,7 +189,15 @@ class StickerManager:
             emotion = _normalize_emotion(emotion)
             triggered = True
         else:
-            emotion = self.detect_emotion(user_text, reply_text)
+            # 模型在同一轮自报的情绪标签优先，避免关键词以用户情绪为主导；
+            # 标签缺失或无效时才回退到关键词检测。
+            override = (
+                _normalize_emotion(emotion_override) if emotion_override else ""
+            )
+            if override and override not in {"neutral", "unsorted"}:
+                emotion = override
+            else:
+                emotion = self.detect_emotion(user_text, reply_text)
 
         if not triggered and _in_cooldown(profile, cooldown_seconds):
             return None

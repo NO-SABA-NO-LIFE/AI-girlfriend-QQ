@@ -1046,4 +1046,57 @@ def _direct_answer_override(
     return None
 
 
+# 模型自报情绪标签的固定标记。双方括号在正常聊天里不会出现，解析稳定，
+# 且在 _normalize_reply 之前就被提取剥离，不依赖后续清洗。
+_EMOTION_TAG_RE = re.compile(
+    r"\[\[\s*emotion\s*:\s*([a-z_]+)\s*\]\]", re.IGNORECASE
+)
+# 合法标签与 docs/prompts/sticker_emotion.md 的英文情绪词对齐。
+_EMOTION_TAG_LABELS = frozenset(
+    {
+        "happy",
+        "comfort",
+        "sad",
+        "angry",
+        "tired",
+        "proud",
+        "confused",
+        "speechless",
+        "surprised",
+        "awkward",
+        "teasing",
+        "shy",
+        "affection",
+        "miss",
+        "care",
+        "thanks",
+        "sorry",
+        "encourage",
+        "thinking",
+        "celebrate",
+        "food",
+        "goodnight",
+        "pout",
+        "neutral",
+    }
+)
+
+
+def _extract_emotion_tag(reply_text: str) -> tuple[str, str]:
+    """提取模型自报的情绪标签并剥离标记。
+
+    返回 (label, cleaned_text)。没有标签时 label 为 ""；标签非法时只剥离
+    标记、label 仍为 ""，由调用方回退到关键词检测，绝不编造情绪。
+    """
+    text = str(reply_text or "")
+    matches = list(_EMOTION_TAG_RE.finditer(text))
+    if not matches:
+        return "", text
+    label = str(matches[-1].group(1) or "").strip().lower()
+    cleaned = _EMOTION_TAG_RE.sub("", text)
+    if label not in _EMOTION_TAG_LABELS:
+        return "", cleaned
+    return label, cleaned
+
+
 

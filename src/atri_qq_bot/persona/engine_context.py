@@ -201,6 +201,11 @@ class EngineContextMixin(PersonaEngineMixin):
         strict_quality: bool = True,
         nickname: str | None = None,
     ) -> str:
+        # 先提取模型自报的情绪标签并剥离标记，再走常规清洗，保证返回文本
+        # 不含内部标签；标签暂存后由 OneBot 层消费去匹配表情。
+        emotion_label, reply_text = _extract_emotion_tag(reply_text)
+        if emotion_label:
+            self._pending_emotion_labels[conversation_id] = emotion_label
         reply_text = _normalize_reply(reply_text)
         reply_text = _redact_sensitive_output(
             reply_text,

@@ -733,6 +733,9 @@ def test_onebot_server_sends_synthesized_voice_record(tmp_path: Path) -> None:
             assert conversation_id == "private:10001"
             return VoiceRequest("我已经把语音准备好了。", "gentle")
 
+        def consume_emotion_label(self, conversation_id: str) -> str:
+            return ""
+
         def record_bot_reply(self, *args: object, **kwargs: object) -> None:
             return None
 
@@ -824,6 +827,9 @@ def test_onebot_explicit_voice_guard_recovers_when_model_omits_tool(tmp_path: Pa
 
         def consume_voice_request(self, conversation_id: str) -> None:
             return None
+
+        def consume_emotion_label(self, conversation_id: str) -> str:
+            return ""
 
         def record_bot_reply(self, *args: object, **kwargs: object) -> None:
             return None
@@ -1122,6 +1128,9 @@ def test_onebot_probability_choice_converts_natural_reply_to_voice(
             assert conversation_id == "private:10001"
             return True
 
+        def consume_emotion_label(self, conversation_id: str) -> str:
+            return ""
+
         def record_bot_reply(self, *args: object, **kwargs: object) -> None:
             return None
 
@@ -1252,6 +1261,9 @@ def test_onebot_singing_failure_does_not_send_generic_model_fallback(tmp_path: P
         def consume_voice_request(self, conversation_id: str) -> None:
             return None
 
+        def consume_emotion_label(self, conversation_id: str) -> str:
+            return ""
+
         def record_bot_reply(
             self,
             conversation_id: str,
@@ -1363,6 +1375,9 @@ def test_onebot_fixed_singing_flow_and_unrequested_model_tool_guard(
         def consume_voice_request(self, conversation_id: str) -> VoiceRequest:
             # 即使模型谎称用户明确点歌，也不能覆盖当前用户的普通聊天。
             return VoiceRequest("唱歌", mode="singing", reason="explicit_request")
+
+        def consume_emotion_label(self, conversation_id: str) -> str:
+            return ""
 
         def record_bot_reply(self, conversation_id: str, reply_text: str, *args: object, **kwargs: object) -> None:
             self.recorded_replies.append(reply_text)

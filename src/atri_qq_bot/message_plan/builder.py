@@ -14,6 +14,7 @@ def build_outgoing_messages(
     sticker_manager: StickerManager,
     config: Any,
     profile: dict[str, Any] | None = None,
+    emotion_label: str = "",
 ) -> list[OutgoingMessage]:
     # 业务层只返回文本意图；这里负责把它编译成 OneBot 可发送的消息计划。
     # 人格引擎因此不需要依赖 QQ segment 的具体格式。
@@ -27,6 +28,7 @@ def build_outgoing_messages(
         config.sticker_chance,
         profile,
         config.sticker_cooldown_seconds,
+        emotion_override=emotion_label,
     )
     if sticker and sticker.emoji_text and text_parts:
         text_parts[-1] = _append_light_emoji(text_parts[-1], sticker.emoji_text)
