@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+
 from .engine_support import PersonaEngineMixin
 
 
@@ -86,7 +88,26 @@ class EngineReplyMixin(PersonaEngineMixin):
                 "视觉材料未取得足够可靠的识别结果",
             )
             self._remember_user_context(conversation_id, clean_text, nickname)
-            return ""
+            # 2026-11-07 改动：视觉失败不再静默。
+            # 旧逻辑 `return ""` 会让用户侧完全收不到回应（用户反馈「看不到图片」，
+            # 日志里只有 ERROR ... 已保持用户侧静默）。现在给一句降级话术：
+            # 承认图片没读清、请对方用文字说，保持亚托莉语气，不编造画面内容。
+            fallback = ""
+            getter = getattr(visual_fail_safe_context, "visual_failure_reply", None)
+            if callable(getter):
+                try:
+                    fallback = str(getter() or "").strip()
+                except Exception:  # noqa: BLE001
+                    fallback = ""
+            if not fallback:
+                fallback = random.choice(
+                    (
+                        "唔……这张图我这边没看清。你用文字跟我说说是什么吧？",
+                        "图我收到了，但好像没加载出来。直接告诉我图里是什么？",
+                        "这张我读不出来……高性能机器人也有看不清的时候啦。你打字说说？",
+                    )
+                )
+            return fallback
 
         if self.config.ai_enabled:
             try:

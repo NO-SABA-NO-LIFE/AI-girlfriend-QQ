@@ -1035,7 +1035,71 @@ def test_reply_engine_bypasses_chat_model_when_visual_evidence_is_unavailable(
         )
     )
 
-    assert reply == ""
+    # 真实 ToolAnalysisResult.visual_failure_reply() 故意返回空，因此走随机
+    # 兜底话术；模型仍未被调用，且不会编造画面内容。
+    assert reply in {
+        "唔……这张图我这边没看清。你用文字跟我说说是什么吧？",
+        "图我收到了，但好像没加载出来。直接告诉我图里是什么？",
+        "这张我读不出来……高性能机器人也有看不清的时候啦。你打字说说？",
+    }
+
+
+def test_reply_engine_uses_custom_visual_failure_reply(monkeypatch, tmp_path) -> None:
+    engine = AtriReplyEngine(replace(_config(tmp_path), openai_api_key="test-key"))
+
+    class CustomFailContext:
+        def requires_visual_fail_safe(self) -> bool:
+            return True
+
+        def visual_failure_reply(self) -> str:
+            return "这张图我这边有点模糊，换个清楚点的角度发我？"
+
+    async def must_not_call_model(*args, **kwargs):
+        raise AssertionError("视觉失败后不应再让聊天模型自由生成")
+
+    monkeypatch.setattr(engine, "_reply_with_guarded_api", must_not_call_model)
+
+    reply = asyncio.run(
+        engine.reply(
+            "private:visual-fail-custom",
+            "这张图是什么？",
+            tool_context=CustomFailContext(),
+        )
+    )
+    # 上下文提供了非空的自定义降级话术时，优先使用它，而不是随机兜底。
+    assert reply == "这张图我这边有点模糊，换个清楚点的角度发我？"
+
+
+def test_reply_engine_falls_back_when_visual_failure_reply_raises(
+    monkeypatch, tmp_path
+) -> None:
+    engine = AtriReplyEngine(replace(_config(tmp_path), openai_api_key="test-key"))
+
+    class BrokenFailContext:
+        def requires_visual_fail_safe(self) -> bool:
+            return True
+
+        def visual_failure_reply(self) -> str:
+            raise RuntimeError("boom")
+
+    async def must_not_call_model(*args, **kwargs):
+        raise AssertionError("视觉失败后不应再让聊天模型自由生成")
+
+    monkeypatch.setattr(engine, "_reply_with_guarded_api", must_not_call_model)
+
+    reply = asyncio.run(
+        engine.reply(
+            "private:visual-fail-broken",
+            "这张图是什么？",
+            tool_context=BrokenFailContext(),
+        )
+    )
+    # getter 抛异常时容错，回退到随机兜底话术，而不是把异常抛给用户。
+    assert reply in {
+        "唔……这张图我这边没看清。你用文字跟我说说是什么吧？",
+        "图我收到了，但好像没加载出来。直接告诉我图里是什么？",
+        "这张我读不出来……高性能机器人也有看不清的时候啦。你打字说说？",
+    }
 
 
 def test_vision_releases_stale_ollama_models_before_loading(monkeypatch, tmp_path) -> None:
