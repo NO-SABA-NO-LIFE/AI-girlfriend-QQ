@@ -106,21 +106,21 @@ def test_substantive_current_message_wins_over_pending_message() -> None:
     assert focus.analysis_event is current
 
 
-def test_mention_opens_three_minute_same_member_session() -> None:
+def test_mention_opens_one_minute_same_member_session() -> None:
     store = GroupReplyFocusStore()
     mention = _group_event(10001, _at_bot(), _text("你觉得这个怎么样？"))
     store.open_session(mention, nickname="A", now=10)
 
-    # 开窗第一段 3 分钟：189s（开窗后 179s）仍在窗口内，命中续聊。
+    # 开窗第一段 1 分钟：69s（开窗后 59s）仍在窗口内，命中续聊。
     assert store.is_active_continuation(
         _group_event(10001, _text("那你为什么这么想？")),
         "那你为什么这么想？",
-        now=189,
+        now=69,
     )
     assert not store.is_active_continuation(
         _group_event(10002, _text("那你为什么这么想？")),
         "那你为什么这么想？",
-        now=189,
+        now=69,
     )
 
 
@@ -138,7 +138,7 @@ def test_active_session_expires_and_does_not_intercept_other_mentions() -> None:
         "@群友 你看一下",
         now=20,
     )
-    # 开窗第一段 3 分钟：191s（开窗后 181s）已过期，不再接话。
+    # 开窗第一段 1 分钟，且 191s 已超过开窗起 180s 的硬上限，不再接话。
     assert not store.is_active_continuation(
         _group_event(10001, _text("你还在吗？")),
         "你还在吗？",
@@ -180,7 +180,7 @@ def test_continuation_quoting_other_member_is_not_bot_dialogue() -> None:
     )
 
 
-def test_continuation_renewal_ttl_shrinks_three_two_one() -> None:
+def test_continuation_renewal_uses_uniform_one_minute_stages() -> None:
     store = GroupReplyFocusStore()
     store.open_session(
         _group_event(10001, _at_bot(), _text("在吗")), nickname="A", now=0
@@ -189,65 +189,64 @@ def test_continuation_renewal_ttl_shrinks_three_two_one() -> None:
     def session():
         return store._active[f"group:{GROUP_ID}:user:10001"]
 
-    # 开窗第一段 3 分钟。
+    # 开窗第一段 1 分钟。
     assert session().stage == 0
-    assert session().expires_at == 180.0
+    assert session().expires_at == 60.0
 
-    # 第 1 次续期：进入第 2 段，延长 2 分钟。
+    # 每次续期都统一延长 1 分钟，不再递减。
     assert store.is_active_continuation(
-        _group_event(10001, _text("所以呢")), "所以呢", now=170
+        _group_event(10001, _text("所以呢")), "所以呢", now=50
     )
     assert session().stage == 1
-    assert session().expires_at == 290.0  # 170 + 120
+    assert session().expires_at == 110.0  # 50 + 60
 
-    # 第 2 次续期：进入第 3 段，延长 1 分钟。
     assert store.is_active_continuation(
-        _group_event(10001, _text("然后呢")), "然后呢", now=280
+        _group_event(10001, _text("然后呢")), "然后呢", now=100
     )
     assert session().stage == 2
-    assert session().expires_at == 340.0  # 280 + 60
+    assert session().expires_at == 160.0  # 100 + 60
 
-    # 第 3 次续期：第 4 段，仍是 1 分钟。
+    # 第 3 次续期：150 + 60 = 210，被开窗起 180s 的硬上限钳制。
     assert store.is_active_continuation(
-        _group_event(10001, _text("嗯")), "嗯", now=330
+        _group_event(10001, _text("嗯")), "嗯", now=150
     )
     assert session().stage == 3
-    assert session().expires_at == 390.0  # 330 + 60
+    assert session().expires_at == 180.0
 
 
-def test_renewal_never_exceeds_ten_minute_hard_cap() -> None:
+def test_renewal_never_exceeds_three_minute_hard_cap() -> None:
     store = GroupReplyFocusStore()
     store.open_session(
         _group_event(10001, _at_bot(), _text("在吗")), nickname="A", now=0
     )
 
-    # 每段都在过期前续期，持续走到硬上限。
-    for now in (170, 280, 330, 380, 430, 480, 530, 585):
+    # 每段都在过期前续期，持续走到 3 分钟硬上限。
+    for now in (50, 100, 150):
         assert store.is_active_continuation(
             _group_event(10001, _text("嗯")), "嗯", now=now
         )
 
     sess = store._active[f"group:{GROUP_ID}:user:10001"]
-    # 585 + 60 = 645，被开窗起 600s 的绝对硬上限钳制。
-    assert sess.expires_at == 600.0
+    # 150 + 60 = 210，被开窗起 180s 的绝对硬上限钳制。
+    assert sess.expires_at == 180.0
 
-    # 到 600s 硬上限，会话结束、不再接话。
+    # 到 180s 硬上限，会话结束、不再接话。
     assert not store.is_active_continuation(
-        _group_event(10001, _text("嗯")), "嗯", now=600
+        _group_event(10001, _text("嗯")), "嗯", now=180
     )
     assert f"group:{GROUP_ID}:user:10001" not in store._active
 
 
 def test_custom_initial_session_ttl_is_honored() -> None:
-    store = GroupReplyFocusStore(active_session_ttl_seconds=240)
+    store = GroupReplyFocusStore(active_session_ttl_seconds=90)
     store.open_session(
         _group_event(10001, _at_bot(), _text("在吗")), nickname="A", now=0
     )
     sess = store._active[f"group:{GROUP_ID}:user:10001"]
-    assert sess.expires_at == 240.0
-    # 硬上限仍以开窗起 600s 为准，不受初始 TTL 影响。
+    assert sess.expires_at == 90.0
+    # 自定义初始 TTL 内仍可续期；硬上限仍以开窗起 180s 为准，不受初始 TTL 影响。
     assert store.is_active_continuation(
-        _group_event(10001, _text("嗯")), "嗯", now=230
+        _group_event(10001, _text("嗯")), "嗯", now=80
     )
 
 

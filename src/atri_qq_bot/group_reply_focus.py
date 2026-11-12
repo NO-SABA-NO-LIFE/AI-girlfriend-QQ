@@ -8,12 +8,12 @@ from typing import Any
 
 
 DEFAULT_GROUP_REPLY_FOCUS_TTL_SECONDS = 120.0
-# 开窗第 1 段（被 @ 后）的有效期：3 分钟。
-DEFAULT_ACTIVE_GROUP_SESSION_TTL_SECONDS = 3 * 60.0
-# 续期递减：进入第 2 段给 2 分钟，进入第 3 段起都给 1 分钟。
-ACTIVE_SESSION_RENEWAL_TTL_SECONDS = (2 * 60.0, 1 * 60.0)
-# 从开窗时刻起的绝对硬上限：10 分钟，阻止滑动续期把会话无限拉长。
-ACTIVE_SESSION_HARD_CAP_SECONDS = 10 * 60.0
+# 会话每一段（开窗和每次续期）统一 1 分钟，不再随段数递减。
+ACTIVE_SESSION_STAGE_TTL_SECONDS = 1 * 60.0
+# 开窗第 1 段（被 @ 后）的有效期：1 分钟。
+DEFAULT_ACTIVE_GROUP_SESSION_TTL_SECONDS = ACTIVE_SESSION_STAGE_TTL_SECONDS
+# 从开窗时刻起的绝对硬上限：3 分钟，阻止滑动续期把会话拉长。
+ACTIVE_SESSION_HARD_CAP_SECONDS = 3 * 60.0
 
 
 @dataclass(frozen=True)
@@ -192,16 +192,13 @@ class GroupReplyFocusStore:
         )
 
     def _stage_ttl_seconds(self, stage: int) -> float:
-        """命中后续期进入第 ``stage`` 段（1-based）时的时长。
+        """命中续期进入第 ``stage`` 段（1-based）时的时长。
 
-        第 1 次续期进入第 2 段，给 2 分钟；第 2 次续期进入第 3 段，给
-        1 分钟；之后每段都保持 1 分钟。开窗的第 1 段时长由
-        ``active_session_ttl_seconds``（默认 180s）决定，不经过这里。
+        每一段都统一 1 分钟、不再递减。开窗的第 1 段时长由
+        ``active_session_ttl_seconds``（默认 60s）决定，不经过这里。
         """
 
-        if stage <= 1:
-            return ACTIVE_SESSION_RENEWAL_TTL_SECONDS[0]
-        return ACTIVE_SESSION_RENEWAL_TTL_SECONDS[1]
+        return ACTIVE_SESSION_STAGE_TTL_SECONDS
 
     def _trim(self) -> None:
         if len(self._pending) > 256:
