@@ -246,9 +246,11 @@ class OneBotEventMixin(OneBotServerMixin):
                 _has_reply_segment(event)
                 and _quoted_sender_is_bot(event, self.config.bot_qq) is True
             )
-            if not (at_bot or quotes_bot):
-                return
-            preliminary_reply = True
+            # 冷却期重新裁决：仅 @ 或引用可回复，其余一律压回 False
+            # （覆盖前面 should_reply 因身份关键词等给出的 True）。
+            # 不提前 return：消息继续向下完成上下文与记忆记录，
+            # 仅在统一发送门处被拦下，避免冷却期丢失该成员的上下文。
+            preliminary_reply = bool(at_bot or quotes_bot)
         voice_transcript = None
         voice_error: Exception | None = None
         if is_message and (event.get("message_type") == "private" or preliminary_reply):

@@ -793,3 +793,46 @@ def test_hard_cap_suppression_blocks_ambient_in_same_message(
     assert ambient_calls == []
     assert sent == []
     assert server._group_reply_focus.is_suppressed(normal)
+
+
+def test_suppressed_member_message_is_recorded_but_not_sent(
+    monkeypatch, tmp_path
+) -> None:
+    engine, server = _fallback_server(tmp_path, reply_mode="smart")
+
+    async def fake_reply(*args, **kwargs):
+        return "模型回复"
+
+    async def fake_analyze(*args, **kwargs):
+        return None
+
+    sent: list[str] = []
+
+    async def fake_send_reply(websocket, event, messages, **kwargs):
+        if isinstance(messages, str):
+            sent.append(messages)
+            return
+        for message in messages:
+            if getattr(message, "kind", "") == "text":
+                sent.append(str(message.content))
+
+    monkeypatch.setattr(engine, "reply", fake_reply)
+    monkeypatch.setattr(server.tools, "analyze", fake_analyze)
+    monkeypatch.setattr(server, "send_reply", fake_send_reply)
+
+    end = _group_event(10001, _at_bot(), _text("不聊了"))
+    end.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
+    asyncio.run(server._handle_event(object(), end))
+    sent.clear()
+
+    normal = _group_event(10001, _text("我刚和别人聊到周末计划"))
+    normal.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
+    asyncio.run(server._handle_event(object(), normal))
+
+    assert sent == []
+    member_id = f"group:{GROUP_ID}:user:10001"
+    history = engine.memory.recent_history(member_id, limit=10)
+    assert any(
+        entry.get("role") == "user" and "周末计划" in entry.get("text", "")
+        for entry in history
+    )
