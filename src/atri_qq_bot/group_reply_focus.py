@@ -89,6 +89,25 @@ class GroupReplyFocusStore:
         if not key:
             return
         current_time = time.time() if now is None else float(now)
+        existing = self._active.get(key)
+        if existing is not None:
+            hard_deadline = existing.opened_at + ACTIVE_SESSION_HARD_CAP_SECONDS
+            if current_time >= hard_deadline:
+                # 已达从首次开窗起的绝对上限：不再因再次 @ 重新开窗，
+                # 关闭会话并进入冷却；冷却期内能否回复由 is_suppressed 分支决定。
+                self._active.pop(key, None)
+                self._suppressed[key] = hard_deadline + END_CONVERSATION_SUPPRESS_SECONDS
+                self._trim()
+                return
+            # 同一场对话内再次 @：保留首次 opened_at，硬上限不重置，
+            # 仅延长本段有效期且不突破硬上限。
+            existing.expires_at = min(
+                current_time + self.active_session_ttl_seconds, hard_deadline
+            )
+            if nickname:
+                existing.nickname = str(nickname).strip()
+            self._trim()
+            return
         self._active[key] = _ActiveGroupSession(
             expires_at=current_time + self.active_session_ttl_seconds,
             nickname=str(nickname or "").strip(),
@@ -150,8 +169,13 @@ class GroupReplyFocusStore:
         if session is None:
             return False
         hard_deadline = session.opened_at + ACTIVE_SESSION_HARD_CAP_SECONDS
-        if current_time > session.expires_at or current_time >= hard_deadline:
+        hit_hard_cap = current_time >= hard_deadline
+        if current_time > session.expires_at or hit_hard_cap:
             self._active.pop(key, None)
+            # 绝对硬上限到期：自动进入冷却，停止主动续聊/搭话；
+            # 仅段内 idle 过期（未过硬上限）不冷却，保留原有行为。
+            if hit_hard_cap:
+                self._suppressed[key] = hard_deadline + END_CONVERSATION_SUPPRESS_SECONDS
             return False
         # 明确表示“不聊了”：结束会话，不再把它当续聊接话。
         if _looks_like_end_conversation(text):

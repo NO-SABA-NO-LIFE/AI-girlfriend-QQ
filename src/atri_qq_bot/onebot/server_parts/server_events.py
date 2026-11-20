@@ -231,7 +231,11 @@ class OneBotEventMixin(OneBotServerMixin):
                 )
                 preliminary_reply = preliminary_reply or active_group_continuation
                 # 没有任何明确触发时，普通群聊由模型按内容判断是否搭话（带冷却）。
-                if not preliminary_reply:
+                # 硬上限刚触发冷却时也不得再走随机搭话。
+                if (
+                    not preliminary_reply
+                    and not self._group_reply_focus.is_suppressed(event)
+                ):
                     preliminary_reply = await self._maybe_ambient_group_reply(
                         event, plain_text
                     )

@@ -691,3 +691,105 @@ def test_suppressed_member_only_replies_to_mention_or_quote(
     asyncio.run(server._handle_event(object(), quote))
     assert len(sent) == 3
     assert sent[2].startswith("模型回复")
+
+
+def test_repeated_mention_keeps_first_opened_at_and_hard_cap() -> None:
+    store = GroupReplyFocusStore()
+    key = f"group:{GROUP_ID}:user:10001"
+    store.open_session(
+        _group_event(10001, _at_bot(), _text("在吗")), nickname="A", now=0
+    )
+    assert store._active[key].opened_at == 0
+
+    # 100 秒后再次 @：硬上限不重置，只延长本段且不突破 180。
+    store.open_session(
+        _group_event(10001, _at_bot(), _text("继续")), nickname="A", now=100
+    )
+    sess = store._active[key]
+    assert sess.opened_at == 0
+    # 100 + 60 = 160，未触及 180 硬上限，本段仅顺延 60 秒。
+    assert sess.expires_at == 160.0
+
+
+def test_open_after_hard_cap_suppresses_instead_of_new_window() -> None:
+    store = GroupReplyFocusStore()
+    key = f"group:{GROUP_ID}:user:10001"
+    store.open_session(
+        _group_event(10001, _at_bot(), _text("在吗")), nickname="A", now=0
+    )
+    late = _group_event(10001, _at_bot(), _text("还在吗"))
+    store.open_session(late, nickname="A", now=180)
+    assert key not in store._active
+    assert store.is_suppressed(late, now=180)
+    assert store._suppressed[key] == 180 + END_CONVERSATION_SUPPRESS_SECONDS
+
+
+def test_continuation_hard_cap_auto_suppresses() -> None:
+    store = GroupReplyFocusStore()
+    store.open_session(
+        _group_event(10001, _at_bot(), _text("在吗")), nickname="A", now=0
+    )
+    event = _group_event(10001, _text("嗯"))
+    assert not store.is_active_continuation(event, "嗯", now=180)
+    assert store.is_suppressed(event, now=180)
+
+
+def test_idle_expiry_within_hard_cap_does_not_suppress() -> None:
+    store = GroupReplyFocusStore()
+    store.open_session(
+        _group_event(10001, _at_bot(), _text("在吗")), nickname="A", now=0
+    )
+    event = _group_event(10001, _text("嗯"))
+    assert not store.is_active_continuation(event, "嗯", now=70)
+    assert not store.is_suppressed(event, now=70)
+
+
+def test_hard_cap_suppression_blocks_ambient_in_same_message(
+    monkeypatch, tmp_path
+) -> None:
+    engine, server = _fallback_server(tmp_path, reply_mode="smart")
+
+    async def fake_reply(*args, **kwargs):
+        return "模型回复"
+
+    async def fake_analyze(*args, **kwargs):
+        return None
+
+    sent: list[str] = []
+
+    async def fake_send_reply(websocket, event, messages, **kwargs):
+        if isinstance(messages, str):
+            sent.append(messages)
+            return
+        for message in messages:
+            if getattr(message, "kind", "") == "text":
+                sent.append(str(message.content))
+
+    ambient_calls: list[str] = []
+
+    async def fake_ambient(event, text):
+        ambient_calls.append(text)
+        return True
+
+    monkeypatch.setattr(engine, "reply", fake_reply)
+    monkeypatch.setattr(server.tools, "analyze", fake_analyze)
+    monkeypatch.setattr(server, "send_reply", fake_send_reply)
+    monkeypatch.setattr(server, "_maybe_ambient_group_reply", fake_ambient)
+
+    # 让 180 秒硬上限恰好落在当前时刻：处理消息时即触发冷却，
+    # 且冷却截止时间在真实未来，is_suppressed 复查才会返回 True。
+    import time
+
+    opener = _group_event(10001, _at_bot(), _text("在吗"))
+    server._group_reply_focus.open_session(
+        opener, nickname="A", now=time.time() - 180
+    )
+
+    normal = _group_event(10001, _text("今天天气真不错"))
+    normal.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
+    asyncio.run(server._handle_event(object(), normal))
+
+    # 同条消息内 continuation 刚触发硬上限冷却，ambient 不得再被调用，也不发送。
+    assert ambient_calls == []
+    assert sent == []
+    assert server._group_reply_focus.is_suppressed(normal)
