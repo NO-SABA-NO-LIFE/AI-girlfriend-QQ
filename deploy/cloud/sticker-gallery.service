@@ -1,0 +1,16 @@
+[Unit]
+Description=Atri Sticker Gallery
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/atri-qq-bot
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONUTF8=1
+ExecStart=/opt/atri-qq-bot/.venv/bin/python deploy/sticker_gallery.py --port 8788
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
