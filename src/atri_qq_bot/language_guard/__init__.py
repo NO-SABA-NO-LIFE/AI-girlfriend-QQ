@@ -15,6 +15,7 @@ from .patterns import (
     LATIN_EXTENDED_RE,
     PAD_TOKEN_RE,
     SYMBOL_GARBAGE_RE,
+    TRADITIONAL_VARIANT_RE,
     VIETNAMESE_MARK_RE,
 )
 
@@ -27,6 +28,7 @@ __all__ = [
     "LATIN_EXTENDED_RE",
     "PAD_TOKEN_RE",
     "SYMBOL_GARBAGE_RE",
+    "TRADITIONAL_VARIANT_RE",
     "VIETNAMESE_MARK_RE",
     "has_illegal_language_or_garbage",
     "_has_ascii_garbage_without_chinese",

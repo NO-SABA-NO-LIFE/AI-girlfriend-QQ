@@ -11,6 +11,7 @@ from .patterns import (
     LATIN_EXTENDED_RE,
     PAD_TOKEN_RE,
     SYMBOL_GARBAGE_RE,
+    TRADITIONAL_VARIANT_RE,
     VIETNAMESE_MARK_RE,
 )
 
@@ -20,6 +21,8 @@ def has_illegal_language_or_garbage(text: str) -> bool:
     if not sample.strip():
         return False
     if PAD_TOKEN_RE.search(sample):
+        return True
+    if TRADITIONAL_VARIANT_RE.search(sample):
         return True
     script_sample = sample.replace("ω", "").replace("Ω", "")
     if ILLEGAL_SCRIPT_RE.search(script_sample):
