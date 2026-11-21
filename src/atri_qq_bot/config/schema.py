@@ -35,6 +35,9 @@ class BotConfig:
     chat_quality_retries: int = 1
     # 上游非流式长请求会按 max_tokens 缓冲并挂起，改用 SSE 流式并在本地重组。
     chat_stream_enabled: bool = True
+    # 聊天备用模型：主模型传输超时/连接失败时自动切换（同视觉兜底机制）。
+    openai_fallback_model: str = ""
+    openai_fallback_base_url: str = ""
     message_split_max_chars: int = 120
     message_split_max_parts: int = 2
     message_send_delay_min: float = 0.55

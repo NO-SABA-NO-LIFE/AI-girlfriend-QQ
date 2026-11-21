@@ -483,7 +483,7 @@ def test_reply_with_api_runs_tool_call_loop(monkeypatch) -> None:
         async def __aexit__(self, *args: Any) -> None:
             return None
 
-        async def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> FakeResponse:
+        async def post(self, url: str, headers: dict[str, str], json: dict[str, Any], timeout: Any = None) -> FakeResponse:
             posted_payloads.append(json)
             if len(posted_payloads) == 1:
                 return FakeResponse(
@@ -559,7 +559,7 @@ def test_reply_with_api_time_hint_guides_daily_time_awareness(monkeypatch) -> No
         async def __aexit__(self, *args: Any) -> None:
             return None
 
-        async def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> FakeResponse:
+        async def post(self, url: str, headers: dict[str, str], json: dict[str, Any], timeout: Any = None) -> FakeResponse:
             posted_payloads.append(json)
             return FakeResponse()
 
@@ -617,7 +617,7 @@ def test_reply_with_api_supports_two_sequential_tool_rounds(monkeypatch) -> None
         async def __aexit__(self, *args: Any) -> None:
             return None
 
-        async def post(self, url: str, headers: dict[str, str], json: dict[str, Any]) -> FakeResponse:
+        async def post(self, url: str, headers: dict[str, str], json: dict[str, Any], timeout: Any = None) -> FakeResponse:
             posted_payloads.append(json)
             call_number = len(posted_payloads)
             if call_number <= 2:

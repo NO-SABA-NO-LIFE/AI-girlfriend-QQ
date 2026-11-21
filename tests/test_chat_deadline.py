@@ -151,7 +151,7 @@ def _install_fake_client(monkeypatch, *, timeouts: list[Any], posts: dict[str, i
         async def __aexit__(self, *args: Any) -> None:
             return None
 
-        def stream(self, method, url, headers=None, json=None) -> FakeStream:
+        def stream(self, method, url, headers=None, json=None, timeout=None) -> FakeStream:
             posts["n"] += 1
             # 前两次无内容触发 guarded api 重试，第三次才给合格回复。
             content = "" if posts["n"] < 3 else "好呀，我在听。"

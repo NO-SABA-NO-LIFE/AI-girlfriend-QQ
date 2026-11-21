@@ -814,18 +814,85 @@ class EngineToolsMixin(PersonaEngineMixin):
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         import httpx
+        import time
 
         use_stream = bool(getattr(self.config, "chat_stream_enabled", True))
-        url = f"{self.config.openai_base_url}/chat/completions"
+        # 候选列表：主模型始终在前；备用模型为空或与主模型同名则忽略。
+        candidates: list[tuple[str, str]] = [
+            (self.config.openai_model, self.config.openai_base_url.rstrip("/"))
+        ]
+        fallback_model = str(
+            getattr(self.config, "openai_fallback_model", "") or ""
+        ).strip()
+        if fallback_model and fallback_model != self.config.openai_model:
+            fallback_base = (
+                str(getattr(self.config, "openai_fallback_base_url", "") or "").strip()
+                or self.config.openai_base_url
+            ).rstrip("/")
+            candidates.append((fallback_model, fallback_base))
 
-        async def post_once(request_payload: dict[str, Any]) -> dict[str, Any]:
+        # 每个模型各自的预算（配置的聊天超时，50s）：主、备各 50，名义总预算
+        # 因此为 50 × 候选数。某模型若快速失败、没吃满自己的 50s，剩余时间会
+        # 自然留给后面的模型（通过共享 deadline 实现“剩余时间转移”）。
+        per_model_budget = _chat_http_timeout(self.config)
+        total_budget = per_model_budget * len(candidates)
+        # 每个模型各自的传输尝试次数；与质量重试同源，默认 retries=1 → 每模型 2 次。
+        per_model_attempts = 1 + max(
+            0, min(2, int(getattr(self.config, "chat_quality_retries", 1)))
+        )
+        # 展开成有序尝试序列：主模型先做满 per_model_attempts，再轮到备用模型。
+        attempt_plan: list[tuple[str, str]] = []
+        for candidate in candidates:
+            attempt_plan.extend([candidate] * per_model_attempts)
+
+        async def send_candidate(
+            request_payload: dict[str, Any],
+            model: str,
+            base_url: str,
+            candidate_timeout: float,
+        ) -> dict[str, Any]:
+            # 复用传入 client，仅用单次请求级 timeout 覆盖，不额外建连接。
+            candidate_payload = dict(request_payload)
+            candidate_payload["model"] = model
+            url = f"{base_url}/chat/completions"
             if use_stream:
                 return await self._stream_chat_response(
-                    client, headers, request_payload, url
+                    client, headers, candidate_payload, url, candidate_timeout
                 )
-            response = await client.post(url, headers=headers, json=request_payload)
+            response = await client.post(
+                url, headers=headers, json=candidate_payload,
+                timeout=candidate_timeout,
+            )
             response.raise_for_status()
             return response.json()
+
+        async def post_once(request_payload: dict[str, Any]) -> dict[str, Any]:
+            deadline = time.monotonic() + total_budget
+            last_exc: Exception | None = None
+            total_attempts = len(attempt_plan)
+            for index, (model, base_url) in enumerate(attempt_plan):
+                remaining = deadline - time.monotonic()
+                if remaining <= 1.0:
+                    break
+                # 剩余时间在尚未执行的尝试间均分；单次请求不超过该模型自己的
+                # 50s 预算（per_model_budget 封顶）。前序模型快速失败时，剩余
+                # 时间更多，后面的模型因此能拿到转移过来的时间。
+                candidate_timeout = min(
+                    per_model_budget,
+                    max(1.0, remaining / (total_attempts - index)),
+                )
+                try:
+                    return await send_candidate(
+                        request_payload, model, base_url, candidate_timeout
+                    )
+                except httpx.TransportError as exc:
+                    # ReadTimeout/ConnectError 等：还有尝试就继续（同模型重试或
+                    # 切备用），全部受同一个 50s deadline 约束。
+                    last_exc = exc
+                    continue
+            if last_exc is not None:
+                raise last_exc
+            raise RuntimeError("聊天请求在预算内未完成")
 
         async def post_local(request_payload: dict[str, Any]) -> dict[str, Any]:
             async with inference_resource_lease(
@@ -881,6 +948,7 @@ class EngineToolsMixin(PersonaEngineMixin):
         headers: dict[str, str],
         request_payload: dict[str, Any],
         url: str,
+        request_timeout: float | None = None,
     ) -> dict[str, Any]:
         """以 SSE 发起请求，读取 delta 并在本地重组为非流式同构 dict。
 
@@ -893,9 +961,10 @@ class EngineToolsMixin(PersonaEngineMixin):
         stream_payload = dict(request_payload)
         stream_payload["stream"] = True
         state = new_stream_state()
-        async with client.stream(
-            "POST", url, headers=headers, json=stream_payload
-        ) as response:
+        stream_kwargs: dict[str, Any] = {"headers": headers, "json": stream_payload}
+        if request_timeout is not None:
+            stream_kwargs["timeout"] = request_timeout
+        async with client.stream("POST", url, **stream_kwargs) as response:
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError:

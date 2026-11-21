@@ -128,6 +128,8 @@ def _build_config(root: Path) -> BotConfig:
             0, min(2, _env_int("CHAT_QUALITY_RETRIES", 1))
         ),
         chat_stream_enabled=_env_bool("CHAT_STREAM_ENABLED", True),
+        openai_fallback_model=_env("OPENAI_FALLBACK_MODEL", "").strip(),
+        openai_fallback_base_url=_env("OPENAI_FALLBACK_BASE_URL", "").rstrip("/"),
         message_split_max_chars=split_max_chars,
         message_split_max_parts=split_max_parts,
         message_send_delay_min=send_delay_min,
