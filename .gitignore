@@ -25,3 +25,22 @@ data/voice/*
 !data/voice/asr-hotwords.json
 !data/voice/tts-pronunciations.json
 tools/onebot-qzone/
+
+# Local scratch / benchmark artifacts (kept on disk, not tracked)
+/analyze_sessions.py
+/apply_*.py
+/time_repro*.py
+/token_probe*.py
+/gen_bench_image.py
+/make_report.py
+/bench_all.py
+/new_block.txt
+/old_block.txt
+/test_result.txt
+/token_probe.out
+/bench_pkg.tar.gz
+/bench_report.md
+/bench_results.json
+/bench_test.png
+/bench_pkg/
+docs/prompts/*.bak-*

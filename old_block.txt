@@ -1,7 +1,0 @@
-def _provider_payload_overrides(base_url: str, model: str) -> dict[str, Any]:
-    if (
-        "api.deepseek.com" in str(base_url).casefold()
-        and str(model).strip().casefold() in {"deepseek-v4-flash", "deepseek-v4-pro"}
-    ):
-        return {"thinking": {"type": "disabled"}}
-    return {}
