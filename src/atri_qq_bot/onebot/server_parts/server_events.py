@@ -23,6 +23,7 @@ from ..reply_policy import (  # type: ignore[import-not-found]
 from ...group_reply_focus import (  # type: ignore[import-not-found]
     _looks_like_end_conversation,
     _strip_placeholder_text,
+    relative_time_label,
 )
 from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
     forced_event_block_reason,
@@ -1108,6 +1109,7 @@ class OneBotEventMixin(OneBotServerMixin):
             LOGGER.debug("读取近期群聊上下文失败", exc_info=True)
             return ""
         lines: list[str] = []
+        current_now = time.time()
         for entry in entries:
             text = str(entry.get("text") or "").strip()
             if not text:
@@ -1116,7 +1118,9 @@ class OneBotEventMixin(OneBotServerMixin):
                 speaker = "亚托莉"
             else:
                 speaker = str(entry.get("nickname") or "群友").strip() or "群友"
-            lines.append(f"{speaker}: {text[:120]}")
+            label = relative_time_label(entry.get("at"), current_now)
+            prefix = f"[{label}] " if label else ""
+            lines.append(f"{prefix}{speaker}: {text[:120]}")
         return "\n".join(lines)
 
     async def _llm_ambient_gate_should_reply(

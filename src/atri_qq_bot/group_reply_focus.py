@@ -340,6 +340,30 @@ class GroupReplyFocusStore:
             self._active.pop(earliest, None)
 
 
+def relative_time_label(at: Any, now: float) -> str:
+    """Return a Chinese relative-time label for an epoch-second timestamp.
+
+    Returns an empty string when the timestamp is missing/invalid or less
+    than a minute old, so very recent lines stay uncluttered. Labels:
+    N分钟前 / N小时前 / 一天前 / N天前.
+    """
+    try:
+        occurred = float(at)
+    except (TypeError, ValueError):
+        return ""
+    delta = float(now) - occurred
+    if delta < 60.0:
+        return ""
+    if delta < 3600.0:
+        return f"{int(delta // 60)}分钟前"
+    if delta < 86400.0:
+        return f"{int(delta // 3600)}小时前"
+    days = int(delta // 86400)
+    if days == 1:
+        return "一天前"
+    return f"{days}天前"
+
+
 def _group_member_key(event: dict[str, Any]) -> str:
     if event.get("message_type") != "group":
         return ""

@@ -746,6 +746,8 @@ def test_history_claim_is_reviewed_against_actual_roles(monkeypatch, tmp_path) -
         memory_path=tmp_path / "memory.json",
     )
     engine = AtriReplyEngine(config)
+    # 用固定的早期时间戳造数据；冻结时钟让这些记录保持"刚刚"，不产生相对时间标签。
+    monkeypatch.setattr("time.time", lambda: 10.0)
     engine.memory.observe_user("private:10001", "我准备玩一会儿游戏", now=1)
     engine.memory.observe_bot("private:10001", "我猜你又瘫着不动了", now=2)
     attempts = 0
@@ -1156,6 +1158,7 @@ def test_angry_private_correction_uses_model_repair_mode(tmp_path, monkeypatch) 
 
 def test_recent_private_context_includes_actual_assistant_reply_for_continuity(
     tmp_path,
+    monkeypatch,
 ) -> None:
     config = BotConfig(
         bot_qq=100000001,
@@ -1170,6 +1173,8 @@ def test_recent_private_context_includes_actual_assistant_reply_for_continuity(
         memory_path=tmp_path / "memory.json",
     )
     engine = AtriReplyEngine(config)
+    # 冻结时钟，让固定早期时间戳的记录保持"刚刚"，不产生相对时间标签。
+    monkeypatch.setattr("time.time", lambda: 10.0)
     engine.memory.observe_user("private:10001", "我准备玩一会儿游戏", now=1)
     engine.memory.observe_bot("private:10001", "我猜你又瘫着不动了", now=2)
     engine.memory.observe_user("private:10001", "怎么每天都猜我瘫着", now=3)
@@ -1210,6 +1215,8 @@ def test_normal_private_turn_injects_actual_assistant_history_without_singing(
         llm_tools_enabled=False,
     )
     engine = AtriReplyEngine(config)
+    # 冻结时钟，让固定早期时间戳的记录保持"刚刚"，不产生相对时间标签。
+    monkeypatch.setattr("time.time", lambda: 10.0)
     engine.memory.observe_user("private:10001", "随机生成20个数字", now=1)
     engine.memory.observe_bot(
         "private:10001",

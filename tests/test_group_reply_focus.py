@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from atri_qq_bot.config import BotConfig
 from atri_qq_bot.group_reply_focus import (
@@ -6,6 +7,7 @@ from atri_qq_bot.group_reply_focus import (
     GroupReplyFocus,
     GroupReplyFocusStore,
     _looks_like_end_conversation,
+    relative_time_label,
 )
 from atri_qq_bot.onebot.server import OneBotServer
 from atri_qq_bot.persona import AtriReplyEngine
@@ -1041,3 +1043,56 @@ def test_proactive_ambient_focus_frames_chime_in(monkeypatch, tmp_path) -> None:
     assert focus.source == "proactive_ambient"
     assert "强制回复焦点" not in focus.prompt_context()
     assert len(sent) == 1
+
+
+def test_relative_time_label_boundaries() -> None:
+    now = 1_000_000.0
+    assert relative_time_label(None, now) == ""
+    assert relative_time_label("not-a-number", now) == ""
+    assert relative_time_label(now - 30, now) == ""        # 一分钟内不显示
+    assert relative_time_label(now + 10, now) == ""        # 时钟偏移/未来时间
+    assert relative_time_label(now - 90, now) == "1分钟前"
+    assert relative_time_label(now - 3 * 3600, now) == "3小时前"
+    assert relative_time_label(now - 25 * 3600, now) == "一天前"
+    assert relative_time_label(now - 50 * 3600, now) == "2天前"
+
+
+def test_history_context_carries_relative_time(monkeypatch, tmp_path) -> None:
+    engine, server = _fallback_server(tmp_path, reply_mode="smart")
+    now = 1_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)  # 冻结时钟，便于确定性断言
+
+    # 群聊：一条一天前、一条一分钟内。
+    group_conv = f"group:{GROUP_ID}"
+    gitem = engine.memory._conversation(group_conv, save=False)
+    gitem["history"] = [
+        {"at": now - 25 * 3600, "role": "user", "text": "一天前的话",
+         "nickname": "小花", "actor_id": "10002"},
+        {"at": now - 30, "role": "user", "text": "刚刚的话",
+         "nickname": "小鱿鱼", "actor_id": "10001"},
+    ]
+    group_ctx = engine._recent_conversation_context(group_conv)
+    assert "[一天前] 小花: 一天前的话" in group_ctx
+    assert "小鱿鱼: 刚刚的话" in group_ctx
+    assert "[一天前]" not in group_ctx.split("刚刚的话", 1)[1]
+
+    group_msgs = engine._recent_conversation_messages(group_conv)
+    contents = [m["content"] for m in group_msgs]
+    assert any(c.startswith("[一天前]") for c in contents)
+    assert all(not c.startswith("[") for c in contents if "刚刚的话" in c)
+
+    # 接话门上下文同样带标签。
+    gate_event = _group_event(10001, _text("触发"))
+    gate_ctx = server._format_ambient_group_context(gate_event)
+    assert "[一天前]" in gate_ctx
+
+    # 私聊：三小时前的用户消息也能识别新旧。
+    private_conv = "private:10001"
+    pitem = engine.memory._conversation(private_conv, save=False)
+    pitem["history"] = [
+        {"at": now - 3 * 3600, "role": "user", "text": "三小时前私聊"},
+        {"at": now - 30, "role": "assistant", "text": "近期回复"},
+    ]
+    private_ctx = engine._recent_conversation_context(private_conv)
+    assert "[3小时前] 用户: 三小时前私聊" in private_ctx
+    assert "亚托莉: 近期回复" in private_ctx

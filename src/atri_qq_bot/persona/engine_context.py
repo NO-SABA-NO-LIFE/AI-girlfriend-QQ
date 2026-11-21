@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..group_reply_focus import relative_time_label
 from .engine_support import PersonaEngineMixin
 
 
@@ -63,6 +64,7 @@ class EngineContextMixin(PersonaEngineMixin):
                 break
 
         is_group = conversation_id.startswith("group:")
+        current_now = time.time()
         for entry in reversed(selected):
             role = entry.get("role")
             text = str(entry.get("text") or "").strip()
@@ -76,7 +78,9 @@ class EngineContextMixin(PersonaEngineMixin):
                     speaker = "群友"
             else:
                 speaker = "用户"
-            lines.append(f"{speaker}: {text}")
+            label = relative_time_label(entry.get("at"), current_now)
+            prefix = f"[{label}] " if label else ""
+            lines.append(f"{prefix}{speaker}: {text}")
         return "\n".join(lines)
 
     def _recent_conversation_messages(
@@ -114,6 +118,7 @@ class EngineContextMixin(PersonaEngineMixin):
 
         is_group = conversation_id.startswith("group:")
         messages: list[dict[str, str]] = []
+        current_now = time.time()
         for entry in reversed(selected):
             role = str(entry.get("role"))
             text = str(entry.get("text") or "").strip()
@@ -124,6 +129,9 @@ class EngineContextMixin(PersonaEngineMixin):
                 if re.fullmatch(r"\d{5,}", speaker):
                     speaker = "群友"
                 text = f"{speaker}: {text}"
+            label = relative_time_label(entry.get("at"), current_now)
+            if label:
+                text = f"[{label}] {text}"
             messages.append({"role": role, "content": text})
         return messages
 
