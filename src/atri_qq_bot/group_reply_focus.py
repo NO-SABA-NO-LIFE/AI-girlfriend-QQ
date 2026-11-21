@@ -30,6 +30,8 @@ class GroupReplyFocus:
 
     def prompt_context(self) -> str:
         display_name = self.nickname.strip() or "当前群友"
+        if self.source == "proactive_ambient":
+            return self._proactive_ambient_prompt(display_name)
         if not self.focus_text:
             return (
                 "本轮强制回复焦点：\n"
@@ -44,6 +46,23 @@ class GroupReplyFocus:
             f"焦点内容：{self.focus_text}\n"
             "第一句必须先回应上面的焦点内容。其他群友消息只能作为背景，"
             "除非当前回复对象明确要求讨论别人，否则不得优先回答其他人的消息。"
+        )
+
+    def _proactive_ambient_prompt(self, display_name: str) -> str:
+        """Framing for a proactive chime-in on a message not addressed to the bot."""
+        return (
+            "本轮是你主动插话：没有人艾特你，也没有人喊你名字。\n"
+            f"触发你插话的是“{display_name}”发的这条消息：{self.focus_text or '（无具体文字）'}\n"
+            "先结合上面带昵称的群聊记录，逐句分清两件事：\n"
+            "1. 每句话分别是谁说的；\n"
+            "2. 这条触发消息是在对谁说话——它很可能是在回应刚发言的另一位群友，"
+            "而不是对你说的。\n"
+            "注意：消息里的“你/你们/他/她”通常指代刚发言的那位真人，不要默认成你自己。"
+            "如果这是别人之间的提问或对话，不要把它当成问你、更不要替对方回答"
+            "（例如不要因为听到“谁教的”就辩解“没人教我”）；你只以旁观者身份自然地"
+            "接一句梗、吐槽或补充，语气短而像真人。\n"
+            "不要把自己的话或其他群友的话张冠李戴；拿不准这句话和你有没有关系时，"
+            "就只做一句不抢话的简短反应。"
         )
 
 
@@ -154,13 +173,21 @@ class GroupReplyFocusStore:
             return False
         return True
 
-    def is_active_continuation(
+    def continuation_candidate(
         self,
         event: dict[str, Any],
         text: str,
         *,
         now: float | None = None,
     ) -> bool:
+        """Non-mutating check: is this message a plausible bot continuation?
+
+        This only validates that an active, non-expired session exists and the
+        text heuristic matches. It does not renew the session. The text-level
+        heuristic cannot tell who a generic "你" refers to, so the caller is
+        expected to confirm the addressee with the context-aware model gate
+        before calling renew_continuation.
+        """
         key = _group_member_key(event)
         if not key:
             return False
@@ -181,15 +208,48 @@ class GroupReplyFocusStore:
         if _looks_like_end_conversation(text):
             self._active.pop(key, None)
             return False
-        if not _looks_like_direct_continuation(event, text, self.bot_qq):
+        return _looks_like_direct_continuation(event, text, self.bot_qq)
+
+    def renew_continuation(
+        self,
+        event: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Advance the active session one uniform stage after a confirmed reply.
+
+        Assumes continuation_candidate already returned True and the caller
+        confirmed the message is addressed to the bot. The new expiry is always
+        clamped to the hard deadline measured from when the session opened.
+        """
+        key = _group_member_key(event)
+        session = self._active.get(key) if key else None
+        if session is None or key is None:
             return False
-        # 命中续聊，进入下一段：每段统一时长，且无论如何都不能突破
-        # 从开窗时刻起的绝对硬上限。
+        current_time = time.time() if now is None else float(now)
+        hard_deadline = session.opened_at + ACTIVE_SESSION_HARD_CAP_SECONDS
         next_stage = session.stage + 1
         new_expires = current_time + self._stage_ttl_seconds(next_stage)
         session.stage = next_stage
         session.expires_at = min(new_expires, hard_deadline)
         return True
+
+    def is_active_continuation(
+        self,
+        event: dict[str, Any],
+        text: str,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Deterministic candidate + renewal (kept for standalone callers/tests).
+
+        The server uses continuation_candidate + a context-aware model gate +
+        renew_continuation separately; this convenience method preserves the
+        original all-in-one behavior.
+        """
+        if not self.continuation_candidate(event, text, now=now):
+            return False
+        return self.renew_continuation(event, now=now)
 
     def remember(
         self,
@@ -454,44 +514,6 @@ def _looks_like_direct_continuation(
         or compact.endswith(("?", "？", "!", "！"))
         or len(compact) >= 12
     )
-
-
-def _last_group_message_entry(
-    recent_group_history: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    """Return the most recent real group message entry, or None."""
-    for entry in reversed(recent_group_history):
-        if isinstance(entry, dict) and entry.get("role") in ("user", "assistant"):
-            return entry
-    return None
-
-
-def continuation_follows_other_human(
-    recent_group_history: list[dict[str, Any]],
-    *,
-    current_sender_id: int | str,
-) -> bool:
-    """Whether the current message is most naturally a reply to another human.
-
-    The text-level heuristic only sees a generic second-person cue such as
-    "你". The real addressee is determined by the immediately preceding group
-    speaker:
-
-    - bot was the last speaker -> a continuation with the bot, do not veto;
-    - same user keeps talking  -> same thread, do not veto;
-    - a different human spoke  -> human-to-human reply, veto (fail closed).
-
-    Explicit bot references (@bot, bot name, quote of bot) are covered by the
-    separate preliminary reply decision and are not affected here.
-    """
-    last = _last_group_message_entry(recent_group_history)
-    if last is None or last.get("role") == "assistant":
-        return False
-    actor_id = last.get("actor_id")
-    if actor_id is None:
-        # A user entry without a known actor: treat as another human, fail closed.
-        return True
-    return str(actor_id) != str(current_sender_id)
 
 
 # 明确表示“不想继续聊”的终止信号：只认明确表达，避免把玩笑或正常对话误判成结束。

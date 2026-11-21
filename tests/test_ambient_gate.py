@@ -99,7 +99,7 @@ def test_gate_fails_closed_on_network_error(monkeypatch) -> None:
 def test_ambient_reply_triggers_when_gate_true() -> None:
     server = _make_server()
 
-    async def fake_gate(text: str, group_context: str = "") -> bool:
+    async def fake_gate(text: str, group_context: str = "", speaker_name: str = "") -> bool:
         return True
 
     server._llm_ambient_gate_should_reply = fake_gate
@@ -112,7 +112,7 @@ def test_ambient_reply_respects_cooldown() -> None:
     server = _make_server()
     gate_calls: list[str] = []
 
-    async def fake_gate(text: str, group_context: str = "") -> bool:
+    async def fake_gate(text: str, group_context: str = "", speaker_name: str = "") -> bool:
         gate_calls.append(text)
         return True
 

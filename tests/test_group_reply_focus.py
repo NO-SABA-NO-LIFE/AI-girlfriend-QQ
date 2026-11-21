@@ -6,7 +6,6 @@ from atri_qq_bot.group_reply_focus import (
     GroupReplyFocus,
     GroupReplyFocusStore,
     _looks_like_end_conversation,
-    continuation_follows_other_human,
 )
 from atri_qq_bot.onebot.server import OneBotServer
 from atri_qq_bot.persona import AtriReplyEngine
@@ -839,53 +838,34 @@ def test_suppressed_member_message_is_recorded_but_not_sent(
     )
 
 
-# --- 活跃续聊的对话对象判断（上一发言人否决）---
+# --- 活跃续聊：候选判断与续期分离，最终由模型上下文门决定 ---
 
-def test_continuation_veto_when_other_human_spoke_last() -> None:
-    history = [
-        {"role": "user", "text": "行啊，小鱿鱼来聊", "actor_id": "10002",
-         "nickname": "小花"},
-    ]
-    # 当前发言者是 10001，最近一条来自另一个真人 10002：真人之间对话，否决。
-    assert continuation_follows_other_human(
-        history, current_sender_id=10001
+def test_continuation_candidate_does_not_mutate_session() -> None:
+    store = GroupReplyFocusStore()
+    store.open_session(
+        _group_event(10001, _at_bot(), _text("在吗")), nickname="A", now=10
     )
+    session = store._active[f"group:{GROUP_ID}:user:10001"]
+    before_stage, before_expires = session.stage, session.expires_at
 
-
-def test_continuation_allowed_when_bot_spoke_last() -> None:
-    history = [
-        {"role": "assistant", "text": "哼，我可是高性能机器人。"},
-    ]
-    assert not continuation_follows_other_human(
-        history, current_sender_id=10001
+    # 候选判断只返回 True/False，不滑动续期。
+    assert store.continuation_candidate(
+        _group_event(10001, _text("那你为什么这么想？")),
+        "那你为什么这么想？",
+        now=50,
     )
+    assert session.stage == before_stage
+    assert session.expires_at == before_expires
 
-
-def test_continuation_allowed_for_same_sender_followup() -> None:
-    history = [
-        {"role": "user", "text": "我再补充一句", "actor_id": "10001",
-         "nickname": "小鱿鱼"},
-    ]
-    # 同一人连续发消息，仍是同一话题，不否决。
-    assert not continuation_follows_other_human(
-        history, current_sender_id=10001
+    # 显式续期后才进入下一段。
+    assert store.renew_continuation(
+        _group_event(10001, _text("那你为什么这么想？")), now=50
     )
+    assert session.stage == before_stage + 1
+    assert session.expires_at == 110.0
 
 
-def test_continuation_veto_fail_closed_for_unknown_actor() -> None:
-    history = [{"role": "user", "text": "某条真人消息"}]
-    assert continuation_follows_other_human(
-        history, current_sender_id=10001
-    )
-
-
-def test_continuation_allowed_without_history() -> None:
-    assert not continuation_follows_other_human(
-        [], current_sender_id=10001
-    )
-
-
-def test_active_continuation_human_to_human_does_not_butt_in(
+def test_active_continuation_gate_rejects_human_to_human(
     monkeypatch, tmp_path
 ) -> None:
     engine, server = _fallback_server(tmp_path, reply_mode="smart")
@@ -906,12 +886,22 @@ def test_active_continuation_human_to_human_does_not_butt_in(
             if getattr(message, "kind", "") == "text":
                 sent.append(str(message))
 
+    gate_calls: list[tuple[str, str]] = []
+    ambient_calls: list[str] = []
+
+    async def fake_gate(plain_text, group_context, speaker_name=""):
+        gate_calls.append((plain_text, group_context))
+        return False  # 模型结合上下文判断：这是别人之间的对话，不接
+
     async def fake_ambient(event, text):
+        # 无活跃会话的真人消息（小花那条）才走这里；目标消息由续聊门裁决，不应进入。
+        ambient_calls.append(text)
         return False
 
     monkeypatch.setattr(engine, "reply", fake_reply)
     monkeypatch.setattr(server.tools, "analyze", fake_analyze)
     monkeypatch.setattr(server, "send_reply", fake_send_reply)
+    monkeypatch.setattr(server, "_llm_ambient_gate_should_reply", fake_gate)
     monkeypatch.setattr(server, "_maybe_ambient_group_reply", fake_ambient)
 
     # 1) 小鱿鱼先 @ 机器人，打开活跃会话。
@@ -928,14 +918,126 @@ def test_active_continuation_human_to_human_does_not_butt_in(
 
     sent.clear()
 
-    # 3) 小鱿鱼其实在回小花，不是对机器人说话，不能抢答。
+    # 3) 模型门判断小鱿鱼在回小花、不是对机器人说：不抢答，也不续期。
     target = _group_event(10001, _text("你说话太规整了 谁教的"))
     target.update({"self_id": BOT_QQ, "sender": {"card": "小鱿鱼"}})
     asyncio.run(server._handle_event(object(), target))
+    assert len(gate_calls) == 1
+    # 目标消息由续聊门裁决，没有再走随机搭话（只有小花那条进入过 ambient）。
+    assert "你说话太规整了" not in " ".join(ambient_calls)
     assert sent == []
+    session = server._group_reply_focus._active.get(key)
+    assert session is not None and session.stage == 0
 
-    # 4) 显式 @ 机器人时仍正常回复。
-    mention = _group_event(10001, _at_bot(), _text("那你说呢"))
-    mention.update({"self_id": BOT_QQ, "sender": {"card": "小鱿鱼"}})
-    asyncio.run(server._handle_event(object(), mention))
+
+def test_active_continuation_gate_accepts_and_renews(
+    monkeypatch, tmp_path
+) -> None:
+    engine, server = _fallback_server(tmp_path, reply_mode="smart")
+
+    async def fake_reply(*args, **kwargs):
+        return "模型回复"
+
+    async def fake_analyze(*args, **kwargs):
+        return None
+
+    sent: list[str] = []
+
+    async def fake_send_reply(websocket, event, messages, **kwargs):
+        if isinstance(messages, str):
+            sent.append(messages)
+            return
+        for message in messages:
+            if getattr(message, "kind", "") == "text":
+                sent.append(str(message))
+
+    async def fake_gate(plain_text, group_context, speaker_name=""):
+        return True  # 模型结合上下文判断：这句话确实在对机器人说，接
+
+    monkeypatch.setattr(engine, "reply", fake_reply)
+    monkeypatch.setattr(server.tools, "analyze", fake_analyze)
+    monkeypatch.setattr(server, "send_reply", fake_send_reply)
+    monkeypatch.setattr(server, "_llm_ambient_gate_should_reply", fake_gate)
+
+    opener = _group_event(10001, _at_bot(), _text("在吗"))
+    opener.update({"self_id": BOT_QQ, "sender": {"card": "小鱿鱼"}})
+    asyncio.run(server._handle_event(object(), opener))
+    key = f"group:{GROUP_ID}:user:10001"
+    sent.clear()
+
+    target = _group_event(10001, _text("那你觉得呢"))
+    target.update({"self_id": BOT_QQ, "sender": {"card": "小鱿鱼"}})
+    asyncio.run(server._handle_event(object(), target))
+
+    # 模型判断接话：回复一条，且会话续期到下一段。
+    assert len(sent) == 1
+    assert server._group_reply_focus._active[key].stage == 1
+
+
+def test_proactive_ambient_prompt_requires_addressee_resolution() -> None:
+    focus = GroupReplyFocus(
+        actor_id="10002",
+        nickname="小鱿鱼",
+        trigger_text="你说话太规整了 谁教的",
+        focus_text="你说话太规整了 谁教的",
+        source="proactive_ambient",
+        analysis_event={},
+    )
+    prompt = focus.prompt_context()
+    # 主动插话语境：先分清谁对谁说话，不把别人之间的问题当成问自己。
+    assert "主动插话" in prompt
+    assert "谁教的" in prompt
+    assert "在对谁说话" in prompt
+    # 不再使用"强制回复焦点 / 第一句必须先回应"那套直接应答的措辞。
+    assert "强制回复焦点" not in prompt
+    assert "第一句必须先回应" not in prompt
+
+
+def test_proactive_ambient_focus_frames_chime_in(monkeypatch, tmp_path) -> None:
+    engine, server = _fallback_server(tmp_path, reply_mode="smart")
+
+    captured: dict = {}
+
+    async def fake_reply(*args, **kwargs):
+        captured["reply_focus"] = kwargs.get("reply_focus")
+        return "模型回复"
+
+    async def fake_analyze(*args, **kwargs):
+        return None
+
+    sent: list[str] = []
+
+    async def fake_send_reply(websocket, event, messages, **kwargs):
+        if isinstance(messages, str):
+            sent.append(messages)
+            return
+        for message in messages:
+            if getattr(message, "kind", "") == "text":
+                sent.append(str(message))
+
+    gate_calls: list[dict] = []
+
+    async def fake_gate(plain_text, group_context, speaker_name=""):
+        gate_calls.append(
+            {"text": plain_text, "context": group_context, "speaker": speaker_name}
+        )
+        return True  # 模型门判断这条值得主动接
+
+    monkeypatch.setattr(engine, "reply", fake_reply)
+    monkeypatch.setattr(server.tools, "analyze", fake_analyze)
+    monkeypatch.setattr(server, "send_reply", fake_send_reply)
+    monkeypatch.setattr(server, "_llm_ambient_gate_should_reply", fake_gate)
+
+    # 真人之间在聊天，没有人 @ 机器人；模型门判断值得接，于是主动插话。
+    event = _group_event(10002, _text("你说话太规整了 谁教的"))
+    event.update({"self_id": BOT_QQ, "sender": {"card": "小鱿鱼"}})
+    asyncio.run(server._handle_event(object(), event))
+
+    assert len(gate_calls) == 1
+    # 门里的当前消息也带上了发言人昵称。
+    assert gate_calls[0]["speaker"] == "小鱿鱼"
+    focus = captured["reply_focus"]
+    assert focus is not None
+    assert focus.source == "proactive_ambient"
+    assert "强制回复焦点" not in focus.prompt_context()
     assert len(sent) == 1

@@ -23,7 +23,6 @@ from ..reply_policy import (  # type: ignore[import-not-found]
 from ...group_reply_focus import (  # type: ignore[import-not-found]
     _looks_like_end_conversation,
     _strip_placeholder_text,
-    continuation_follows_other_human,
 )
 from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
     forced_event_block_reason,
@@ -204,6 +203,7 @@ class OneBotEventMixin(OneBotServerMixin):
             self.config.owner_qqs,
         )
         active_group_continuation = False
+        proactive_ambient = False
         explicit_group_mention = bool(
             is_message
             and event.get("message_type") == "group"
@@ -226,33 +226,36 @@ class OneBotEventMixin(OneBotServerMixin):
                 )
         elif is_message and event.get("message_type") == "group" and not push_event:
             if not group_suppressed:
-                active_group_continuation = self._group_reply_focus.is_active_continuation(
+                active_group_continuation = False
+                # 文本启发式只判断"像不像续聊"，但分不清"你"在对谁说话。
+                # 这里先做非侵入的候选判断，再把最终决定权交给带近期群聊上下文的
+                # 模型门：模型确认是在对机器人说话才续期并回复，否则不抢答。
+                continuation_gate_checked = False
+                if self._group_reply_focus.continuation_candidate(
                     event,
                     plain_text,
-                )
-                if active_group_continuation:
-                    # 文本启发式只看到"你"等泛化第二人称，无法判断在对谁说话。
-                    # 若群里最近一条是其他真人发的，本条更可能是真人之间的对话，
-                    # fail-closed 否决抢答；显式 @/名字/引用机器人已由 preliminary 覆盖。
-                    group_history = self.reply_engine.memory.recent_history(
-                        _conversation_id(event),
-                        limit=8,
-                    )
-                    if continuation_follows_other_human(
-                        group_history,
-                        current_sender_id=event.get("user_id"),
+                ):
+                    continuation_gate_checked = True
+                    group_context = self._format_ambient_group_context(event)
+                    if await self._llm_ambient_gate_should_reply(
+                        plain_text,
+                        group_context,
+                        speaker_name=_nickname(event) or "",
                     ):
-                        active_group_continuation = False
+                        self._group_reply_focus.renew_continuation(event)
+                        active_group_continuation = True
                 preliminary_reply = preliminary_reply or active_group_continuation
-                # 没有任何明确触发时，普通群聊由模型按内容判断是否搭话（带冷却）。
-                # 硬上限刚触发冷却时也不得再走随机搭话。
+                # 没有任何明确触发、且续聊门没有裁决过时，普通群聊由模型按内容判断
+                # 是否搭话（带冷却）。硬上限刚触发冷却时也不得再走随机搭话。
                 if (
                     not preliminary_reply
+                    and not continuation_gate_checked
                     and not self._group_reply_focus.is_suppressed(event)
                 ):
-                    preliminary_reply = await self._maybe_ambient_group_reply(
+                    proactive_ambient = await self._maybe_ambient_group_reply(
                         event, plain_text
                     )
+                    preliminary_reply = preliminary_reply or proactive_ambient
         # 休眠期内只放行 @ 或引用机器人：关键词、续聊、随机搭话一律不回。
         if group_suppressed:
             at_bot, _at_other = _at_segment_targets(event, self.config.bot_qq)
@@ -394,6 +397,10 @@ class OneBotEventMixin(OneBotServerMixin):
             )
             if active_group_continuation and group_reply_focus is not None:
                 group_reply_focus = replace(group_reply_focus, source="active_session")
+            elif proactive_ambient and group_reply_focus is not None:
+                # 主动插话：换成"先分清谁对谁说话"的语境，避免按"强制回复焦点"
+                # 把别人之间的问题当成问自己。
+                group_reply_focus = replace(group_reply_focus, source="proactive_ambient")
             if not addressed_to_bot:
                 self._group_reply_focus.remember(
                     event,
@@ -1071,7 +1078,11 @@ class OneBotEventMixin(OneBotServerMixin):
         # 不再随机掷骰子：交给模型结合聊天内容判断这句话值不值得接。
         # 传入近期群聊上下文，让模型能分辨这条消息是不是别人之间的对话。
         group_context = self._format_ambient_group_context(event)
-        if not await self._llm_ambient_gate_should_reply(plain_text, group_context):
+        if not await self._llm_ambient_gate_should_reply(
+            plain_text,
+            group_context,
+            speaker_name=_nickname(event) or "",
+        ):
             return False
         self._last_ambient_group_reply_at[group_id] = now
         return True
@@ -1109,13 +1120,17 @@ class OneBotEventMixin(OneBotServerMixin):
         return "\n".join(lines)
 
     async def _llm_ambient_gate_should_reply(
-        self, plain_text: str, group_context: str = ""
+        self,
+        plain_text: str,
+        group_context: str = "",
+        speaker_name: str = "",
     ) -> bool:
         """调用模型判断当前这条群消息是否值得接话。
 
         走一次很轻的 chat 调用（只要求回答“接/不接”，max_tokens 极小）。
         若有近期群聊记录则一并提供，帮助模型判断这条消息是不是别人之间的
-        对话。任何网络、模型或解析异常都保守返回 False（默认不接），只记日志，
+        对话；当前消息也带上发言人昵称，便于模型分辨这句话是谁说的。
+        任何网络、模型或解析异常都保守返回 False（默认不接），只记日志，
         绝不让接话判断的故障影响主消息链路。
         """
         try:
@@ -1124,6 +1139,9 @@ class OneBotEventMixin(OneBotServerMixin):
 
             system_prompt = load_prompt("ambient_gate")
             new_message = str(plain_text or "")[:500]
+            speaker = str(speaker_name or "").strip()
+            if speaker:
+                new_message = f"{speaker}：{new_message}"
             if group_context:
                 user_content = (
                     "近期群聊记录：\n"
