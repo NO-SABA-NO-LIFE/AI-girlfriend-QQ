@@ -33,6 +33,8 @@ class BotConfig:
     chat_request_timeout_seconds: float = 25.0
     chat_resource_wait_seconds: float = 35.0
     chat_quality_retries: int = 1
+    # 上游非流式长请求会按 max_tokens 缓冲并挂起，改用 SSE 流式并在本地重组。
+    chat_stream_enabled: bool = True
     message_split_max_chars: int = 120
     message_split_max_parts: int = 2
     message_send_delay_min: float = 0.55

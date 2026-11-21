@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from .engine_support import PersonaEngineMixin
+from .stream_helpers import (
+    apply_sse_event,
+    completion_from_state,
+    new_stream_state,
+)
 
 
 class EngineToolsMixin(PersonaEngineMixin):
@@ -810,14 +815,19 @@ class EngineToolsMixin(PersonaEngineMixin):
     ) -> dict[str, Any]:
         import httpx
 
-        async def post_once(request_payload: dict[str, Any]) -> Any:
-            return await client.post(
-                f"{self.config.openai_base_url}/chat/completions",
-                headers=headers,
-                json=request_payload,
-            )
+        use_stream = bool(getattr(self.config, "chat_stream_enabled", True))
+        url = f"{self.config.openai_base_url}/chat/completions"
 
-        async def post_local(request_payload: dict[str, Any]) -> Any:
+        async def post_once(request_payload: dict[str, Any]) -> dict[str, Any]:
+            if use_stream:
+                return await self._stream_chat_response(
+                    client, headers, request_payload, url
+                )
+            response = await client.post(url, headers=headers, json=request_payload)
+            response.raise_for_status()
+            return response.json()
+
+        async def post_local(request_payload: dict[str, Any]) -> dict[str, Any]:
             async with inference_resource_lease(
                 f"chat:{self.config.openai_model}",
                 timeout_seconds=float(
@@ -837,10 +847,8 @@ class EngineToolsMixin(PersonaEngineMixin):
 
         try:
             if _is_local_ollama_endpoint(self.config.openai_base_url):
-                response = await post_local(payload)
-            else:
-                response = await post_once(payload)
-            response.raise_for_status()
+                return await post_local(payload)
+            return await post_once(payload)
         except httpx.HTTPStatusError as exc:
             if "tools" not in payload or not _looks_like_tool_schema_error(exc):
                 raise
@@ -864,11 +872,47 @@ class EngineToolsMixin(PersonaEngineMixin):
             )
             retry_payload["messages"] = retry_messages
             if _is_local_ollama_endpoint(self.config.openai_base_url):
-                response = await post_local(retry_payload)
-            else:
-                response = await post_once(retry_payload)
-            response.raise_for_status()
-        return response.json()
+                return await post_local(retry_payload)
+            return await post_once(retry_payload)
+
+    async def _stream_chat_response(
+        self,
+        client: Any,
+        headers: dict[str, str],
+        request_payload: dict[str, Any],
+        url: str,
+    ) -> dict[str, Any]:
+        """以 SSE 发起请求，读取 delta 并在本地重组为非流式同构 dict。
+
+        出错时先把响应体读出来再抛 HTTPStatusError，保证外层工具协议兜底
+        仍能根据错误内容判断是否去掉 tools 重试。
+        """
+        import httpx
+        import json
+
+        stream_payload = dict(request_payload)
+        stream_payload["stream"] = True
+        state = new_stream_state()
+        async with client.stream(
+            "POST", url, headers=headers, json=stream_payload
+        ) as response:
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError:
+                await response.aread()
+                raise
+            async for line in response.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                except ValueError:
+                    continue
+                apply_sse_event(state, event)
+        return completion_from_state(state)
 
     async def _reply_with_guarded_api(
         self,

@@ -127,6 +127,7 @@ def _build_config(root: Path) -> BotConfig:
         chat_quality_retries=max(
             0, min(2, _env_int("CHAT_QUALITY_RETRIES", 1))
         ),
+        chat_stream_enabled=_env_bool("CHAT_STREAM_ENABLED", True),
         message_split_max_chars=split_max_chars,
         message_split_max_parts=split_max_parts,
         message_send_delay_min=send_delay_min,

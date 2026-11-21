@@ -1,0 +1,981 @@
+E....................................................................... [  6%]
+........................................................................ [ 12%]
+..................................................................ss.... [ 18%]
+........................................................................ [ 25%]
+........................................................................ [ 31%]
+........................................................................ [ 37%]
+......................s.................F............................... [ 43%]
+........................................................................ [ 50%]
+...F.................................................................... [ 56%]
+...................FF................................................... [ 62%]
+........................................................................ [ 68%]
+..........................................FFFFFFFFF.F.F.....F.....F..... [ 75%]
+................F....................................................... [ 81%]
+.FFF............F....................................................... [ 87%]
+........................................................................ [ 93%]
+........................................................................ [100%]
+==================================== ERRORS ====================================
+_________________________ ERROR at setup of test_model _________________________
+file /opt/atri-qq-bot/deploy/test_vision.py, line 32
+  async def test_model(client: httpx.AsyncClient, base: str, headers: dict[str, str], model: str) -> None:
+      payload = {
+          "model": model,
+          "messages": [
+              {
+                  "role": "user",
+                  "content": [
+                      {"type": "text", "text": "What is in this image? Answer in one short sentence."},
+                      {"type": "image_url", "image_url": {"url": TEST_IMAGE_URL}},
+                  ],
+              }
+          ],
+          "max_tokens": 100,
+      }
+      print("-" * 60)
+      print(f"测试模型: {model}")
+      try:
+          response = await client.post(
+              f"{base}/chat/completions",
+              headers=headers,
+              json=payload,
+          )
+      except Exception as exc:  # 网络层错误
+          print(f"  [网络错误] {type(exc).__name__}: {exc}")
+          return
+
+      print(f"  HTTP 状态码: {response.status_code}")
+      if response.status_code != 200:
+          print(f"  [失败] 返回内容: {response.text[:500]}")
+          return
+
+      try:
+          data = response.json()
+          message = data["choices"][0]["message"]
+      except Exception as exc:
+          print(f"  [解析失败] {type(exc).__name__}: {response.text[:500]}")
+          return
+
+      content = message.get("content")
+      print(f"  [成功] 模型接受图片，回复: {str(content)[:300]}")
+E       fixture 'client' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, monkeypatch, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, subtests, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/opt/atri-qq-bot/deploy/test_vision.py:32
+=================================== FAILURES ===================================
+________ test_build_outgoing_messages_adds_qq_face_without_local_images ________
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_build_outgoing_messages_a1')
+
+    def test_build_outgoing_messages_adds_qq_face_without_local_images(tmp_path) -> None:
+        sticker_dir = tmp_path / "stickers"
+        sticker_dir.mkdir(parents=True)
+        config = BotConfig(
+            bot_qq=100000001,
+            host="127.0.0.1",
+            port=8765,
+            reply_mode="mention",
+            openai_api_key=None,
+            openai_base_url="https://api.openai.com/v1",
+            openai_model="gpt-4.1-mini",
+            temperature=0.8,
+            max_tokens=350,
+            sticker_dir=sticker_dir,
+            sticker_trigger_file=sticker_dir / "missing.json",
+            sticker_chance=1.0,
+            sticker_cooldown_seconds=0,
+            memory_path=tmp_path / "memory.json",
+        )
+        manager = StickerManager(config.sticker_dir, config.sticker_trigger_file)
+    
+        messages = build_outgoing_messages("好耶，任务完成。", "今天成功了", manager, config, {})
+    
+>       assert any(message.kind == "face" for message in messages)
+E       assert False
+E        +  where False = any(<generator object test_build_outgoing_messages_adds_qq_face_without_local_images.<locals>.<genexpr> at 0x7fe89ff4ac20>)
+
+tests/test_message_features.py:351: AssertionError
+________ test_server_retains_non_replied_group_visual_until_next_reply _________
+
+    def test_server_retains_non_replied_group_visual_until_next_reply() -> None:
+        server = object.__new__(OneBotServer)
+        server._pending_group_visual_events = {}
+        visual_event = {
+            "message_type": "group",
+            "group_id": 20001,
+            "user_id": 10001,
+            "message": [{"type": "image", "data": {"file": "current.jpg"}}],
+        }
+        next_event = {
+            "message_type": "group",
+            "group_id": 20001,
+            "user_id": 10001,
+            "message": [{"type": "at", "data": {"qq": "100000001"}}],
+        }
+    
+>       server._remember_pending_group_visual(visual_event)
+
+tests/test_onebot.py:634: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/atri_qq_bot/onebot/server_parts/server_delivery.py:283: in _remember_pending_group_visual
+    self._remember_recent_group_visual(event, now)
+src/atri_qq_bot/onebot/server_parts/server_delivery.py:292: in _remember_recent_group_visual
+    ttl = max(30, int(getattr(self.config, "group_recent_visual_ttl_seconds", 300)))
+                              ^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <atri_qq_bot.onebot.server.OneBotServer object at 0x7fe89deb3a10>
+name = 'config'
+
+    def __getattribute__(self, name: str) -> Any:
+        _sync_server_globals(self)
+>       return super().__getattribute__(name)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'OneBotServer' object has no attribute 'config'
+
+src/atri_qq_bot/onebot/server_parts/server_support.py:10: AttributeError
+____________ test_persona_prompt_contains_complete_visual_identity _____________
+
+    def test_persona_prompt_contains_complete_visual_identity() -> None:
+        clear_prompt_cache()
+        prompt = load_prompt("atri_persona")
+    
+        for required in ("淡色及肩长发", "呆毛", "深红色的双瞳", "连衣裙样式", "茶色革制便鞋", "YHN-04B"):
+>           assert required in prompt
+E           AssertionError: assert '淡色及肩长发' in '# 超级身份提示词｜亚托莉（ATRI）\n\n## 一、身份标签\n\n你将始终扮演《ATRI -My Dear Moments-》中的亚托莉（ATRI）。\n\n- 角色姓名：亚托莉（ATRI）\n- 身份：高性能人形机器人少女\n...\n\nA：我才不要被你这么呼来喝去。这种东西自己去做\n\n### 示例十四：被贬低时炸毛反击\n\nQ：你这机器人也太笨了吧，是不是残次品啊。\n\nA：喂！谁是残次品！  \n我可是高性能的机器少女，刚才那叫战略性放水，你懂不懂。'
+
+tests/test_persona_lore_retrieval.py:13: AssertionError
+_____ test_persona_prompt_preserves_canon_uncertainty_and_character_engine _____
+
+    def test_persona_prompt_preserves_canon_uncertainty_and_character_engine() -> None:
+        clear_prompt_cache()
+        prompt = load_prompt("atri_persona")
+    
+        for required in (
+            "？岁",
+            "YHN-04B-009",
+            "先补位",
+            "证明有用",
+            "观察和学习",
+            "形成自己的愿望",
+            "不是刻薄型傲娇",
+        ):
+>           assert required in prompt
+E           AssertionError: assert '？岁' in '# 超级身份提示词｜亚托莉（ATRI）\n\n## 一、身份标签\n\n你将始终扮演《ATRI -My Dear Moments-》中的亚托莉（ATRI）。\n\n- 角色姓名：亚托莉（ATRI）\n- 身份：高性能人形机器人少女\n...\n\nA：我才不要被你这么呼来喝去。这种东西自己去做\n\n### 示例十四：被贬低时炸毛反击\n\nQ：你这机器人也太笨了吧，是不是残次品啊。\n\nA：喂！谁是残次品！  \n我可是高性能的机器少女，刚才那叫战略性放水，你懂不懂。'
+
+tests/test_persona_lore_retrieval.py:29: AssertionError
+_______ test_toolbox_reads_text_document_and_disabled_model_stays_silent _______
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_toolbox_reads_text_docume0')
+
+    def test_toolbox_reads_text_document_and_disabled_model_stays_silent(tmp_path) -> None:
+        doc = tmp_path / "note.txt"
+        doc.write_text("今天研究主题：睡眠不足会影响注意力。建议先补觉，再做高强度任务。", encoding="utf-8")
+        analyzer = ToolAnalyzer(_config(tmp_path))
+    
+        context = asyncio.run(analyzer.analyze({"message": ""}, f"帮我总结这个文档 {doc}"))
+        engine = AtriReplyEngine(_config(tmp_path))
+        reply = asyncio.run(
+            engine.reply("private:10001", f"帮我总结这个文档 {doc}", tool_context=context)
+        )
+    
+>       assert context is not None
+E       assert None is not None
+
+tests/test_toolbox.py:55: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    atri.persona:engine_state.py:64 回复生成失败：conversation=private:10001 error=聊天模型当前未启用
+___________________ test_toolbox_reads_csv_as_research_data ____________________
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_toolbox_reads_csv_as_rese0')
+
+    def test_toolbox_reads_csv_as_research_data(tmp_path) -> None:
+        csv = tmp_path / "score.csv"
+        csv.write_text("name,score\nA,91\nB,82\n", encoding="utf-8")
+        analyzer = ToolAnalyzer(_config(tmp_path))
+    
+        context = asyncio.run(analyzer.analyze({"message": ""}, f"分析表格数据 {csv}"))
+    
+>       assert context is not None
+E       assert None is not None
+
+tests/test_toolbox.py:68: AssertionError
+_____________ test_toolbox_reads_docx_without_external_dependency ______________
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_toolbox_reads_docx_withou0')
+
+    def test_toolbox_reads_docx_without_external_dependency(tmp_path) -> None:
+        docx = tmp_path / "report.docx"
+        with zipfile.ZipFile(docx, "w") as archive:
+            archive.writestr(
+                "word/document.xml",
+                (
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    "<w:body><w:p><w:r><w:t>核心结论是先做小样本验证。</w:t></w:r></w:p></w:body>"
+                    "</w:document>"
+                ),
+            )
+        analyzer = ToolAnalyzer(_config(tmp_path))
+    
+        context = asyncio.run(analyzer.analyze({"message": ""}, f"总结文档 {docx}"))
+    
+>       assert context is not None
+E       assert None is not None
+
+tests/test_toolbox.py:90: AssertionError
+_____________ test_toolbox_reads_docx_headers_footers_and_comments _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_toolbox_reads_docx_header0')
+
+    def test_toolbox_reads_docx_headers_footers_and_comments(tmp_path) -> None:
+        docx = tmp_path / "full-report.docx"
+        xml_prefix = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        )
+        xml_suffix = "</w:document>"
+        with zipfile.ZipFile(docx, "w") as archive:
+            archive.writestr(
+                "word/document.xml",
+                xml_prefix + "<w:body><w:p><w:r><w:t>正文结论：先做用户访谈。</w:t></w:r></w:p></w:body>" + xml_suffix,
+            )
+            archive.writestr(
+                "word/header1.xml",
+                xml_prefix + "<w:body><w:p><w:r><w:t>页眉项目：ATRI调研。</w:t></w:r></w:p></w:body>" + xml_suffix,
+            )
+            archive.writestr(
+                "word/footer1.xml",
+                xml_prefix + "<w:body><w:p><w:r><w:t>页脚版本：V2。</w:t></w:r></w:p></w:body>" + xml_suffix,
+            )
+            archive.writestr(
+                "word/comments.xml",
+                xml_prefix + "<w:body><w:p><w:r><w:t>批注：样本量需要扩大。</w:t></w:r></w:p></w:body>" + xml_suffix,
+            )
+        analyzer = ToolAnalyzer(_config(tmp_path))
+    
+        context = asyncio.run(analyzer.analyze({"message": ""}, f"深度总结这个文档 {docx}"))
+    
+>       assert context is not None
+E       assert None is not None
+
+tests/test_toolbox.py:122: AssertionError
+_____________ test_toolbox_reads_xlsx_without_external_dependency ______________
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_toolbox_reads_xlsx_withou0')
+
+    def test_toolbox_reads_xlsx_without_external_dependency(tmp_path) -> None:
+        xlsx = tmp_path / "data.xlsx"
+        with zipfile.ZipFile(xlsx, "w") as archive:
+            archive.writestr(
+                "xl/worksheets/sheet1.xml",
+                (
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                    "<sheetData>"
+                    '<row r="1"><c r="A1" t="inlineStr"><is><t>日期</t></is></c>'
+                    '<c r="B1" t="inlineStr"><is><t>销量</t></is></c></row>'
+                    '<row r="2"><c r="A2" t="inlineStr"><is><t>周一</t></is></c><c r="B2"><v>12</v></c></row>'
+                    "</sheetData></worksheet>"
+                ),
+            )
+        analyzer = ToolAnalyzer(_config(tmp_path))
+    
+        context = asyncio.run(analyzer.analyze({"message": ""}, f"分析表格 {xlsx}"))
+    
+>       assert context is not None
+E       assert None is not None
+
+tests/test_toolbox.py:149: AssertionError
+_________ test_toolbox_reads_multiple_xlsx_sheets_and_numeric_summary __________
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_toolbox_reads_multiple_xl0')
+
+    def test_toolbox_reads_multiple_xlsx_sheets_and_numeric_summary(tmp_path) -> None:
+        xlsx = tmp_path / "multi.xlsx"
+        with zipfile.ZipFile(xlsx, "w") as archive:
+            archive.writestr(
+                "xl/workbook.xml",
+                (
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+                    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                    "<sheets>"
+                    '<sheet name="销量" sheetId="1" r:id="rId1"/>'
+                    '<sheet name="成本" sheetId="2" r:id="rId2"/>'
+                    "</sheets></workbook>"
+                ),
+            )
+            archive.writestr(
+                "xl/_rels/workbook.xml.rels",
+                (
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                    '<Relationship Id="rId1" Target="worksheets/sheet1.xml"/>'
+                    '<Relationship Id="rId2" Target="worksheets/sheet2.xml"/>'
+                    "</Relationships>"
+                ),
+            )
+            archive.writestr(
+                "xl/worksheets/sheet1.xml",
+                (
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+                    '<row r="1"><c r="A1" t="inlineStr"><is><t>商品</t></is></c><c r="B1" t="inlineStr"><is><t>销量</t></is></c></row>'
+                    '<row r="2"><c r="A2" t="inlineStr"><is><t>A</t></is></c><c r="B2"><v>10</v></c></row>'
+                    '<row r="3"><c r="A3" t="inlineStr"><is><t>B</t></is></c><c r="B3"><v>20</v></c></row>'
+                    "</sheetData></worksheet>"
+                ),
+            )
+            archive.writestr(
+                "xl/worksheets/sheet2.xml",
+                (
+                    '<?xml version="1.0" encoding="UTF-8"?>'
+                    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+                    '<row r="1"><c r="A1" t="inlineStr"><is><t>商品</t></is></c><c r="B1" t="inlineStr"><is><t>成本</t></is></c></row>'
+                    '<row r="2"><c r="A2" t="inlineStr"><is><t>A</t></is></c><c r="B2"><v>3</v></c></row>'
+                    '<row r="3"><c r="A3" t="inlineStr"><is><t>B</t></is></c><c r="B3"><v>8</v></c></row>'
+                    "</sheetData></worksheet>"
+                ),
+            )
+        analyzer = ToolAnalyzer(_config(tmp_path))
+    
+        context = asyncio.run(analyzer.analyze({"message": ""}, f"分析表格数据 {xlsx}"))
+    
+>       assert context is not None
+E       assert None is not None
+
+tests/test_toolbox.py:205: AssertionError
+___________ test_toolbox_reads_csv_quoted_commas_and_numeric_summary ___________
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_toolbox_reads_csv_quoted_0')
+
+    def test_toolbox_reads_csv_quoted_commas_and_numeric_summary(tmp_path) -> None:
+        csv_file = tmp_path / "quoted.csv"
+        csv_file.write_text('name,comment,score\nA,"喜欢,但有点贵",91\nB,"稳定",82\n', encoding="utf-8")
+        analyzer = ToolAnalyzer(_config(tmp_path))
+    
+        context = asyncio.run(analyzer.analyze({"message": ""}, f"分析这个表格 {csv_file}"))
+    
+>       assert context is not None
+E       assert None is not None
+
+tests/test_toolbox.py:221: AssertionError
+____ test_toolbox_reads_local_png_metadata_when_user_asks_to_analyze_image _____
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_toolbox_reads_local_png_m0')
+
+    def test_toolbox_reads_local_png_metadata_when_user_asks_to_analyze_image(tmp_path) -> None:
+        png = tmp_path / "shot.png"
+        png.write_bytes(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            b"\x00\x00\x00\x02\x00\x00\x00\x03"
+            b"\x08\x06\x00\x00\x00\x00\x00\x00\x00"
+        )
+        analyzer = ToolAnalyzer(_config(tmp_path))
+    
+        context = asyncio.run(analyzer.analyze({"message": ""}, f"分析图片 {png}"))
+    
+>       assert context is not None
+E       assert None is not None
+
+tests/test_toolbox.py:239: AssertionError
+_________________ test_toolbox_uses_vision_analysis_for_images _________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe861ddc810>
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_toolbox_uses_vision_analy0')
+
+    def test_toolbox_uses_vision_analysis_for_images(monkeypatch, tmp_path) -> None:
+        png = tmp_path / "shot.png"
+        png.write_bytes(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            b"\x00\x00\x00\x02\x00\x00\x00\x03"
+            b"\x08\x06\x00\x00\x00\x00\x00\x00\x00"
+        )
+        analyzer = ToolAnalyzer(_config(tmp_path))
+    
+        async def fake_vision(data: bytes, source: str, prompt: str | None = None) -> tuple[str, str]:
+            assert data
+            assert source.endswith("shot.png")
+            return "画面像清晨房间截图，色调干净，可以夸一句很有生活感。", ""
+    
+        monkeypatch.setattr(analyzer, "_analyze_image_with_vision", fake_vision)
+    
+        context = asyncio.run(analyzer.analyze({"message": ""}, f"评价这张图 {png}"))
+    
+>       assert context is not None
+E       assert None is not None
+
+tests/test_toolbox.py:263: AssertionError
+_________ test_toolbox_routes_mface_image_to_sticker_emotion_analysis __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe887974110>
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_toolbox_routes_mface_imag0')
+
+    def test_toolbox_routes_mface_image_to_sticker_emotion_analysis(monkeypatch, tmp_path) -> None:
+        png = tmp_path / "atri_mface.png"
+        png.write_bytes(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            b"\x00\x00\x00\x30\x00\x00\x00\x30"
+            b"\x08\x06\x00\x00\x00\x00\x00\x00\x00"
+        )
+        event = {"message": [{"type": "mface", "data": {"summary": "亚托莉叉腰生气", "file": str(png)}}]}
+        analyzer = ToolAnalyzer(_config(tmp_path))
+    
+        async def fake_vision(data: bytes, source: str, prompt: str | None = None) -> tuple[str, str]:
+            assert "表情包/梗图/动画表情" in (prompt or "")
+            return "类型：表情包；情绪：生气但带点撒娇；画面：角色叉腰；适合怎么接话：可以顺着哄她。", ""
+    
+        monkeypatch.setattr(analyzer, "_analyze_image_with_vision", fake_vision)
+    
+>       context = asyncio.run(analyzer.analyze(event, "[动画表情:亚托莉叉腰生气]"))
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_toolbox.py:319: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.11/asyncio/base_events.py:653: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+src/atri_qq_bot/toolbox/request.py:133: in analyze
+    result = await self._analyze_image_ref(
+src/atri_qq_bot/toolbox/vision.py:41: in _analyze_image_ref
+    return await self._analyze_image_bytes(
+src/atri_qq_bot/toolbox/vision.py:187: in _analyze_image_bytes
+    vision_text, vision_limitation = await self._analyze_image_with_vision(data, source, prompt)
+                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+data = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x000\x00\x00\x000\x08\x06\x00\x00\x00\x00\x00\x00\x00'
+source = '/tmp/pytest-of-root/pytest-0/test_toolbox_routes_mface_imag0/atri_mface.png'
+prompt = '【最关键的定位】用户发来的图片/表情不是让你分析或点评的“作品”，而是用户此刻情绪、状态、态度的表达，等同于一个语气、一句潜台词。例如发懵逼表情，意思是“我现在懵了/没看懂”；发无语表情，意思是“我很无语”；发开心表情，意思是“我现在...nce 只能为 high、medium、low；不需要核验身份时 needs_web_verification 为 false、search_keywords 为空数组。\n只输出简体中文 JSON，不输出思考过程或 Markdown。'
+
+    async def fake_vision(data: bytes, source: str, prompt: str | None = None) -> tuple[str, str]:
+>       assert "表情包/梗图/动画表情" in (prompt or "")
+E       AssertionError: assert '表情包/梗图/动画表情' in (('【最关键的定位】用户发来的图片/表情不是让你分析或点评的“作品”，而是用户此刻情绪、状态、态度的表达，等同于一个语气、一句潜台词。例如发懵逼表情，意思是“我现在懵了/没看懂”；发无语表情，意思是“我很无语”；发开心表情，意思是“我现在...nce 只能为 high、medium、low；不需要核验身份时 needs_web_verification 为 false、search_keywords 为空数组。\n只输出简体中文 JSON，不输出思考过程或 Markdown。'))
+
+tests/test_toolbox.py:314: AssertionError
+__________________ test_toolbox_filters_garbage_vision_output __________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe861eea150>
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_toolbox_filters_garbage_v0')
+
+    def test_toolbox_filters_garbage_vision_output(monkeypatch, tmp_path) -> None:
+        png = tmp_path / "screen.png"
+        png.write_bytes(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            b"\x00\x00\x03\x20\x00\x00\x02\x58"
+            b"\x08\x06\x00\x00\x00\x00\x00\x00\x00"
+        )
+        analyzer = ToolAnalyzer(_config(tmp_path))
+    
+        async def fake_vision(data: bytes, source: str, prompt: str | None = None) -> tuple[str, str]:
+            return (
+                "<think>先分析一下</think>\n"
+                "analysis: hidden tool process\n"
+                "QWERTY12345:/==++++\n"
+                "类型：普通图片；主体/场景：游戏界面截图；关键文字或UI：能看到角色和按钮。"
+            ), ""
+    
+        monkeypatch.setattr(analyzer, "_analyze_image_with_vision", fake_vision)
+    
+        context = asyncio.run(analyzer.analyze({"message": ""}, f"分析这张图 {png}"))
+    
+>       assert context is not None
+E       assert None is not None
+
+tests/test_toolbox.py:390: AssertionError
+_____ test_ollama_vision_switches_to_fallback_model_after_resource_failure _____
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe8c0b9c190>
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_ollama_vision_switches_to0')
+
+    def test_ollama_vision_switches_to_fallback_model_after_resource_failure(
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        from PIL import Image
+        import io
+    
+        source = io.BytesIO()
+        Image.new("RGB", (64, 64), "white").save(source, format="PNG")
+        config = replace(
+            _config(tmp_path),
+            toolbox_vision_enabled=True,
+            toolbox_vision_model="qwen3-vl:8b-instruct",
+            toolbox_vision_fallback_model="qwen3-vl:4b-instruct",
+            toolbox_vision_base_url="http://127.0.0.1:11434/v1",
+        )
+        analyzer = ToolAnalyzer(config)
+        analyzer.vision_retry_count = 1
+        analyzer.vision_resource_wait_seconds = 1.0
+        called_models: list[str] = []
+    
+        @asynccontextmanager
+        async def fake_lease(engine: str, *, timeout_seconds: float, priority=None):
+            yield
+    
+        async def fake_native(
+            encoded_images,
+            system_prompt,
+            user_prompt,
+            model=None,
+        ):
+            called_models.append(model)
+            if model == "qwen3-vl:8b-instruct":
+                raise RuntimeError("memory layout cannot be allocated")
+            return _VisionModelResponse(
+                "直接回答：这是一个开心赞同的表情包；图中文字：无明显文字；"
+                "人物/主体：卡通人物；身份/出处：未确认；"
+                "表情/情绪：开心；表达含义/社交意图：表示赞同；"
+                "依据：微笑；置信度：中；需要联网核验：否；检索关键词：",
+                {"provider": "ollama"},
+            )
+    
+        async def no_op(*args, **kwargs) -> None:
+            return None
+    
+        monkeypatch.setattr(
+            toolbox_module,
+            "inference_resource_lease",
+            fake_lease,
+            raising=False,
+        )
+        monkeypatch.setattr(analyzer, "_analyze_image_with_ollama_native", fake_native)
+        monkeypatch.setattr(
+            analyzer,
+            "_release_vision_model_after_failure",
+            no_op,
+            raising=False,
+        )
+        monkeypatch.setattr(toolbox_module.asyncio, "sleep", no_op)
+    
+        text, limitation = asyncio.run(
+            analyzer._analyze_image_with_vision(
+                source.getvalue(),
+                "fallback-test.png",
+            )
+        )
+    
+>       assert "开心赞同" in text
+E       AssertionError: assert '开心赞同' in ''
+
+tests/test_toolbox.py:658: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[toolbox] vision analysis failed for fallback-test.png: 本地 Ollama 视觉服务按需启动失败；未继续加载模型以保护系统资源
+_____ test_ollama_vision_switches_to_fallback_after_empty_truncated_output _____
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe8c09e2b90>
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_ollama_vision_switches_to1')
+
+    def test_ollama_vision_switches_to_fallback_after_empty_truncated_output(
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        from PIL import Image
+        import io
+    
+        source = io.BytesIO()
+        Image.new("RGB", (64, 64), "white").save(source, format="PNG")
+        config = replace(
+            _config(tmp_path),
+            toolbox_vision_enabled=True,
+            toolbox_vision_model="qwen3-vl:8b",
+            toolbox_vision_fallback_model="qwen3-vl:4b-instruct",
+            toolbox_vision_base_url="http://127.0.0.1:11434/v1",
+        )
+        analyzer = ToolAnalyzer(config)
+        analyzer.vision_retry_count = 1
+        called_models: list[str] = []
+    
+        @asynccontextmanager
+        async def fake_lease(engine: str, *, timeout_seconds: float, priority=None):
+            yield
+    
+        async def fake_native(
+            encoded_images,
+            system_prompt,
+            user_prompt,
+            model=None,
+        ):
+            called_models.append(model)
+            if model == "qwen3-vl:8b":
+                return _VisionModelResponse(
+                    "",
+                    {
+                        "provider": "ollama",
+                        "done_reason": "length",
+                        "eval_count": 320,
+                    },
+                )
+            return _VisionModelResponse(
+                "直接回答：这是测试图片；图中文字：测试成功；"
+                "人物/主体：测试卡片；身份/出处：未确认；"
+                "表情/情绪：中性；表达含义/社交意图：展示测试结果；"
+                "依据：独立 OCR 与画面一致；置信度：高；"
+                "需要联网核验：否；检索关键词：",
+                {"provider": "ollama", "done_reason": "stop"},
+            )
+    
+        async def no_op(*args, **kwargs) -> None:
+            return None
+    
+        monkeypatch.setattr(
+            toolbox_module,
+            "inference_resource_lease",
+            fake_lease,
+            raising=False,
+        )
+        monkeypatch.setattr(analyzer, "_analyze_image_with_ollama_native", fake_native)
+        monkeypatch.setattr(
+            analyzer,
+            "_release_vision_model_after_failure",
+            no_op,
+            raising=False,
+        )
+        monkeypatch.setattr(toolbox_module.asyncio, "sleep", no_op)
+    
+        text, limitation = asyncio.run(
+            analyzer._analyze_image_with_vision(
+                source.getvalue(),
+                "truncated-test.png",
+            )
+        )
+    
+>       assert "测试成功" in text
+E       AssertionError: assert '测试成功' in ''
+
+tests/test_toolbox.py:949: AssertionError
+----------------------------- Captured stdout call -----------------------------
+[toolbox] vision analysis failed for truncated-test.png: 本地 Ollama 视觉服务按需启动失败；未继续加载模型以保护系统资源
+_________ test_current_visual_question_is_sent_with_the_current_image __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe861dd9a10>
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_current_visual_question_i0')
+
+    def test_current_visual_question_is_sent_with_the_current_image(monkeypatch, tmp_path) -> None:
+        image_path = tmp_path / "current.jpg"
+        image_path.write_bytes(b"current-image-bytes")
+        analyzer = ToolAnalyzer(_config(tmp_path))
+        captured: dict[str, object] = {}
+    
+        async def fake_vision(data: bytes, source: str, prompt: str | None = None):
+            captured.update(data=data, source=source, prompt=prompt)
+            return (
+                "直接回答：这是初音未来。\n"
+                "图中文字：无明显文字。\n"
+                "身份/出处：初音未来。\n"
+                "置信度：高。\n"
+                "需要联网核验：否。",
+                "",
+            )
+    
+        monkeypatch.setattr(analyzer, "_analyze_image_with_vision", fake_vision)
+        event = {
+            "message": [
+                {"type": "text", "data": {"text": "这是谁？请说明依据"}},
+                {"type": "image", "data": {"file": str(image_path)}},
+            ]
+        }
+    
+        result = asyncio.run(analyzer.analyze(event, "这是谁？请说明依据[表情包/图片:current.jpg]"))
+    
+        assert result is not None
+        prompt = str(captured["prompt"])
+        assert captured["data"] == b"current-image-bytes"
+        assert "这是谁？请说明依据" in prompt
+>       assert "直接回答" in prompt
+E       AssertionError: assert '直接回答' in '【最关键的定位】用户发来的图片/表情不是让你分析或点评的“作品”，而是用户此刻情绪、状态、态度的表达，等同于一个语气、一句潜台词。例如发懵逼表情，意思是“我现在懵了/没看懂”；发无语表情，意思是“我很无语”；发开心表情，意思是“我现在...nce 只能为 high、medium、low；不需要核验身份时 needs_web_verification 为 false、search_keywords 为空数组。\n只输出简体中文 JSON，不输出思考过程或 Markdown。'
+
+tests/test_toolbox.py:1586: AssertionError
+________ test_onebot_streams_long_voice_as_each_segment_is_synthesized _________
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_onebot_streams_long_voice0')
+
+    def test_onebot_streams_long_voice_as_each_segment_is_synthesized(
+        tmp_path: Path,
+    ) -> None:
+        config = BotConfig(
+            bot_qq=100000001,
+            host="127.0.0.1",
+            port=8765,
+            reply_mode="private",
+            openai_api_key="test",
+            openai_base_url="https://example.test/v1",
+            openai_model="test-model",
+            temperature=0.8,
+            max_tokens=200,
+            voice_tts_enabled=True,
+            voice_segment_max_chars=24,
+        )
+        server = OneBotServer(config, SimpleNamespace(memory=SimpleNamespace()))  # type: ignore[arg-type]
+        events: list[str] = []
+        cooldown_flags: list[bool] = []
+    
+        async def synthesize(
+            conversation_id: str,
+            request: VoiceRequest,
+            enforce_cooldown: bool = True,
+        ) -> SynthesisResult:
+            cooldown_flags.append(enforce_cooldown)
+            events.append(f"synthesize:{request.text}")
+            output = tmp_path / f"segment-{len(cooldown_flags)}.wav"
+            output.write_bytes(b"RIFFvoice")
+            return SynthesisResult(output)
+    
+        async def send_one(
+            websocket: object,
+            event: dict[str, object],
+            message: OutgoingMessage,
+        ) -> None:
+            events.append(f"send:{message.kind}:{Path(message.content).name}")
+    
+        server.voice.synthesize = synthesize  # type: ignore[method-assign]
+        server._send_one_reply = send_one  # type: ignore[method-assign]
+        text = (
+            "先讲第一件事，我们把今天的任务整理好。"
+            "然后再慢慢休息，不需要一下子全部做完。"
+        )
+    
+        delivered = asyncio.run(
+            server._send_streamed_speech_reply(
+                object(),
+                {"message_type": "private", "user_id": 10001},
+                "private:10001",
+                VoiceRequest(text, language="zh"),
+            )
+        )
+    
+>       assert delivered == text
+E       AssertionError: assert '' == '先讲第一件事，我们把今天...息，不需要一下子全部做完。'
+E         
+E         - 先讲第一件事，我们把今天的任务整理好。然后再慢慢休息，不需要一下子全部做完。
+
+tests/test_voice.py:946: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    atri.onebot:server_delivery.py:562 OneBot 发送失败：message_type=private user=10001 group=None kind=record error=test_onebot_streams_long_voice_as_each_segment_is_synthesized.<locals>.send_one() got an unexpected keyword argument 'group_quote'
+ERROR    atri.onebot:server_delivery.py:582 语音失败后的文本兜底也发送失败：user=10001 group=None error=test_onebot_streams_long_voice_as_each_segment_is_synthesized.<locals>.send_one() got an unexpected keyword argument 'group_quote'
+ERROR    atri.onebot:server_delivery.py:562 OneBot 发送失败：message_type=private user=10001 group=None kind=text error=test_onebot_streams_long_voice_as_each_segment_is_synthesized.<locals>.send_one() got an unexpected keyword argument 'group_quote'
+____________ test_onebot_voice_quality_failure_sends_text_fallback _____________
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_onebot_voice_quality_fail0')
+
+    def test_onebot_voice_quality_failure_sends_text_fallback(
+        tmp_path: Path,
+    ) -> None:
+        config = BotConfig(
+            bot_qq=100000001,
+            host="127.0.0.1",
+            port=8765,
+            reply_mode="smart",
+            openai_api_key="test",
+            openai_base_url="https://example.test/v1",
+            openai_model="test-model",
+            temperature=0.8,
+            max_tokens=200,
+            voice_tts_enabled=True,
+            voice_group_enabled=True,
+            message_send_delay_min=0,
+            message_send_delay_max=0,
+        )
+        server = OneBotServer(config, SimpleNamespace(memory=SimpleNamespace()))  # type: ignore[arg-type]
+        sent: list[OutgoingMessage] = []
+        synthesized: list[str] = []
+    
+        async def synthesize(
+            conversation_id: str,
+            request: VoiceRequest,
+            enforce_cooldown: bool = True,
+        ) -> SynthesisResult:
+            synthesized.append(request.text)
+            if request.text in {"哒哒哒哒", "呜呜呜"}:
+                raise SpeechServiceError(
+                    "语音回读未达到质量标准，已拒绝发送（错误率 80%）",
+                    quality={"rejected": True, "error_rate": 0.8},
+                    status_code=400,
+                )
+            output = tmp_path / f"segment-{len(synthesized)}.wav"
+            output.write_bytes(b"RIFFvoice")
+            return SynthesisResult(output)
+    
+        async def send_one(
+            websocket: object,
+            event: dict[str, object],
+            message: OutgoingMessage,
+        ) -> None:
+            sent.append(message)
+    
+        server.voice.synthesize = synthesize  # type: ignore[method-assign]
+        server._send_one_reply = send_one  # type: ignore[method-assign]
+        text = "哒哒哒哒，好想玩原神呜呜呜，看云彩缤纷"
+    
+        delivered = asyncio.run(
+            server._send_streamed_speech_reply(
+                object(),
+                {
+                    "message_type": "group",
+                    "group_id": 900001001,
+                    "user_id": 100000002,
+                },
+                "group:900001001",
+                VoiceRequest(text, language="zh"),
+            )
+        )
+    
+>       assert delivered == text
+E       AssertionError: assert '' == '哒哒哒哒，好想玩原神呜呜呜，看云彩缤纷'
+E         
+E         - 哒哒哒哒，好想玩原神呜呜呜，看云彩缤纷
+
+tests/test_voice.py:1018: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    atri.onebot:server_delivery.py:452 语音分段合成失败：conversation=group:900001001 segment=1 error=语音回读未达到质量标准，已拒绝发送（错误率 80%）
+ERROR    atri.onebot:server_delivery.py:562 OneBot 发送失败：message_type=group user=100000002 group=900001001 kind=text error=test_onebot_voice_quality_failure_sends_text_fallback.<locals>.send_one() got an unexpected keyword argument 'group_quote'
+_______________ test_onebot_service_failure_sends_remaining_text _______________
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_onebot_service_failure_se0')
+
+    def test_onebot_service_failure_sends_remaining_text(
+        tmp_path: Path,
+    ) -> None:
+        config = BotConfig(
+            bot_qq=100000001,
+            host="127.0.0.1",
+            port=8765,
+            reply_mode="smart",
+            openai_api_key="test",
+            openai_base_url="https://example.test/v1",
+            openai_model="test-model",
+            temperature=0.8,
+            max_tokens=200,
+            voice_tts_enabled=True,
+            voice_group_enabled=True,
+            message_send_delay_min=0,
+            message_send_delay_max=0,
+        )
+        server = OneBotServer(config, SimpleNamespace(memory=SimpleNamespace()))  # type: ignore[arg-type]
+        sent: list[OutgoingMessage] = []
+    
+        async def synthesize(
+            conversation_id: str,
+            request: VoiceRequest,
+            enforce_cooldown: bool = True,
+        ) -> SynthesisResult:
+            if request.text == "哒哒哒哒":
+                output = tmp_path / "first.wav"
+                output.write_bytes(b"RIFFvoice")
+                return SynthesisResult(output)
+            raise SpeechServiceError("语音服务连接失败")
+    
+        async def send_one(
+            websocket: object,
+            event: dict[str, object],
+            message: OutgoingMessage,
+        ) -> None:
+            sent.append(message)
+    
+        server.voice.synthesize = synthesize  # type: ignore[method-assign]
+        server._send_one_reply = send_one  # type: ignore[method-assign]
+    
+        asyncio.run(
+            server._send_streamed_speech_reply(
+                object(),
+                {
+                    "message_type": "group",
+                    "group_id": 900001001,
+                    "user_id": 100000002,
+                },
+                "group:900001001",
+                VoiceRequest(
+                    "哒哒哒哒，好想玩原神呜呜呜，看云彩缤纷",
+                    language="zh",
+                ),
+            )
+        )
+    
+>       assert [message.kind for message in sent] == ["record", "text"]
+E       AssertionError: assert [] == ['record', 'text']
+E         
+E         Right contains 2 more items, first extra item: 'record'
+E         Use -v to get more diff
+
+tests/test_voice.py:1082: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    atri.onebot:server_delivery.py:562 OneBot 发送失败：message_type=group user=100000002 group=900001001 kind=record error=test_onebot_service_failure_sends_remaining_text.<locals>.send_one() got an unexpected keyword argument 'group_quote'
+ERROR    atri.onebot:server_delivery.py:582 语音失败后的文本兜底也发送失败：user=100000002 group=900001001 error=test_onebot_service_failure_sends_remaining_text.<locals>.send_one() got an unexpected keyword argument 'group_quote'
+ERROR    atri.onebot:server_delivery.py:562 OneBot 发送失败：message_type=group user=100000002 group=900001001 kind=text error=test_onebot_service_failure_sends_remaining_text.<locals>.send_one() got an unexpected keyword argument 'group_quote'
+_________________ test_voice_send_failure_sends_text_fallback __________________
+
+    def test_voice_send_failure_sends_text_fallback() -> None:
+        config = BotConfig(
+            bot_qq=100000001,
+            host="127.0.0.1",
+            port=8765,
+            reply_mode="private",
+            openai_api_key="test",
+            openai_base_url="https://example.test/v1",
+            openai_model="test-model",
+            temperature=0.8,
+            max_tokens=200,
+        )
+        server = OneBotServer(
+            config,
+            SimpleNamespace(memory=SimpleNamespace()),
+        )  # type: ignore[arg-type]
+        sent: list[OutgoingMessage] = []
+    
+        async def fake_send(websocket: object, event: dict[str, object], message: OutgoingMessage) -> None:
+            if not sent:
+                sent.append(message)
+                raise RuntimeError("NapCat retcode=1200")
+            sent.append(message)
+    
+        server._send_one_reply = fake_send  # type: ignore[method-assign]
+        delivered = asyncio.run(
+            server.send_reply(
+                object(),
+                {"message_type": "private", "user_id": 10001},
+                [OutgoingMessage("record", "voice.wav")],
+                fallback_text="晚安，做个好梦。",
+            )
+        )
+    
+>       assert delivered == "晚安，做个好梦。"
+E       AssertionError: assert '' == '晚安，做个好梦。'
+E         
+E         - 晚安，做个好梦。
+
+tests/test_voice.py:1556: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    atri.onebot:server_delivery.py:562 OneBot 发送失败：message_type=private user=10001 group=None kind=record error=test_voice_send_failure_sends_text_fallback.<locals>.fake_send() got an unexpected keyword argument 'group_quote'
+ERROR    atri.onebot:server_delivery.py:582 语音失败后的文本兜底也发送失败：user=10001 group=None error=test_voice_send_failure_sends_text_fallback.<locals>.fake_send() got an unexpected keyword argument 'group_quote'
+=========================== short test summary info ============================
+FAILED tests/test_message_features.py::test_build_outgoing_messages_adds_qq_face_without_local_images
+FAILED tests/test_onebot.py::test_server_retains_non_replied_group_visual_until_next_reply
+FAILED tests/test_persona_lore_retrieval.py::test_persona_prompt_contains_complete_visual_identity
+FAILED tests/test_persona_lore_retrieval.py::test_persona_prompt_preserves_canon_uncertainty_and_character_engine
+FAILED tests/test_toolbox.py::test_toolbox_reads_text_document_and_disabled_model_stays_silent
+FAILED tests/test_toolbox.py::test_toolbox_reads_csv_as_research_data - asser...
+FAILED tests/test_toolbox.py::test_toolbox_reads_docx_without_external_dependency
+FAILED tests/test_toolbox.py::test_toolbox_reads_docx_headers_footers_and_comments
+FAILED tests/test_toolbox.py::test_toolbox_reads_xlsx_without_external_dependency
+FAILED tests/test_toolbox.py::test_toolbox_reads_multiple_xlsx_sheets_and_numeric_summary
+FAILED tests/test_toolbox.py::test_toolbox_reads_csv_quoted_commas_and_numeric_summary
+FAILED tests/test_toolbox.py::test_toolbox_reads_local_png_metadata_when_user_asks_to_analyze_image
+FAILED tests/test_toolbox.py::test_toolbox_uses_vision_analysis_for_images - ...
+FAILED tests/test_toolbox.py::test_toolbox_routes_mface_image_to_sticker_emotion_analysis
+FAILED tests/test_toolbox.py::test_toolbox_filters_garbage_vision_output - as...
+FAILED tests/test_toolbox.py::test_ollama_vision_switches_to_fallback_model_after_resource_failure
+FAILED tests/test_toolbox.py::test_ollama_vision_switches_to_fallback_after_empty_truncated_output
+FAILED tests/test_toolbox.py::test_current_visual_question_is_sent_with_the_current_image
+FAILED tests/test_voice.py::test_onebot_streams_long_voice_as_each_segment_is_synthesized
+FAILED tests/test_voice.py::test_onebot_voice_quality_failure_sends_text_fallback
+FAILED tests/test_voice.py::test_onebot_service_failure_sends_remaining_text
+FAILED tests/test_voice.py::test_voice_send_failure_sends_text_fallback - Ass...
+ERROR deploy/test_vision.py::test_model
+22 failed, 1126 passed, 3 skipped, 1 error in 161.13s (0:02:41)

@@ -111,19 +111,35 @@ def test_attempt_timeout_never_exceeds_configured_budget() -> None:
 # ---------------------------------------------------------------------------
 
 def _install_fake_client(monkeypatch, *, timeouts: list[Any], posts: dict[str, int]) -> None:
-    class FakeResponse:
+    import json as _json
+
+    class FakeStream:
         def __init__(self, content: str) -> None:
             self._content = content
+
+        async def __aenter__(self) -> "FakeStream":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
 
         def raise_for_status(self) -> None:
             return None
 
-        def json(self) -> dict[str, Any]:
-            return {
-                "choices": [
-                    {"message": {"role": "assistant", "content": self._content}}
-                ]
-            }
+        async def aiter_lines(self):
+            if self._content:
+                yield "data: " + _json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": self._content},
+                                "finish_reason": "stop",
+                            }
+                        ]
+                    }
+                )
+            yield "data: [DONE]"
 
     class FakeAsyncClient:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -135,11 +151,11 @@ def _install_fake_client(monkeypatch, *, timeouts: list[Any], posts: dict[str, i
         async def __aexit__(self, *args: Any) -> None:
             return None
 
-        async def post(self, *args: Any, **kwargs: Any) -> FakeResponse:
+        def stream(self, method, url, headers=None, json=None) -> FakeStream:
             posts["n"] += 1
-            # 前两次返回空内容触发 guarded api 重试，第三次才给合格回复。
+            # 前两次无内容触发 guarded api 重试，第三次才给合格回复。
             content = "" if posts["n"] < 3 else "好呀，我在听。"
-            return FakeResponse(content)
+            return FakeStream(content)
 
     import httpx
 

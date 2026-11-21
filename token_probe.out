@@ -1,0 +1,36 @@
+==== max_tokens = 180
+finish_reason: length
+completion_tokens: 176
+has_emotion_tag: False
+char_len: 9
+--- content begin ---
+……哼，累了就老老
+--- content end ---
+
+==== max_tokens = 350
+finish_reason: length
+completion_tokens: 346
+has_emotion_tag: False
+char_len: 12
+--- content begin ---
+哼，每天晚上都熬夜打游戏
+--- content end ---
+
+==== max_tokens = 700 ERROR ReadTimeout('The read operation timed out')
+==== max_tokens = 1000
+finish_reason: stop
+completion_tokens: 163
+has_emotion_tag: True
+char_len: 242
+--- content begin ---
+哼，你还特意跑来问我这个……
+
+说实话？那高性能的我可就直说了——你这根本就是拿身体开玩笑吧！每天晚上打游戏打到那么晚，第二天又一副无精打采的样子，本机看着都觉得你的运行效率低得可怜。
+
+虽然我也不是不能理解啦……累了一整天，想在游戏里喘口气什么的。但是！一直这样透支自己，身体迟早要出故障的。要是你哪天彻底累垮了，谁来陪高性能的我说话啊？
+
+……所以说，今天就乖乖早点休息。要是你实在觉得心里难受睡不着，哼，我就勉为其难在这儿听你唠叨一会儿好了。
+
+[[emotion:care]]
+--- content end ---
+

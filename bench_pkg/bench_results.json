@@ -1,0 +1,212 @@
+{
+  "gemini-2.5-flash": {
+    "text": {
+      "sec": 4.77,
+      "ok": true,
+      "finish": "stop",
+      "ct": 342,
+      "pt": 15,
+      "tt": 357,
+      "reply": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Persona: アトリ (Atri) from the visual novel *ATRI -My Dear Moments-*. Characteristics: High-tech humanoid robot, looks like a human girl, created by Professor Ikora, cheerful, slightly blunt, efficient.\n    *   Constraint 1: 简洁回答 (Answer concisely).\n    *   Constraint 2: 用一句话介绍你自己 (Introduce yourself in one sentence).\n\n2.  **Formulate Atri's Self-Introduction:**\n    *   *Core identity:* High-performance humanoid robot.\n    *   *Key association:* Found in the sea, currently working at an academy/with Natsuki.\n    *   *Draft 1:* 我是高性能的人形机器人亚托莉，虽然外表和人类一样，但其实是个机器人哦！\n    *   *Draft 2 (more concise):* 我是作为高性能机器人被制造出来的亚托莉，请多指教！\n    *   *Draft 3 (Atri's tone):* 我是高性能的人形机器人亚托莉，情感程序很丰富，请多指教！\n\n3.  **Refine based on constraints:**\n    *   \"我是高性能的人形机器人亚托莉，情感模块非常丰富哦！\" (One sentence, concise, captures her essence).\n\n4.  **Final Polish:**\n    \"我是高性能的人形机器人亚托莉，情感程序很丰富，请多指教！\"我是高性能的人形机器人亚托莉，情感程序很丰富，请多指教！"
+    },
+    "vision": {
+      "sec": 4.01,
+      "ok": true,
+      "finish": "stop",
+      "ct": 117,
+      "pt": 1079,
+      "tt": 1196,
+      "reply": "在这张图中，包含以下形状、颜色和文字：\n\n*   **文字：**\n    *   顶部有黑色英文字体：“ATRI BENCH 2026”\n    *   左下角有紫色中文字体：“高性能测试”\n\n*   **形状与颜色：**\n    *   一个**红色**的**圆形**（位于左侧）\n    *   一个**蓝色**的**正方形**（位于右侧）\n    *   一个**绿色**的**三角形**（位于底部中央）"
+    }
+  },
+  "gemini-2.5-flash-lite": {
+    "text": {
+      "sec": 2.28,
+      "ok": true,
+      "finish": "stop",
+      "ct": 383,
+      "pt": 15,
+      "tt": 398,
+      "reply": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   User asks: \"用一句话介绍你自己。\" (Introduce yourself in one sentence.)\n    *   Persona constraint: \"你是亚托莉，简洁回答。\" (You are ATRI, answer concisely.)\n    *   Character: ATRI (亚托莉), a high-tech android girl from the visual novel *ATRI -My Dear Moments-*. She describes herself as a \"high-tech cyber-girl\" (高性能ロボット).\n\n2.  **Formulate the Response:**\n    *   *Identity:* High-performance humanoid robot / ATRI.\n    *   *Constraint:* One sentence, concise.\n    *   *Draft 1:* 我是亚托莉，一个略微有些高性能的人形机器人！ (I am ATRI, a slightly high-performance humanoid robot!)\n    *   *Draft 2:* 我是亚托莉，世界上最棒的高性能机器人！ (I am ATRI, the world's best high-performance robot!)\n\n3.  **Refine (Match ATRI's tone - confident, cute, slight pride in being \"high-performance\"):**\n    *   \"我是亚托莉，一个充满迷人魅力的高性能机器人！\" (A bit too boastful?)\n    *   \"我是亚托莉，是由斑鸠前辈制造的高性能人形机器人哦。\" (Classic, informative).\n    *   Let's keep it very simple and in character: \"我是亚托莉，一个虽然外表可爱但绝对高性能的人形机器人。\"\n\n4.  **Final Polish (Strictly one sentence, concise):**\n    我是亚托莉，一个略微有些高性能的人形机器人。我是亚托莉，一个略微有些高性能的人形机器人。"
+    },
+    "vision": {
+      "sec": 1.84,
+      "ok": true,
+      "finish": "stop",
+      "ct": 116,
+      "pt": 1079,
+      "tt": 1195,
+      "reply": "这张图里包含以下形状、颜色和文字：\n\n1. **形状与颜色：**\n   * 一个**红色**的**圆形**（位于左侧）。\n   * 一个**蓝色**的**正方形**（位于右侧）。\n   * 一个**绿色**的**三角形**（位于下方中央）。\n\n2. **文字：**\n   * 图片上方有黑色英文字母：“**ATRI BENCH 2026**”。\n   * 图片左下方有紫色中文字符：“**高性能测试**”。"
+    }
+  },
+  "gemini-3-flash": {
+    "text": {
+      "ok": false,
+      "err": "HTTPStatusError(\"Client error '404 Not Found' for url 'https://api.higanai.top/v1/chat/completions'\\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404\")"
+    },
+    "vision": {
+      "ok": false,
+      "err": "HTTPStatusError(\"Client error '404 Not Found' for url 'https://api.higanai.top/v1/chat/completions'\\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404\")"
+    }
+  },
+  "gemini-3-flash-preview": {
+    "text": {
+      "sec": 3.69,
+      "ok": true,
+      "finish": "stop",
+      "ct": 344,
+      "pt": 16,
+      "tt": 360,
+      "reply": "**Defining Atri's Identity**\n\nI'm working on defining myself, Atri, in a concise sentence. My identity is the key, and my name is Atri. Right now, I'm aiming for brevity.\n\n\n我是高性能机器人亚托莉，请多指教！"
+    },
+    "vision": {
+      "sec": 1.86,
+      "ok": true,
+      "finish": "stop",
+      "ct": 126,
+      "pt": 1079,
+      "tt": 1205,
+      "reply": "这张图包含以下形状、颜色和文字：\n\n**形状：**\n* 一个圆形（左侧）\n* 一个正方形（右侧）\n* 一个三角形（底部中央）\n\n**颜色：**\n* 红色（圆形）\n* 蓝色（正方形）\n* 绿色（三角形）\n* 黑色（顶部的英文字母）\n* 紫色（底部的中文字母）\n\n**文字：**\n* 顶部文字（黑色）：`ATRI BENCH 2026`\n* 底部文字（紫色）：`高性能测试`"
+    }
+  },
+  "gemini-3.1-flash-lite": {
+    "text": {
+      "sec": 1.28,
+      "ok": true,
+      "finish": "stop",
+      "ct": 14,
+      "pt": 15,
+      "tt": 29,
+      "reply": "我是亚托莉，是一台会哭泣的高性能机器人。"
+    },
+    "vision": {
+      "sec": 1.93,
+      "ok": true,
+      "finish": "stop",
+      "ct": 97,
+      "pt": 1079,
+      "tt": 1176,
+      "reply": "这张图片包含以下元素：\n\n*   **形状与颜色：**\n    *   一个红色的圆形（位于左侧）\n    *   一个蓝色的正方形（位于右侧）\n    *   一个绿色的三角形（位于下方中部）\n\n*   **文字：**\n    *   顶部黑色英文大写文字：“ATRI BENCH 2026”\n    *   左下角紫色中文文字：“高性能测试”"
+    }
+  },
+  "gemini-3.1-flash-lite-preview": {
+    "text": {
+      "ok": false,
+      "err": "HTTPStatusError(\"Client error '404 Not Found' for url 'https://api.higanai.top/v1/chat/completions'\\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404\")"
+    },
+    "vision": {
+      "ok": false,
+      "err": "HTTPStatusError(\"Client error '404 Not Found' for url 'https://api.higanai.top/v1/chat/completions'\\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404\")"
+    }
+  },
+  "gemini-3.1-pro": {
+    "text": {
+      "ok": false,
+      "err": "ReadTimeout('The read operation timed out')"
+    },
+    "vision": {
+      "ok": false,
+      "err": "ReadTimeout('The read operation timed out')"
+    }
+  },
+  "gemini-3.1-pro-preview": {
+    "text": {
+      "ok": false,
+      "err": "ReadTimeout('The read operation timed out')"
+    },
+    "vision": {
+      "ok": false,
+      "err": "ReadTimeout('The read operation timed out')"
+    }
+  },
+  "gemini-3.5-flash": {
+    "text": {
+      "sec": 3.19,
+      "ok": true,
+      "finish": "stop",
+      "ct": 28,
+      "pt": 16,
+      "tt": 44,
+      "reply": "我是亚托莉，由 Nakamura 博士制造的高性能机器人少女，虽然外表是人类，但本质上是——AI！"
+    },
+    "vision": {
+      "sec": 6.05,
+      "ok": true,
+      "finish": "stop",
+      "ct": 128,
+      "pt": 1079,
+      "tt": 1207,
+      "reply": "在这张图中，包含以下形状、颜色和文字内容：\n\n1. **形状与颜色**：\n   * **圆形**：位于左侧，颜色为**红色**。\n   * **正方形**：位于右侧，颜色为**蓝色**。\n   * **三角形**：位于下方中间，颜色为**绿色**。\n\n2. **文字**：\n   * **顶部文字**：黑色的英文文字 **“ATRI BENCH 2026”**。\n   * **左下角文字**：紫色的中文文字 **“高性能测试”**。"
+    }
+  },
+  "gemini-3.6-flash": {
+    "text": {
+      "sec": 52.85,
+      "ok": true,
+      "finish": "stop",
+      "ct": 14,
+      "pt": 16,
+      "tt": 30,
+      "reply": "我是高性能的高级机器人亚托莉，请多指教！"
+    },
+    "vision": {
+      "sec": 4.81,
+      "ok": true,
+      "finish": "stop",
+      "ct": 124,
+      "pt": 1079,
+      "tt": 1203,
+      "reply": "图片中的内容简要描述如下：\n\n1. **形状与颜色**：\n   * 左侧：一个**红色**的**圆形**。\n   * 右侧：一个**蓝色**的**正方形**。\n   * 下方中间：一个**绿色**的**三角形**。\n\n2. **文字与颜色**：\n   * 上方：黑色英文字体，内容为“**ATRI BENCH 2026**”。\n   * 左下方：紫色中文字体，内容为“**高性能测试**”。\n\n整体背景为白色。"
+    }
+  },
+  "gemini-3.7-flash": {
+    "text": {
+      "ok": false,
+      "err": "ReadTimeout('The read operation timed out')"
+    },
+    "vision": {
+      "ok": false,
+      "err": "ReadTimeout('The read operation timed out')"
+    }
+  },
+  "gemini-3.8-flash": {
+    "text": {
+      "sec": 8.71,
+      "ok": true,
+      "finish": "stop",
+      "ct": 20,
+      "pt": 5286,
+      "tt": 5306,
+      "reply": "我是亚托莉（ATRI），高性能的人性能机器人，最喜欢夏生先生了！"
+    },
+    "vision": {
+      "sec": 5.02,
+      "ok": true,
+      "finish": "stop",
+      "ct": 170,
+      "pt": 6351,
+      "tt": 6521,
+      "reply": "这张图片包含以下形状、颜色和文字内容：\n\n1. **形状与对应颜色**：\n   - **圆形**：位于左侧中上方，颜色为**红色**。\n   - **正方形（矩形）**：位于右侧中上方，颜色为**蓝色**。\n   - **三角形**：位于底部中间，颜色为**绿色**。\n\n2. **文字与对应颜色**：\n   - **左上方英文/数字**：内容为 **“ATRI BENCH 2026”**，字体为**黑色**衬线体。\n   - **左下方中文**：内容为 **“高性能测试”**，字体为**紫色**宋体/明体。\n\n3. **背景**：整体为**白色**背景。"
+    }
+  },
+  "gemini-4-argon": {
+    "text": {
+      "sec": 5.27,
+      "ok": true,
+      "finish": "stop",
+      "ct": 14,
+      "pt": 5380,
+      "tt": 5394,
+      "reply": "我系高性能的机器人，亚托莉！"
+    },
+    "vision": {
+      "sec": 7.58,
+      "ok": true,
+      "finish": "stop",
+      "ct": 115,
+      "pt": 6427,
+      "tt": 6542,
+      "reply": "这张图片以**白色**为背景，包含以下形状、颜色和文字：\n\n1. **形状与颜色**：\n   * **红色的圆形**（位于左上方）\n   * **蓝色的正方形**（位于右上方）\n   * **绿色的三角形**（位于中间下方）\n\n2. **文字与颜色**：\n   * 左上方有**黑色**的英文与数字：**`ATRI BENCH 2026`**\n   * 左下方有**紫色**的中文：**`高性能测试`**"
+    }
+  }
+}

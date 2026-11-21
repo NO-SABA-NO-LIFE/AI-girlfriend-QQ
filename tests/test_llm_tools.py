@@ -524,6 +524,7 @@ def test_reply_with_api_runs_tool_call_loop(monkeypatch) -> None:
         openai_model="test-model",
         temperature=0.8,
         max_tokens=350,
+        chat_stream_enabled=False,
     )
     engine = AtriReplyEngine(config)
 
@@ -575,6 +576,7 @@ def test_reply_with_api_time_hint_guides_daily_time_awareness(monkeypatch) -> No
         openai_model="test-model",
         temperature=0.8,
         max_tokens=350,
+        chat_stream_enabled=False,
     )
     engine = AtriReplyEngine(config)
 
@@ -658,6 +660,7 @@ def test_reply_with_api_supports_two_sequential_tool_rounds(monkeypatch) -> None
         openai_model="test-model",
         temperature=0.8,
         max_tokens=350,
+        chat_stream_enabled=False,
         llm_tool_max_calls=2,
         llm_agent_max_tool_calls=2,
     )
@@ -765,6 +768,7 @@ def test_agent_loop_rejects_fake_search_and_executes_a_real_search(monkeypatch) 
         openai_model="test-model",
         temperature=0.8,
         max_tokens=350,
+        chat_stream_enabled=False,
         llm_agent_protocol_enabled=True,
         web_grounding_review_enabled=False,
     )
@@ -847,6 +851,7 @@ def test_reply_engine_captures_voice_tool_request(monkeypatch) -> None:
         openai_model="test-model",
         temperature=0.8,
         max_tokens=350,
+        chat_stream_enabled=False,
         voice_tts_enabled=True,
     )
     engine = AtriReplyEngine(config)
@@ -898,6 +903,7 @@ def test_reply_probability_gate_hides_only_voice_tool(monkeypatch) -> None:
         openai_model="test-model",
         temperature=0.8,
         max_tokens=350,
+        chat_stream_enabled=False,
         voice_tts_enabled=True,
     )
     engine = AtriReplyEngine(config)
