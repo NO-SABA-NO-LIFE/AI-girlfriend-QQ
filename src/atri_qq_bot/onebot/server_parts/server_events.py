@@ -23,6 +23,7 @@ from ..reply_policy import (  # type: ignore[import-not-found]
 from ...group_reply_focus import (  # type: ignore[import-not-found]
     _looks_like_end_conversation,
     _strip_placeholder_text,
+    continuation_follows_other_human,
 )
 from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
     forced_event_block_reason,
@@ -229,6 +230,19 @@ class OneBotEventMixin(OneBotServerMixin):
                     event,
                     plain_text,
                 )
+                if active_group_continuation:
+                    # 文本启发式只看到"你"等泛化第二人称，无法判断在对谁说话。
+                    # 若群里最近一条是其他真人发的，本条更可能是真人之间的对话，
+                    # fail-closed 否决抢答；显式 @/名字/引用机器人已由 preliminary 覆盖。
+                    group_history = self.reply_engine.memory.recent_history(
+                        _conversation_id(event),
+                        limit=8,
+                    )
+                    if continuation_follows_other_human(
+                        group_history,
+                        current_sender_id=event.get("user_id"),
+                    ):
+                        active_group_continuation = False
                 preliminary_reply = preliminary_reply or active_group_continuation
                 # 没有任何明确触发时，普通群聊由模型按内容判断是否搭话（带冷却）。
                 # 硬上限刚触发冷却时也不得再走随机搭话。

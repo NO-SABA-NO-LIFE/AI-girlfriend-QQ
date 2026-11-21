@@ -456,6 +456,44 @@ def _looks_like_direct_continuation(
     )
 
 
+def _last_group_message_entry(
+    recent_group_history: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the most recent real group message entry, or None."""
+    for entry in reversed(recent_group_history):
+        if isinstance(entry, dict) and entry.get("role") in ("user", "assistant"):
+            return entry
+    return None
+
+
+def continuation_follows_other_human(
+    recent_group_history: list[dict[str, Any]],
+    *,
+    current_sender_id: int | str,
+) -> bool:
+    """Whether the current message is most naturally a reply to another human.
+
+    The text-level heuristic only sees a generic second-person cue such as
+    "你". The real addressee is determined by the immediately preceding group
+    speaker:
+
+    - bot was the last speaker -> a continuation with the bot, do not veto;
+    - same user keeps talking  -> same thread, do not veto;
+    - a different human spoke  -> human-to-human reply, veto (fail closed).
+
+    Explicit bot references (@bot, bot name, quote of bot) are covered by the
+    separate preliminary reply decision and are not affected here.
+    """
+    last = _last_group_message_entry(recent_group_history)
+    if last is None or last.get("role") == "assistant":
+        return False
+    actor_id = last.get("actor_id")
+    if actor_id is None:
+        # A user entry without a known actor: treat as another human, fail closed.
+        return True
+    return str(actor_id) != str(current_sender_id)
+
+
 # 明确表示“不想继续聊”的终止信号：只认明确表达，避免把玩笑或正常对话误判成结束。
 _END_CONVERSATION_CUES = (
     "不聊了", "别聊了", "不想聊了", "不想聊",

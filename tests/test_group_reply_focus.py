@@ -6,6 +6,7 @@ from atri_qq_bot.group_reply_focus import (
     GroupReplyFocus,
     GroupReplyFocusStore,
     _looks_like_end_conversation,
+    continuation_follows_other_human,
 )
 from atri_qq_bot.onebot.server import OneBotServer
 from atri_qq_bot.persona import AtriReplyEngine
@@ -836,3 +837,105 @@ def test_suppressed_member_message_is_recorded_but_not_sent(
         entry.get("role") == "user" and "周末计划" in entry.get("text", "")
         for entry in history
     )
+
+
+# --- 活跃续聊的对话对象判断（上一发言人否决）---
+
+def test_continuation_veto_when_other_human_spoke_last() -> None:
+    history = [
+        {"role": "user", "text": "行啊，小鱿鱼来聊", "actor_id": "10002",
+         "nickname": "小花"},
+    ]
+    # 当前发言者是 10001，最近一条来自另一个真人 10002：真人之间对话，否决。
+    assert continuation_follows_other_human(
+        history, current_sender_id=10001
+    )
+
+
+def test_continuation_allowed_when_bot_spoke_last() -> None:
+    history = [
+        {"role": "assistant", "text": "哼，我可是高性能机器人。"},
+    ]
+    assert not continuation_follows_other_human(
+        history, current_sender_id=10001
+    )
+
+
+def test_continuation_allowed_for_same_sender_followup() -> None:
+    history = [
+        {"role": "user", "text": "我再补充一句", "actor_id": "10001",
+         "nickname": "小鱿鱼"},
+    ]
+    # 同一人连续发消息，仍是同一话题，不否决。
+    assert not continuation_follows_other_human(
+        history, current_sender_id=10001
+    )
+
+
+def test_continuation_veto_fail_closed_for_unknown_actor() -> None:
+    history = [{"role": "user", "text": "某条真人消息"}]
+    assert continuation_follows_other_human(
+        history, current_sender_id=10001
+    )
+
+
+def test_continuation_allowed_without_history() -> None:
+    assert not continuation_follows_other_human(
+        [], current_sender_id=10001
+    )
+
+
+def test_active_continuation_human_to_human_does_not_butt_in(
+    monkeypatch, tmp_path
+) -> None:
+    engine, server = _fallback_server(tmp_path, reply_mode="smart")
+
+    async def fake_reply(*args, **kwargs):
+        return "模型回复"
+
+    async def fake_analyze(*args, **kwargs):
+        return None
+
+    sent: list[str] = []
+
+    async def fake_send_reply(websocket, event, messages, **kwargs):
+        if isinstance(messages, str):
+            sent.append(messages)
+            return
+        for message in messages:
+            if getattr(message, "kind", "") == "text":
+                sent.append(str(message))
+
+    async def fake_ambient(event, text):
+        return False
+
+    monkeypatch.setattr(engine, "reply", fake_reply)
+    monkeypatch.setattr(server.tools, "analyze", fake_analyze)
+    monkeypatch.setattr(server, "send_reply", fake_send_reply)
+    monkeypatch.setattr(server, "_maybe_ambient_group_reply", fake_ambient)
+
+    # 1) 小鱿鱼先 @ 机器人，打开活跃会话。
+    opener = _group_event(10001, _at_bot(), _text("在吗"))
+    opener.update({"self_id": BOT_QQ, "sender": {"card": "小鱿鱼"}})
+    asyncio.run(server._handle_event(object(), opener))
+    key = f"group:{GROUP_ID}:user:10001"
+    assert key in server._group_reply_focus._active
+
+    # 2) 另一个真人小花发言，成为群里最近一条。
+    other = _group_event(10002, _text("行啊，小鱿鱼来聊，我在这儿。"))
+    other.update({"self_id": BOT_QQ, "sender": {"card": "小花"}})
+    asyncio.run(server._handle_event(object(), other))
+
+    sent.clear()
+
+    # 3) 小鱿鱼其实在回小花，不是对机器人说话，不能抢答。
+    target = _group_event(10001, _text("你说话太规整了 谁教的"))
+    target.update({"self_id": BOT_QQ, "sender": {"card": "小鱿鱼"}})
+    asyncio.run(server._handle_event(object(), target))
+    assert sent == []
+
+    # 4) 显式 @ 机器人时仍正常回复。
+    mention = _group_event(10001, _at_bot(), _text("那你说呢"))
+    mention.update({"self_id": BOT_QQ, "sender": {"card": "小鱿鱼"}})
+    asyncio.run(server._handle_event(object(), mention))
+    assert len(sent) == 1
