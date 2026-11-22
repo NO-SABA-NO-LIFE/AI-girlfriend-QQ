@@ -5,6 +5,7 @@ from typing import Any
 from ..prompting import load_prompt
 from ..voice.policy import load_voice_behavior
 from .agent_protocol import AGENT_ACTION_PROMPT, final_answer_schema
+from .hd2_intent import HD2_CANONICAL_COMMANDS
 
 
 # 工具选择原则由外部 Markdown 维护，避免模型能力规则和代码实现重复。
@@ -20,7 +21,10 @@ _LEGACY_AUTOMATIC_TOOL_INSTRUCTION_PROMPT = (
 # 保留旧拼装变量仅供兼容导入；实际对外使用上面的外部文档内容。
 
 
-def available_tool_schemas(config: Any) -> list[dict[str, Any]]:
+def available_tool_schemas(
+    config: Any,
+    hd2_nl_allowed: bool = False,
+) -> list[dict[str, Any]]:
     if not bool(getattr(config, "llm_tools_enabled", True)):
         return []
 
@@ -34,9 +38,55 @@ def available_tool_schemas(config: Any) -> list[dict[str, Any]]:
         tools.append(_voice_schema(config))
         if load_voice_behavior().get("calls_enabled", False):
             tools.append(_voice_call_schema())
+    # Helldivers 自然语言查询：仅在本轮满足触发门（私聊直接 / 群里被 @）且
+    # 配置开关打开时才提供，避免普通群聊被误触发情报查询。
+    if hd2_nl_allowed and bool(
+        getattr(config, "hd2_natural_language_enabled", True)
+    ):
+        tools.append(_hd2_query_schema())
     if bool(getattr(config, "llm_agent_protocol_enabled", False)):
         tools.append(final_answer_schema(getattr(config, "max_tokens", 1200) * 4))
     return tools
+
+
+def _hd2_query_schema() -> dict[str, Any]:
+    """自然语言 Helldivers 情报查询工具。
+
+    模型把用户的自然语言请求映射到一个规范命令词，并把需要查询的实体放进
+    argument；执行结果（图片/文本卡片）会随本轮回复一起发出。
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": "query_helldivers",
+            "description": (
+                "查询《绝地潜兵2 / Helldivers 2》的银河战争情报：战况总览、星球详情、"
+                "阵营战线、战争地图、最高命令、全球事件、民主空间站、Steam 新闻、"
+                "Wiki、军需簿以及新闻/快报订阅等。当用户明确想了解这类游戏情报时调用；"
+                "普通闲聊或与该游戏无关的问题不要调用。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "enum": list(HD2_CANONICAL_COMMANDS),
+                        "description": "要执行的规范命令词，对应一个情报功能。",
+                    },
+                    "argument": {
+                        "type": "string",
+                        "description": (
+                            "查询实体：warfront 填阵营（终结族/机器人/光能者或英文），"
+                            "planet 填星球名称/编号/链接，wiki 填关键词，hd2data 填"
+                            "武器/护甲/敌人名称；其它命令留空字符串。"
+                        ),
+                    },
+                },
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+    }
 
 
 def _poke_user_schema() -> dict[str, Any]:

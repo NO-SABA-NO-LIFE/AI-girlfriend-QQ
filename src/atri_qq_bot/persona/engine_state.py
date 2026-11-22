@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from .engine_support import PersonaEngineMixin, _sync_core_globals
+
+# 执行器入参为 (会话标识, 规范命令词, 实体)，返回给模型的工具回执文本。
+HD2ToolExecutor = Callable[[str, str, str], Awaitable[str]]
 
 
 class EngineStateMixin(PersonaEngineMixin):
@@ -32,6 +37,10 @@ class EngineStateMixin(PersonaEngineMixin):
         # 工具循环里最后一次"内容非空但没过校验"的候选回复。多轮都没拿到合格
         # 回复时用它兜底，避免整轮静默消失（用户侧表现为发了消息没反应）。
         self._last_candidate_reply: str = ""
+        # Helldivers 自然语言查询执行器，由 OneBot 层注入：
+        # 签名 (conversation_id, command, argument) -> 工具回执字符串。
+        # 引擎不直接 import helldivers，保持网络/组件解耦；未注入时该工具不会被执行。
+        self._hd2_tool_executor: "HD2ToolExecutor | None" = None
         self._cognition_store: CognitionStateStore | None = None
         if bool(getattr(config, "cognition_shadow_enabled", False)):
             try:
@@ -57,6 +66,10 @@ class EngineStateMixin(PersonaEngineMixin):
 
     def consume_reply_failure(self, conversation_id: str) -> str:
         return self._pending_reply_failures.pop(conversation_id, "")
+
+    def set_hd2_tool_executor(self, executor: HD2ToolExecutor | None) -> None:
+        """注入 Helldivers 自然语言查询执行器；传 None 可关闭该能力。"""
+        self._hd2_tool_executor = executor
 
     def _register_reply_failure(self, conversation_id: str, error: object) -> None:
         reason = str(error or "未知回复错误").strip()[:800]

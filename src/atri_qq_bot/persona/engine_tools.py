@@ -25,6 +25,7 @@ class EngineToolsMixin(PersonaEngineMixin):
         frequency_penalty_override: float | None = None,
         allow_reply_voice: bool | None = None,
         request_timeout: float | None = None,
+        hd2_nl_allowed: bool = False,
     ) -> str:
         import httpx
 
@@ -62,7 +63,9 @@ class EngineToolsMixin(PersonaEngineMixin):
             messages.append({"role": "system", "content": extra_system})
         elif repair_mode:
             messages.append({"role": "system", "content": COMFORT_REPAIR_PROMPT})
-        tool_schemas = available_tool_schemas(self.config)
+        tool_schemas = available_tool_schemas(
+            self.config, hd2_nl_allowed=hd2_nl_allowed
+        )
         voice_profile = (
             self.memory.profile(conversation_id)
             if conversation_id.startswith("group:")
@@ -563,6 +566,25 @@ class EngineToolsMixin(PersonaEngineMixin):
     ) -> str | None:
         profile = self.memory.profile(conversation_id)
         policy = load_voice_behavior()
+        if name == "query_helldivers":
+            # 自然语言 Helldivers 情报：先把模型入参归一为规范命令，再交给
+            # OneBot 层注入的执行器（内部复用 bridge 斜杠链路）。引擎层不直接
+            # 碰 helldivers 组件；任何异常都转成工具回执，禁止模型编造情报。
+            from ..llm_tools.hd2_intent import (
+                HD2IntentError,
+                normalize_hd2_arguments,
+            )
+
+            executor = self._hd2_tool_executor
+            if executor is None:
+                return "Helldivers 情报当前未启用，请直接用文字自然回复。"
+            try:
+                command, argument = normalize_hd2_arguments(arguments)
+                return await executor(conversation_id, command, argument)
+            except HD2IntentError as exc:
+                return f"Helldivers 工具参数无效：{exc}。请修正后重新调用，不要编造情报。"
+            except Exception as exc:  # noqa: BLE001
+                return f"Helldivers 情报获取失败：{_shorten(str(exc), 160)}。请改用文字自然回复。"
         if name == "offer_voice_call":
             decision = evaluate_call_request(conversation_id, profile, policy)
             if not decision.allowed:
@@ -999,6 +1021,7 @@ class EngineToolsMixin(PersonaEngineMixin):
         reply_focus: GroupReplyFocus | None = None,
         allow_reply_voice: bool | None = None,
         chat_deadline: float | None = None,
+        hd2_nl_allowed: bool = False,
     ) -> str:
         last_reply = ""
         visual_temperature = (
@@ -1052,6 +1075,7 @@ class EngineToolsMixin(PersonaEngineMixin):
                     )
                 ),
                 request_timeout=request_timeout,
+                hd2_nl_allowed=hd2_nl_allowed,
             )
             last_reply = reply
             if reply and not has_illegal_language_or_garbage(reply):

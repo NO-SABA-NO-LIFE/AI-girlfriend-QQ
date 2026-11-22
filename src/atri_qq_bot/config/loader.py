@@ -298,6 +298,7 @@ def _build_config(root: Path) -> BotConfig:
         llm_tools_enabled=_env_bool("LLM_TOOLS_ENABLED", True),
         llm_tool_max_calls=max(1, min(4, _env_int("LLM_TOOL_MAX_CALLS", 2))),
         llm_agent_protocol_enabled=_env_bool("LLM_AGENT_PROTOCOL_ENABLED", False),
+        hd2_natural_language_enabled=_env_bool("HD2_NATURAL_LANGUAGE_ENABLED", True),
         llm_agent_max_steps=max(2, min(10, _env_int("LLM_AGENT_MAX_STEPS", 6))),
         llm_agent_max_tool_calls=max(
             1,

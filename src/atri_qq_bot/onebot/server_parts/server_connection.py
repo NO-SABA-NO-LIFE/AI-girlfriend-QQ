@@ -202,6 +202,9 @@ class OneBotConnectionMixin(OneBotServerMixin):
         # 注入在线群列表查询：bridge 退群清理前先确认 QQ 在线且健康，再读取
         # 群列表；任何一步不确定都由 bridge 保留订阅，绝不误删。
         self.helldivers.set_group_list_provider(self._hd2_group_list_provider)
+        # 自然语言 HD2 查询在工具循环里产出的待发情报（图片/文本），按会话暂存，
+        # 由事件流程在回复发出后统一消费发送；每次 handle 前会先清空，避免串轮。
+        self._pending_hd2_nl: dict[str, list[Any]] = {}
 
     async def _hd2_group_list_provider(self) -> list[str]:
         """确认 QQ 在线后返回当前加入的群号字符串列表；不确定即抛错。"""
@@ -230,6 +233,36 @@ class OneBotConnectionMixin(OneBotServerMixin):
                 continue
             group_ids.append(str(item.get("group_id")))
         return group_ids
+
+    async def _hd2_nl_executor(
+        self,
+        conversation_id: str,
+        command: str,
+        argument: str,
+    ) -> str:
+        """执行自然语言 HD2 工具：重建斜杠命令并复用 bridge 情报链路。
+
+        成功时把待发消息暂存到 ``_pending_hd2_nl``，返回给模型的引导回执；
+        任何失败都返回文本回执，由模型自然回应，绝不伪造情报数据。
+        """
+        from ...llm_tools.hd2_intent import build_hd2_slash
+
+        slash_text = build_hd2_slash(command, argument)
+        try:
+            messages = await self.helldivers.handle(slash_text, conversation_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("[HD2] 自然语言情报执行失败：%s", exc)
+            return "Helldivers 情报获取失败，请自然地说明稍后再试，不要编造数据。"
+
+        if not messages:
+            return "该命令没有返回情报，请自然回应，不要编造游戏数据。"
+        # 同一轮重复调用时覆盖旧结果，保证只发最后一次查询的情报。
+        self._pending_hd2_nl[conversation_id] = messages
+        return (
+            "Helldivers 情报已就绪，会随本轮回复一起发出。"
+            "你只需用一句简短自然的话引导（可带情绪），不要复述卡片里的数据，"
+            "不要罗列编号，也不要说自己做不到或正在查询。"
+        )
 
     async def _hd2_push_sender(
         self, session_key: str, messages: list[Any]

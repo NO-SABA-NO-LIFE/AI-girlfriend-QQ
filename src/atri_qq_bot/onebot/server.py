@@ -161,6 +161,9 @@ async def run_server(config: Any) -> None:
         # 评测/总结是纯旁路：初始化失败时只关闭扩展，不影响 OneBot 回复能力。
         LOGGER.warning("评测与群聊总结旁路未启用，继续运行核心回复链路：%s", exc)
     server = OneBotServer(config, reply_engine, insights_runtime)
+    # 注入自然语言 HD2 查询执行器：引擎工具循环命中 query_helldivers 时回调，
+    # 复用 helldivers 桥接；保持引擎与情报组件解耦。
+    reply_engine.set_hd2_tool_executor(server._hd2_nl_executor)
     if server.insights is not None:
         await server.insights.start()
 

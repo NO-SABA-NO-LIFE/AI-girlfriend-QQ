@@ -16,6 +16,7 @@ class EngineReplyMixin(PersonaEngineMixin):
         tool_context: Any | None = None,
         reply_focus: GroupReplyFocus | None = None,
         extra_system: str | None = None,
+        hd2_nl_allowed: bool = False,
     ) -> str:
         # 主流程遵循“清洗输入 -> 记录记忆 -> 确定性分支/安全兜底
         # -> 组织模型上下文 -> 校验输出”，便于定位每个阶段的责任。
@@ -164,6 +165,7 @@ class EngineReplyMixin(PersonaEngineMixin):
                     reply_focus=reply_focus,
                     allow_reply_voice=allow_reply_voice,
                     chat_deadline=chat_deadline,
+                    hd2_nl_allowed=hd2_nl_allowed,
                 )
                 human_pipeline = bool(
                     getattr(self.config, "human_reply_pipeline_enabled", True)

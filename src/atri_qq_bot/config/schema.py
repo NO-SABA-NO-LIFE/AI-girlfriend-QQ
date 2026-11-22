@@ -159,6 +159,8 @@ class BotConfig:
     llm_tools_enabled: bool = True
     llm_tool_max_calls: int = 2
     llm_agent_protocol_enabled: bool = False
+    # 自然语言触发 Helldivers 情报：私聊直接可用，群聊仅在被 @ 时可用。
+    hd2_natural_language_enabled: bool = True
     llm_agent_max_steps: int = 6
     llm_agent_max_tool_calls: int = 3
     human_reply_pipeline_enabled: bool = True

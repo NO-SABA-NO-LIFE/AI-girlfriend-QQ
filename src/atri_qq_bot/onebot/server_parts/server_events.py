@@ -711,6 +711,13 @@ class OneBotEventMixin(OneBotServerMixin):
                 profile=profile_snapshot,
             )
 
+        # 自然语言 HD2 触发门：私聊直接放行；群聊仅当本轮明确 @ 了机器人。
+        # 斜杠命令在更前面的守卫已处理，这里只影响 query_helldivers 工具是否可用。
+        hd2_nl_allowed = event.get("message_type") == "private" or (
+            event.get("message_type") == "group"
+            and is_bot_mentioned(event, self.config.bot_qq, plain_text)
+        )
+
         try:
             reply_text = await self.reply_engine.reply(
                 conversation_id,
@@ -721,6 +728,7 @@ class OneBotEventMixin(OneBotServerMixin):
                 tool_context=tool_context,
                 reply_focus=group_reply_focus,
                 extra_system=self._reply_strategy_system_prompt(strategy_limits),
+                hd2_nl_allowed=hd2_nl_allowed,
             )
         except Exception as exc:
             LOGGER.exception("回复引擎异常：conversation=%s", conversation_id)
@@ -769,6 +777,8 @@ class OneBotEventMixin(OneBotServerMixin):
                 )
             except Exception as send_exc:  # noqa: BLE001
                 LOGGER.warning("失败兜底消息发送失败：%s", send_exc)
+            # 即使文字回复为空，HD2 工具可能已成功取到情报，仍把情报发出，避免白查。
+            await self._send_pending_hd2_nl(websocket, event, conversation_id)
             if self.cognition_shadow is not None:
                 self.cognition_shadow.record_live_outcome(
                     turn_id,
@@ -942,6 +952,8 @@ class OneBotEventMixin(OneBotServerMixin):
             return
         self._mark_smart_group_reply(event, conversation_id, plain_text)
         self._remember_group_reply_key(event, conversation_id, plain_text)
+        # 主回复已发出，再把本轮自然语言 HD2 工具产出的情报（图片/文本卡片）发出。
+        await self._send_pending_hd2_nl(websocket, event, conversation_id)
         if poke_requested and event.get("message_type") == "group":
             # 回复已成功发出，再执行模型自主决定的戳一戳；戳的是当前对话者。
             try:
@@ -1182,6 +1194,31 @@ class OneBotEventMixin(OneBotServerMixin):
         except Exception:
             LOGGER.exception("接话判断模型调用失败，默认不接话")
             return False
+
+    async def _send_pending_hd2_nl(
+        self,
+        websocket: Any,
+        event: dict[str, Any],
+        conversation_id: str,
+    ) -> None:
+        """发送本轮自然语言 HD2 工具暂存的情报；无待发内容则直接返回。
+
+        best-effort：发送失败只记日志，不影响已成功的主回复，也不向上抛出。
+        """
+        intel = self._pending_hd2_nl.pop(conversation_id, None)
+        if not intel:
+            return
+        try:
+            # 与斜杠守卫一致：不引用、不 @、不打拟人停顿，情报返图直接发出。
+            await self.send_reply(
+                websocket,
+                event,
+                intel,
+                first_delay=False,
+                group_quote=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("[HD2] 自然语言情报发送失败：%s", exc)
 
     def _evaluate_reply_strategy(
         self,

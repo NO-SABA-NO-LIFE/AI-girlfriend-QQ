@@ -1,0 +1,284 @@
+"""自然语言触发 Helldivers（query_helldivers 工具）的单元测试。
+
+覆盖四层：
+1. hd2_intent：参数归一、校验、斜杠重建；
+2. schema：工具仅在触发门 + 配置开关同时满足时提供；
+3. 引擎 _execute_context_tool：路由到注入执行器及各失败分支；
+4. server _hd2_nl_executor：重建斜杠、暂存情报、异常兜底。
+
+异步用例统一用 asyncio.run 包裹（本项目无 pytest-asyncio）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from atri_qq_bot.config import BotConfig
+from atri_qq_bot.llm_tools.hd2_intent import (
+    HD2_ARGUMENT_COMMANDS,
+    HD2_CANONICAL_COMMANDS,
+    HD2IntentError,
+    build_hd2_slash,
+    normalize_hd2_arguments,
+)
+from atri_qq_bot.llm_tools.schema import available_tool_schemas
+from atri_qq_bot.onebot.server_parts.server_connection import OneBotConnectionMixin
+from atri_qq_bot.persona import AtriReplyEngine
+
+
+# ---------------------------------------------------------------------------
+# 1. 意图归一
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_accepts_valid_command_with_argument() -> None:
+    assert normalize_hd2_arguments(
+        {"command": " Planet ", "argument": " 富源 "}
+    ) == ("planet", "富源")
+
+
+def test_normalize_command_is_case_insensitive() -> None:
+    assert normalize_hd2_arguments({"command": "DASHBOARD"}) == ("dashboard", "")
+
+
+def test_normalize_argument_commands_require_argument() -> None:
+    for command in HD2_ARGUMENT_COMMANDS:
+        with pytest.raises(HD2IntentError):
+            normalize_hd2_arguments({"command": command})
+
+
+def test_normalize_non_argument_commands_discard_argument() -> None:
+    # 无参功能即便带了实体也静默清空，不报错、不把闲聊拼进命令。
+    assert normalize_hd2_arguments(
+        {"command": "hd2ping", "argument": "随便"}
+    ) == ("hd2ping", "")
+
+
+def test_normalize_rejects_unknown_command() -> None:
+    with pytest.raises(HD2IntentError):
+        normalize_hd2_arguments({"command": "not_a_command"})
+
+
+def test_normalize_rejects_non_dict_and_missing_command() -> None:
+    with pytest.raises(HD2IntentError):
+        normalize_hd2_arguments("oops")  # type: ignore[arg-type]
+    with pytest.raises(HD2IntentError):
+        normalize_hd2_arguments({})
+
+
+def test_normalize_rejects_overlong_argument() -> None:
+    with pytest.raises(HD2IntentError):
+        normalize_hd2_arguments({"command": "planet", "argument": "x" * 250})
+
+
+def test_build_hd2_slash_with_and_without_argument() -> None:
+    assert build_hd2_slash("planet", "富源") == "/planet 富源"
+    assert build_hd2_slash("dashboard") == "/dashboard"
+
+
+def test_canonical_commands_count_and_unique() -> None:
+    assert len(HD2_CANONICAL_COMMANDS) == 22
+    assert len(set(HD2_CANONICAL_COMMANDS)) == 22
+
+
+# ---------------------------------------------------------------------------
+# 2. schema 门控
+# ---------------------------------------------------------------------------
+
+
+def _base_config(**overrides: Any) -> SimpleNamespace:
+    values = dict(
+        llm_tools_enabled=True,
+        web_search_enabled=False,
+        voice_tts_enabled=False,
+        llm_agent_protocol_enabled=False,
+        hd2_natural_language_enabled=True,
+        max_tokens=1200,
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_schema_exposes_tool_only_when_gate_open() -> None:
+    names_closed = {
+        t["function"]["name"]
+        for t in available_tool_schemas(_base_config(), hd2_nl_allowed=False)
+    }
+    names_open = {
+        t["function"]["name"]
+        for t in available_tool_schemas(_base_config(), hd2_nl_allowed=True)
+    }
+    assert "query_helldivers" not in names_closed
+    assert "query_helldivers" in names_open
+
+
+def test_schema_hidden_when_config_disabled() -> None:
+    names = {
+        t["function"]["name"]
+        for t in available_tool_schemas(
+            _base_config(hd2_natural_language_enabled=False),
+            hd2_nl_allowed=True,
+        )
+    }
+    assert "query_helldivers" not in names
+
+
+def test_schema_enum_matches_canonical_commands() -> None:
+    tool = next(
+        t
+        for t in available_tool_schemas(_base_config(), hd2_nl_allowed=True)
+        if t["function"]["name"] == "query_helldivers"
+    )
+    params = tool["function"]["parameters"]
+    assert params["properties"]["command"]["enum"] == list(HD2_CANONICAL_COMMANDS)
+    assert params["required"] == ["command"]
+
+
+# ---------------------------------------------------------------------------
+# 3. 引擎上下文工具路由
+# ---------------------------------------------------------------------------
+
+
+def _engine() -> AtriReplyEngine:
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key="test-key",
+        openai_base_url="https://example.com/v1",
+        openai_model="test-model",
+        temperature=0.6,
+        max_tokens=350,
+        chat_stream_enabled=False,
+    )
+    return AtriReplyEngine(config)
+
+
+def test_engine_routes_query_to_injected_executor() -> None:
+    engine = _engine()
+    seen: list[tuple[str, str, str]] = []
+
+    async def executor(conversation_id: str, command: str, argument: str) -> str:
+        seen.append((conversation_id, command, argument))
+        return "情报已就绪。"
+
+    engine.set_hd2_tool_executor(executor)
+    result = asyncio.run(
+        engine._execute_context_tool(
+            "private:1",
+            "query_helldivers",
+            {"command": "planet", "argument": "富源"},
+            engine.config,
+        )
+    )
+    assert result == "情报已就绪。"
+    assert seen == [("private:1", "planet", "富源")]
+
+
+def test_engine_reports_when_executor_missing() -> None:
+    engine = _engine()  # 默认未注入执行器
+    result = asyncio.run(
+        engine._execute_context_tool(
+            "private:1", "query_helldivers", {"command": "dashboard"}, engine.config
+        )
+    )
+    assert "未启用" in result
+
+
+def test_engine_reports_invalid_arguments() -> None:
+    engine = _engine()
+
+    async def executor(*_: Any) -> str:
+        raise AssertionError("invalid args must not reach executor")
+
+    engine.set_hd2_tool_executor(executor)
+    result = asyncio.run(
+        engine._execute_context_tool(
+            "private:1", "query_helldivers", {"command": "planet"}, engine.config
+        )
+    )
+    assert "参数无效" in result
+
+
+def test_engine_reports_executor_exception() -> None:
+    engine = _engine()
+
+    async def executor(*_: Any) -> str:
+        raise RuntimeError("boom")
+
+    engine.set_hd2_tool_executor(executor)
+    result = asyncio.run(
+        engine._execute_context_tool(
+            "private:1",
+            "query_helldivers",
+            {"command": "dashboard"},
+            engine.config,
+        )
+    )
+    assert "获取失败" in result
+
+
+# ---------------------------------------------------------------------------
+# 4. server 执行器
+# ---------------------------------------------------------------------------
+
+
+def _server_harness(messages: Any) -> SimpleNamespace:
+    async def handle(text: str, session_key: str) -> Any:
+        handle.called_with = (text, session_key)  # type: ignore[attr-defined]
+        return messages
+
+    return SimpleNamespace(
+        helldivers=SimpleNamespace(handle=handle),
+        _pending_hd2_nl={},
+    )
+
+
+def test_server_executor_stores_intel_and_returns_guidance() -> None:
+    outgoing = [SimpleNamespace(kind="image", content="/tmp/a.png")]
+    harness = _server_harness(outgoing)
+    result = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "planet", "富源"
+        )
+    )
+    # 斜杠命令被正确重建并传给 bridge。
+    assert harness.helldivers.handle.called_with == (  # type: ignore[attr-defined]
+        "/planet 富源",
+        "private:1",
+    )
+    assert harness._pending_hd2_nl == {"private:1": outgoing}
+    assert "情报已就绪" in result
+
+
+def test_server_executor_handles_empty_result() -> None:
+    harness = _server_harness(None)
+    result = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "dashboard", ""
+        )
+    )
+    assert harness._pending_hd2_nl == {}
+    assert "没有返回情报" in result
+
+
+def test_server_executor_handles_bridge_exception() -> None:
+    async def raise_handle(text: str, session_key: str) -> Any:
+        raise RuntimeError("network down")
+
+    harness = SimpleNamespace(
+        helldivers=SimpleNamespace(handle=raise_handle),
+        _pending_hd2_nl={},
+    )
+    result = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "dashboard", ""
+        )
+    )
+    assert harness._pending_hd2_nl == {}
+    assert "获取失败" in result
