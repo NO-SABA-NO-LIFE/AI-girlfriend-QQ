@@ -25,6 +25,20 @@ from .env import (
 )
 from .schema import VALID_REPLY_MODES, BotConfig
 
+def _parse_fallback_models(*raw_values: str) -> tuple[str, ...]:
+    """把备用模型 env（兼容单/复数、逗号分隔）解析成去重后的有序元组。
+
+    同时接受旧的 OPENAI_FALLBACK_MODEL（单个或逗号分隔）与新的
+    OPENAI_FALLBACK_MODELS（逗号分隔），按出现顺序保留、忽略空白与重复项。
+    """
+    ordered: list[str] = []
+    for raw in raw_values:
+        for piece in str(raw or "").replace("，", ",").split(","):
+            name = piece.strip()
+            if name and name not in ordered:
+                ordered.append(name)
+    return tuple(ordered)
+
 
 def load_config(
     env_file: str | Path | None = None,
@@ -128,7 +142,14 @@ def _build_config(root: Path) -> BotConfig:
             0, min(2, _env_int("CHAT_QUALITY_RETRIES", 1))
         ),
         chat_stream_enabled=_env_bool("CHAT_STREAM_ENABLED", True),
-        openai_fallback_model=_env("OPENAI_FALLBACK_MODEL", "").strip(),
+        openai_fallback_models=tuple(
+            name
+            for name in _parse_fallback_models(
+                _env("OPENAI_FALLBACK_MODEL", ""),
+                _env("OPENAI_FALLBACK_MODELS", ""),
+            )
+            if name != openai_model
+        ),
         openai_fallback_base_url=_env("OPENAI_FALLBACK_BASE_URL", "").rstrip("/"),
         message_split_max_chars=split_max_chars,
         message_split_max_parts=split_max_parts,

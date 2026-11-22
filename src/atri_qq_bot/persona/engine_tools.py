@@ -817,23 +817,25 @@ class EngineToolsMixin(PersonaEngineMixin):
         import time
 
         use_stream = bool(getattr(self.config, "chat_stream_enabled", True))
-        # 候选列表：主模型始终在前；备用模型为空或与主模型同名则忽略。
+        # 候选列表：主模型始终在前，其后按配置顺序接上整条备用模型链。
         candidates: list[tuple[str, str]] = [
             (self.config.openai_model, self.config.openai_base_url.rstrip("/"))
         ]
-        fallback_model = str(
-            getattr(self.config, "openai_fallback_model", "") or ""
-        ).strip()
-        if fallback_model and fallback_model != self.config.openai_model:
-            fallback_base = (
-                str(getattr(self.config, "openai_fallback_base_url", "") or "").strip()
-                or self.config.openai_base_url
-            ).rstrip("/")
-            candidates.append((fallback_model, fallback_base))
+        fallback_base = (
+            str(getattr(self.config, "openai_fallback_base_url", "") or "").strip()
+            or self.config.openai_base_url
+        ).rstrip("/")
+        for fallback_model in getattr(self.config, "openai_fallback_models", ()):
+            name = str(fallback_model or "").strip()
+            # loader 已去重并排除主模型，这里再防御一次空值/重复。
+            if name and name != self.config.openai_model and all(
+                name != existing for existing, _ in candidates
+            ):
+                candidates.append((name, fallback_base))
 
-        # 每个模型各自的预算（配置的聊天超时，50s）：主、备各 50，名义总预算
-        # 因此为 50 × 候选数。某模型若快速失败、没吃满自己的 50s，剩余时间会
-        # 自然留给后面的模型（通过共享 deadline 实现“剩余时间转移”）。
+        # 每个模型各自的预算（配置的聊天超时，30s）：名义总预算 = 30 × 候选数。
+        # 某模型若快速失败、没吃满自己的预算，剩余时间通过共享 deadline
+        # 自然转移给后面的模型。
         per_model_budget = _chat_http_timeout(self.config)
         total_budget = per_model_budget * len(candidates)
         # 每个模型各自的传输尝试次数；与质量重试同源，默认 retries=1 → 每模型 2 次。

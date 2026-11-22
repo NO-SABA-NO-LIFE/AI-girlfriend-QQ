@@ -35,8 +35,9 @@ class BotConfig:
     chat_quality_retries: int = 1
     # 上游非流式长请求会按 max_tokens 缓冲并挂起，改用 SSE 流式并在本地重组。
     chat_stream_enabled: bool = True
-    # 聊天备用模型：主模型传输超时/连接失败时自动切换（同视觉兜底机制）。
-    openai_fallback_model: str = ""
+    # 聊天备用模型链：主模型传输失败时按顺序逐个切换（同视觉兜底机制）。
+    # 元组按尝试顺序排列，例如 ("gemini-2.5-flash", "gemini-3.6-flash")。
+    openai_fallback_models: tuple[str, ...] = ()
     openai_fallback_base_url: str = ""
     message_split_max_chars: int = 120
     message_split_max_parts: int = 2
