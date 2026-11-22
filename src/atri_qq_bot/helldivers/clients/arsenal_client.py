@@ -9,23 +9,22 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Final
+from typing import Any, Final
+from collections.abc import Callable
 
 import aiohttp
 
 from ..core.diagnostics import HEALTH
+from ..core.persistence import finish_disk_call, write_json_atomic
+from ..core.arsenal_merge import annotate_supplement, merge_equipment
 
-try:
-    from .._logging import logger
-except ImportError:  # pragma: no cover - 单测环境
-    import logging
-
-    logger = logging.getLogger(__name__)
+from .._logging import logger
 
 # 顺序对境内服务器有意义：前两路可直连成功，raw 直连作末位兜底
 RAW_URLS: Final[tuple[str, ...]] = (
@@ -70,7 +69,6 @@ ENEMIES_API: Final[str] = (
     "&fields=title,health,faction,size,class,damage&limit=500&format=json"
 )
 REFRESH_INTERVAL: Final[int] = 24 * 3600
-CATALOG_RETRY_BACKOFF: Final[int] = 15 * 60
 # 下载体积上限：目录数据约 500KB，敌人/部位数据远小于此；16MB 上限只防
 # 异常镜像返回超大响应拖垮进程内存。
 MAX_DOWNLOAD_BYTES: Final[int] = 16 * 1024 * 1024
@@ -329,6 +327,7 @@ def normalize_query(text: str) -> str:
 
 PRODUCT_KIND_ZH: Final[dict[str, str]] = {
     "primary-weapon": "主武器",
+    "field-weapon": "野外武器",
     "secondary-weapon": "副武器",
     "support-weapon": "支援武器",
     "other-stratagem": "战备",
@@ -369,7 +368,9 @@ HANDLING_ZH: Final[dict[str, str]] = {
     "fireRate": "射速",
     "recoil": "后坐力",
     "firingModes": "射击模式",
-    "reloadSeconds": "装填",
+    "reloadSeconds": "基础装填",
+    "upgradedReloadSeconds": "升级后装填",
+    "ammunitionType": "弹药机制",
 }
 
 ACQUISITION_ZH: Final[dict[str, str]] = {
@@ -403,10 +404,11 @@ class ArsenalClient:
         self._items: list[dict[str, Any]] = []
         self._enemies: list[dict[str, Any]] = []
         self._aliases: dict[str, list[str]] = {}
-        self._index: dict[str, dict[str, Any]] = {}
+        self._index: dict[str, list[dict[str, Any]]] = {}
+        self._merged_items: list[dict[str, Any]] = []
+        self._refresh_task: asyncio.Task | None = None
         self._data_version: str = ""
         self._loaded_at: float = 0.0
-        self._refresh_retry_at: float = 0.0
         self._lock = asyncio.Lock()
         self._enemies_lock = asyncio.Lock()
         self._enemies_failed_at: float = 0.0
@@ -415,10 +417,14 @@ class ArsenalClient:
         self._dionatha_failed_at: float = 0.0
         self._dionatha_lock = asyncio.Lock()
         self._dionatha_task: asyncio.Task | None = None
+        self._dionatha_snapshots: dict[str, dict[str, Any]] = {}
+        self._dionatha_failures: set[str] = set()
+        self._dionatha_disk_checked = False
+        self._primary_failed_at = 0.0
 
     @property
     def available(self) -> bool:
-        return bool(self._items)
+        return bool(self._items or self._dionatha_items or self._enemies)
 
     @property
     def data_version(self) -> str:
@@ -436,111 +442,110 @@ class ArsenalClient:
     def enemy_count(self) -> int:
         return len(self._enemies)
 
-    async def ensure_loaded(self, *, force: bool = False) -> bool:
-        """加载缓存数据；超过刷新间隔或强制时重新下载。"""
-        self._maybe_start_dionatha()
+    async def ensure_loaded(self, *, force: bool = False, refresh_supplement: bool = True) -> bool:
+        """Keep usable caches while independently refreshing both equipment sources."""
+        if refresh_supplement:
+            self._maybe_start_dionatha()
         async with self._lock:
-            if self._items and not force:
-                if time.time() - self._loaded_at < REFRESH_INTERVAL:
-                    return True
             catalog_path = self.cache_dir / "catalog.json"
             aliases_path = self.cache_dir / "aliases.json"
-            if not force and time.monotonic() < self._refresh_retry_at:
-                return bool(self._items) or self._load_from(
-                    catalog_path, aliases_path, allow_missing_aliases=True
-                )
-            cached = self._load_from(catalog_path, aliases_path)
-            stale = force or not cached
-            if cached and not stale:
-                try:
-                    stale = time.time() - catalog_path.stat().st_mtime > REFRESH_INTERVAL
-                except OSError:
-                    stale = True
-            if stale:
-                ok = await self._download(catalog_path, aliases_path)
-                if ok and self._load_from(catalog_path, aliases_path):
-                    self._loaded_at = time.time()
-                    self._refresh_retry_at = 0.0
-                    return True
-                # A failed refresh must not invalidate usable last-good data.
-                self._refresh_retry_at = time.monotonic() + CATALOG_RETRY_BACKOFF
-                return bool(self._items) or self._load_from(
-                    catalog_path, aliases_path, allow_missing_aliases=True
-                )
-            if cached:
-                self._loaded_at = time.time()
-            return cached
+            if not self._items and self._primary_cache_path().is_file():
+                self._load_from(catalog_path, aliases_path)
+            if self._primary_cache_path().is_file():
+                self._loaded_at = self._primary_cache_path().stat().st_mtime
+            missing_aliases = not (self.cache_dir / "primary_snapshot.json").is_file() and not aliases_path.is_file()
+            stale = force or not self._items or missing_aliases or time.time() - self._loaded_at >= REFRESH_INTERVAL
+            backoff = time.time() - self._primary_failed_at < ENEMIES_RETRY_BACKOFF
+            if stale and (force or not backoff):
+                if await self._download(catalog_path, aliases_path):
+                    self._load_from(catalog_path, aliases_path)
+                    self._loaded_at = self._primary_cache_path().stat().st_mtime
+                    self._primary_failed_at = 0.0
+                else:
+                    self._primary_failed_at = time.time()
+                    # A catalog may have refreshed successfully while aliases failed.
+                    if self._primary_cache_path().is_file():
+                        self._load_from(catalog_path, aliases_path)
+                        self._loaded_at = self._primary_cache_path().stat().st_mtime
+            return self.available
+
+    async def wait_for_supplement(self, timeout: float = 3.0) -> bool:
+        """Wait briefly for the shared task without cancelling background refresh."""
+        self._maybe_start_dionatha()
+        task = self._dionatha_task
+        if task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout)
+            except asyncio.TimeoutError:
+                pass
+        return bool(self._dionatha_items)
 
     @staticmethod
-    def _validate_catalog(body: bytes | str) -> dict[str, Any]:
-        raw = json.loads(body)
-        if not isinstance(raw, dict):
-            raise ValueError("catalog must be an object")
-        items = raw.get("items")
-        if (
-            not isinstance(items, list)
-            or not items
-            or any(
-                not isinstance(item, dict)
-                or not isinstance(item.get("id"), str)
-                or not item["id"].strip()
-                or not isinstance(item.get("alternateNames", []), (list, type(None)))
-                for item in items
-            )
-        ):
-            raise ValueError("catalog must contain valid equipment items")
-        if not isinstance(raw.get("meta", {}), (dict, type(None))):
-            raise ValueError("catalog meta must be an object")
-        return raw
+    def _validate_primary(body: bytes | str, *, aliases: bool = False) -> dict[str, Any]:
+        payload = json.loads(body)
+        if not isinstance(payload, dict):
+            raise ValueError("primary payload must be an object")
+        rows = payload.get("entries" if aliases else "items")
+        if not isinstance(rows, list) or (not aliases and not rows):
+            raise ValueError("invalid primary rows")
+        if not isinstance(payload.get("meta", {}), (dict, type(None))):
+            raise ValueError("invalid primary metadata")
+        seen = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("primary row must be an object")
+            key = row.get("equipmentId" if aliases else "id")
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError("invalid primary ID")
+            if not aliases and key in seen:
+                raise ValueError("duplicate primary ID")
+            seen.add(key)
+            names = row.get("aliases" if aliases else "alternateNames")
+            if names is not None and (not isinstance(names, list) or not all(isinstance(n, str) for n in names)):
+                raise ValueError("invalid primary alternate names")
+            if not aliases:
+                for field in ("handling", "deployment", "armor", "combat"):
+                    if row.get(field) is not None and not isinstance(row[field], dict):
+                        raise ValueError(f"invalid primary {field}")
+        return payload
 
-    @staticmethod
-    def _validate_aliases(body: bytes | str) -> dict[str, Any]:
-        raw = json.loads(body)
-        if not isinstance(raw, dict) or not isinstance(raw.get("entries"), list):
-            raise ValueError("aliases must contain an entries list")
-        for entry in raw["entries"]:
-            if not isinstance(entry, dict) or not isinstance(
-                entry.get("aliases", []), (list, type(None))
-            ):
-                raise ValueError("invalid alias entry")
-        return raw
+    @classmethod
+    def _valid_primary(cls, body: bytes, *, aliases: bool = False) -> bool:
+        try:
+            cls._validate_primary(body, aliases=aliases)
+            return True
+        except (ValueError, AttributeError, TypeError):
+            return False
 
-    async def _download(
-        self, catalog_path: Path, aliases_path: Path
-    ) -> bool:
+    def _primary_candidate(self, catalog: dict, aliases: dict):
+        candidate = copy.copy(self)
+        candidate._items = catalog["items"]
+        candidate._data_version = str((catalog.get("meta") or {}).get("dataVersion") or "")
+        candidate._aliases = {row["equipmentId"]: list(row.get("aliases") or []) for row in aliases["entries"]}
+        candidate._build_index()
+        return candidate
+
+    async def _download(self, catalog_path: Path, aliases_path: Path) -> bool:
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
         try:
-            async with aiohttp.ClientSession(
-                headers={"User-Agent": self.user_agent},
-                timeout=timeout,
-                trust_env=False,
-            ) as session:
-                downloads: list[tuple[Path, bytes]] = []
-                for urls, path, validator in (
-                    (RAW_URLS, catalog_path, self._validate_catalog),
-                    (ALIAS_URLS, aliases_path, self._validate_aliases),
-                ):
-                    body = await self._fetch_any(
-                        session, urls, proxy=self.proxy_url, validator=validator
-                    )
+            async with aiohttp.ClientSession(headers={"User-Agent": self.user_agent}, timeout=timeout, trust_env=False) as session:
+                payloads = []
+                for urls, is_alias in ((RAW_URLS, False), (ALIAS_URLS, True)):
+                    body = await self._fetch_any(session, urls, proxy=self.proxy_url,
+                        validate=lambda data, flag=is_alias: self._valid_primary(data, aliases=flag))
                     if body is None:
-                        HEALTH.record_fail("hd2tool", detail="镜像全部失败")
-                        return False
-                    validator(body)
-                    downloads.append((path, body))
-                # Validate both resources before replacing either last-good file.
-                for path, body in downloads:
-                    tmp = path.with_suffix(".tmp")
-                    tmp.write_bytes(body)
-                    tmp.replace(path)
-            HEALTH.record_ok("hd2tool", detail="catalog+aliases 下载成功")
+                        raise ValueError("目录或别名更新失败")
+                    payloads.append(self._validate_primary(body, aliases=is_alias))
+                self._primary_candidate(*payloads)
+                # One atomic file is authoritative; never expose a half-updated pair.
+                await finish_disk_call(write_json_atomic, self.cache_dir / "primary_snapshot.json",
+                                       {"catalog": payloads[0], "aliases": payloads[1]})
+            HEALTH.record_ok("hd2tool", detail="catalog+aliases 快照更新成功")
             return True
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning(
-                f"[HD2] arsenal download failed: {type(exc).__name__}: {exc}"
-            )
+            logger.warning(f"[HD2] arsenal refresh rejected: {type(exc).__name__}: {exc}; keeping last good snapshot")
             HEALTH.record_fail("hd2tool", detail=str(exc))
             return False
 
@@ -569,7 +574,7 @@ class ArsenalClient:
         urls: tuple[str, ...],
         *,
         proxy: str | None = None,
-        validator: Callable[[bytes], Any] | None = None,
+        validate: Callable[[bytes], bool] | None = None,
     ) -> bytes | None:
         """依次尝试多个镜像 URL，返回首个成功的响应体。
 
@@ -585,9 +590,9 @@ class ArsenalClient:
                         )
                         continue
                     body = await ArsenalClient._read_capped(resp)
-                    if validator is not None:
-                        validator(body)
-                    return body
+                    if validate is None or validate(body):
+                        return body
+                    logger.warning(f"[HD2] arsenal mirror returned invalid data: {url}")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -634,7 +639,10 @@ class ArsenalClient:
                 "secondary": "secondary-weapon",
                 "support": "support-weapon",
                 "throwable": "grenade",
+                "civilian": "field-weapon",
             }.get(category, "")
+            if category == "civilian" and slug in {"cqc-72-entrenchment-tool", "sg-88-break-action-shotgun"}:
+                item["productKind"] = "support-weapon"
             item["weaponType"] = str(raw.get("subcategory") or "").replace("_", " ").title()
         elif collection == "stratagems":
             kind = str(raw.get("kind") or "")
@@ -759,7 +767,7 @@ class ArsenalClient:
                     str(raw["effect"])[:160] + " " + str(item.get("description") or "")
                 ).strip()
 
-        return item
+        return annotate_supplement(item, raw, collection, data_version)
 
     async def _fetch_dionatha(
         self, session: aiohttp.ClientSession, collection: str
@@ -780,223 +788,232 @@ class ArsenalClient:
             return None
 
     @staticmethod
-    def _read_dionatha_disk(
-        cache_dir: Path,
-    ) -> tuple[dict[str, list[dict[str, Any]]], str, float] | None:
-        """同步读全部集合磁盘缓存（在线程池执行）；任一缺失/过期/损坏返回 None。"""
-        collected: dict[str, list[dict[str, Any]]] = {}
-        data_version = ""
-        newest_mtime = 0.0
+    def _dionatha_snapshot(body: bytes, updated_at: float) -> dict[str, Any]:
+        payload = json.loads(body)
+        if not isinstance(payload, dict) or not isinstance(payload.get("meta"), dict):
+            raise ValueError("invalid collection metadata")
+        rows = payload.get("data")
+        if not isinstance(rows, list) or not rows or not all(
+            isinstance(row, dict) and isinstance(row.get("name"), str)
+            and row["name"].strip() and (row.get("slug") or row.get("id"))
+            for row in rows
+        ):
+            raise ValueError("invalid or empty collection")
+        for row in rows:
+            names = row.get("aliases")
+            if names is not None and (not isinstance(names, list) or not all(isinstance(name, str) for name in names)):
+                raise ValueError("invalid supplemental aliases")
+        return {"rows": rows, "version": str(payload["meta"].get("dataVersion") or "未知"), "updated_at": updated_at}
+
+    @classmethod
+    def _read_dionatha_disk(cls, cache_dir: Path) -> dict[str, dict[str, Any]]:
+        """Load each last good collection, including expired caches after restart."""
+        snapshots = {}
         for collection in DIONATHA_COLLECTIONS:
             path = cache_dir / f"dionatha_{collection}.json"
             try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                return None
-            if time.time() - mtime > REFRESH_INTERVAL:
-                return None
+                snapshot = cls._dionatha_snapshot(path.read_bytes(), path.stat().st_mtime)
+                for raw in snapshot["rows"]:
+                    cls._dionatha_to_item(collection, raw, snapshot["version"], {})
+                snapshots[collection] = snapshot
+            except (OSError, ValueError, TypeError, AttributeError, KeyError):
+                continue
+        bundle_path = cache_dir / "dionatha_armor_snapshot.json"
+        if bundle_path.is_file():
             try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                return None
-            if not isinstance(payload, dict):
-                return None
-            rows = payload.get("data")
-            if not isinstance(rows, list) or not rows:
-                return None
-            data_version = str(
-                (payload.get("meta") or {}).get("dataVersion") or data_version
-            )
-            collected[collection] = [x for x in rows if isinstance(x, dict)]
-            newest_mtime = max(newest_mtime, mtime)
-        return collected, data_version, newest_mtime
+                bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+                pair = {}
+                for name in ("passives", "armors"):
+                    if name not in bundle:
+                        continue
+                    entry = bundle[name]
+                    body = json.dumps({"meta": {"dataVersion": entry["version"]}, "data": entry["rows"]}).encode()
+                    snapshot = cls._dionatha_snapshot(body, float(entry["updated_at"]))
+                    for row in snapshot["rows"]:
+                        cls._dionatha_to_item(name, row, snapshot["version"], {})
+                    pair[name] = snapshot
+                if not cls._armor_references_valid(pair):
+                    raise ValueError("invalid cached armor dependency")
+                snapshots.update(pair)
+            except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+                logger.warning(f"[HD2] armor snapshot unusable: {exc}")
+        return snapshots
+
+    @staticmethod
+    def _armor_references_valid(snapshots: dict) -> bool:
+        known = {str(row.get("id") or row.get("slug")) for row in snapshots.get("passives", {}).get("rows", [])}
+        return all(not row.get("passiveId") or str(row["passiveId"]) in known
+                   for row in snapshots.get("armors", {}).get("rows", []))
+
+    def _publish_dionatha(self, snapshots: dict[str, dict[str, Any]]) -> None:
+        passives = {str(row.get("id") or row.get("slug")): str(row["name"])
+                    for row in snapshots.get("passives", {}).get("rows", [])}
+        items = []
+        for collection in DIONATHA_COLLECTIONS:
+            snapshot = snapshots.get(collection)
+            if snapshot is None:
+                continue
+            for raw in snapshot["rows"]:
+                item = self._dionatha_to_item(collection, raw, snapshot["version"], passives)
+                if item:
+                    item["_collection"] = collection
+                    item["_data_version"] = snapshot["version"]
+                    item["_updated_at"] = snapshot["updated_at"]
+                    items.append(item)
+        # No await between publishing items and index: readers see a complete view.
+        self._dionatha_snapshots = snapshots
+        self._dionatha_items = items
+        self._dionatha_loaded_at = min((v["updated_at"] for v in snapshots.values()), default=0)
+        self._build_index()
 
     async def _try_load_dionatha_disk(self) -> bool:
-        """重启后直接吃磁盘缓存（IO 走线程池），全部集合新鲜才返回 True。"""
-        loaded = await asyncio.to_thread(self._read_dionatha_disk, self.cache_dir)
-        if loaded is None:
-            return False
-        collected, data_version, newest_mtime = loaded
-        passives_by_id = {
-            str(x.get("id") or ""): str(x.get("name") or "")
-            for x in collected.get("passives", [])
-        }
-        items: list[dict[str, Any]] = []
-        for collection, rows in collected.items():
-            for raw in rows:
-                converted = self._dionatha_to_item(
-                    collection, raw, data_version, passives_by_id
-                )
-                if converted:
-                    items.append(converted)
-        if not items:
-            return False
-        self._dionatha_items = items
-        self._dionatha_loaded_at = newest_mtime
-        self._build_index()
-        logger.info(f"[HD2] dionatha 补充目录磁盘加载: {len(items)} 条 (v{data_version})")
-        return True
+        snapshots = await asyncio.to_thread(self._read_dionatha_disk, self.cache_dir)
+        existing = getattr(self, "_dionatha_snapshots", {})
+        for collection, snapshot in existing.items():
+            if snapshot["updated_at"] > snapshots.get(collection, {}).get("updated_at", 0):
+                snapshots[collection] = snapshot
+        if snapshots:
+            self._publish_dionatha(snapshots)
+        self._dionatha_disk_checked = True
+        return bool(self._dionatha_items)
 
     async def ensure_dionatha(self, *, force: bool = False) -> bool:
-        """加载 wiki.gg 补充目录；失败退避，绝不影响 HD2Tool 主目录查询。"""
+        """Refresh due collections; partial failure never drops last good rows."""
         async with self._dionatha_lock:
-            if not force and self._dionatha_loaded_at:
-                if time.time() - self._dionatha_loaded_at < REFRESH_INTERVAL:
-                    return True
-            if not force:
-                # 磁盘缓存异常（如损坏/结构意外）只降级到网络路径，
-                # 不能让后台同步任务带未取回异常死掉
-                try:
-                    if await self._try_load_dionatha_disk():
-                        return True
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # noqa: BLE001 - 防御路径
-                    logger.warning(
-                        f"[HD2] dionatha disk cache load failed: "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-            if (
-                not force
-                and self._dionatha_failed_at
-                and time.time() - self._dionatha_failed_at < ENEMIES_RETRY_BACKOFF
-            ):
+            if not self._dionatha_disk_checked:
+                await self._try_load_dionatha_disk()
+            now = time.time()
+            snapshots = dict(self._dionatha_snapshots)
+            due = [c for c in DIONATHA_COLLECTIONS if force or c not in snapshots
+                   or now - snapshots[c]["updated_at"] >= REFRESH_INTERVAL
+                   or c in self._dionatha_failures]
+            if not due:
                 return bool(self._dionatha_items)
-            started = time.perf_counter()
-            collected: dict[str, list] = {}
-            data_version = ""
+            if not force and self._dionatha_failed_at and now - self._dionatha_failed_at < ENEMIES_RETRY_BACKOFF:
+                return bool(self._dionatha_items)
+            candidates: dict[str, tuple[dict[str, Any], bytes]] = {}
+            failures = set()
+            timeout = aiohttp.ClientTimeout(total=self.timeout_seconds * 2)
             try:
-                timeout = aiohttp.ClientTimeout(total=self.timeout_seconds * 2)
-                async with aiohttp.ClientSession(
-                    headers={
-                        "User-Agent": self.user_agent,
-                        "Accept": "application/json",
-                    },
-                    timeout=timeout,
-                    trust_env=False,
-                ) as session:
-                    for collection in DIONATHA_COLLECTIONS:
-                        body = await self._fetch_dionatha(session, collection)
-                        if body is None:
-                            continue
+                async with aiohttp.ClientSession(headers={"User-Agent": self.user_agent, "Accept": "application/json"},
+                                               timeout=timeout, trust_env=False) as session:
+                    for collection in due:
                         try:
-                            payload = json.loads(body)
-                        except ValueError:
-                            continue
-                        data_version = str(
-                            (payload.get("meta") or {}).get("dataVersion") or data_version
-                        )
-                        rows = payload.get("data")
-                        if isinstance(rows, list) and rows:
-                            collected[collection] = [
-                                x for x in rows if isinstance(x, dict)
-                            ]
-                            path = self.cache_dir / f"dionatha_{collection}.json"
-                            tmp = path.with_suffix(".tmp")
-                            tmp.write_bytes(body)
-                            tmp.replace(path)
+                            body = await self._fetch_dionatha(session, collection)
+                            if body is None:
+                                raise ValueError("download failed")
+                            snapshot = self._dionatha_snapshot(body, time.time())
+                            # Validate conversion before touching disk or the current snapshot.
+                            for raw in snapshot["rows"]:
+                                if self._dionatha_to_item(collection, raw, snapshot["version"], {}) is None:
+                                    raise ValueError("unusable row")
+                            candidates[collection] = (snapshot, body)
+                        except (ValueError, TypeError, AttributeError, KeyError) as exc:
+                            failures.add(collection)
+                            logger.warning(f"[HD2] dionatha {collection}: {exc}; keeping cached collection")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._dionatha_failed_at = time.time()
-                HEALTH.record_fail("dionatha", detail=str(exc))
-                logger.warning(f"[HD2] dionatha 补充目录加载失败: {exc}")
-                return bool(self._dionatha_items)
-            if not collected:
-                self._dionatha_failed_at = time.time()
-                HEALTH.record_fail("dionatha", detail="全部集合下载失败")
-                return bool(self._dionatha_items)
-            passives_by_id = {
-                str(x.get("id") or ""): str(x.get("name") or "")
-                for x in collected.get("passives", [])
-            }
-            items: list[dict[str, Any]] = []
-            for collection, rows in collected.items():
-                for raw in rows:
-                    converted = self._dionatha_to_item(
-                        collection, raw, data_version, passives_by_id
-                    )
-                    if converted:
-                        items.append(converted)
-            if not items:
-                self._dionatha_failed_at = time.time()
-                HEALTH.record_fail("dionatha", detail="集合为空")
-                return bool(self._dionatha_items)
-            self._dionatha_items = items
-            self._dionatha_loaded_at = time.time()
-            self._dionatha_failed_at = 0.0
-            self._build_index()
-            HEALTH.record_ok(
-                "dionatha",
-                detail=f"{len(collected)} 集合 {len(items)} 条 (v{data_version})",
-                latency_ms=(time.perf_counter() - started) * 1000.0,
-            )
-            logger.info(
-                f"[HD2] dionatha 补充目录加载: {len(items)} 条 (v{data_version})"
-            )
-            return True
+                failures.update(set(due) - candidates.keys())
+                logger.warning(f"[HD2] dionatha refresh failed: {exc}")
+            # Validate related candidates together. A rename must not be checked
+            # against the old half of the pair. Publish the pair as one atomic file.
+            related = {name: candidates.pop(name) for name in ("passives", "armors") if name in candidates}
+            if related:
+                pair = {name: snapshots[name] for name in ("passives", "armors") if name in snapshots}
+                proposed = {**pair, **{name: value[0] for name, value in related.items()}}
+                if not self._armor_references_valid(proposed):
+                    # An invalid new armor must not block an independently safe passive update.
+                    if "armors" in related:
+                        failures.add("armors")
+                        related.pop("armors")
+                    proposed = {**pair, **{name: value[0] for name, value in related.items()}}
+                    if not self._armor_references_valid(proposed):
+                        failures.update(related)
+                        related.clear()
+                if related:
+                    try:
+                        await finish_disk_call(write_json_atomic, self.cache_dir / "dionatha_armor_snapshot.json", proposed)
+                        snapshots.update(proposed)
+                    except OSError as exc:
+                        failures.update(related)
+                        logger.warning(f"[HD2] armor snapshot write failed: {exc}")
+            for collection, (snapshot, body) in candidates.items():
+                try:
+                    path = self.cache_dir / f"dionatha_{collection}.json"
+                    await finish_disk_call(write_json_atomic, path, json.loads(body))
+                    snapshot["updated_at"] = path.stat().st_mtime
+                    snapshots[collection] = snapshot
+                except OSError as exc:
+                    failures.add(collection)
+                    logger.warning(f"[HD2] dionatha {collection} cache write failed: {exc}")
+            self._publish_dionatha(snapshots)
+            self._dionatha_failures = failures
+            self._dionatha_failed_at = time.time() if failures else 0.0
+            if failures:
+                HEALTH.record_fail("dionatha", detail=f"部分更新失败: {', '.join(sorted(failures))}；保留旧数据")
+            else:
+                HEALTH.record_ok("dionatha", detail=f"{len(snapshots)}/7 集合 {len(self._dionatha_items)} 条")
+            return bool(self._dionatha_items)
 
     async def stop(self) -> None:
         """取消后台补充目录同步任务（插件卸载时调用）。"""
-        task = self._dionatha_task
-        self._dionatha_task = None
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:  # noqa: BLE001 - 清理路径
-                logger.warning(f"[HD2] dionatha sync stop error: {exc}")
+        tasks = [task for task in (self._refresh_task, self._dionatha_task) if task is not None]
+        self._refresh_task = self._dionatha_task = None
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def _maybe_start_dionatha(self) -> None:
         task = self._dionatha_task
         if task is not None and not task.done():
             return
+        if self._refresh_task is not None and not self._refresh_task.done():
+            return
         self._dionatha_task = asyncio.create_task(
             self.ensure_dionatha(), name="hd2-dionatha-sync"
         )
 
-    def _load_from(
-        self, catalog_path: Path, aliases_path: Path, *, allow_missing_aliases: bool = False
-    ) -> bool:
+    def _load_from(self, catalog_path: Path, aliases_path: Path) -> bool:
         try:
-            raw = self._validate_catalog(catalog_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            logger.warning(f"[HD2] arsenal catalog unreadable: {exc}")
+            bundle_path = self.cache_dir / "primary_snapshot.json"
+            if bundle_path.is_file():
+                bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+                catalog_body = json.dumps(bundle["catalog"])
+                aliases_body = json.dumps(bundle["aliases"])
+            else:
+                catalog_body = catalog_path.read_text(encoding="utf-8")
+                aliases_body = aliases_path.read_text(encoding="utf-8") if aliases_path.is_file() else '{"entries":[]}'
+            catalog = self._validate_primary(catalog_body)
+            aliases = self._validate_primary(aliases_body, aliases=True)
+            candidate = self._primary_candidate(catalog, aliases)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            logger.warning(f"[HD2] arsenal snapshot unusable: {exc}")
             return False
-        try:
-            alias_raw = self._validate_aliases(aliases_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            if not allow_missing_aliases:
-                return False
-            alias_raw = {"entries": []}
-        self._items = raw["items"]
-        meta = raw.get("meta") or {}
-        self._data_version = str(meta.get("dataVersion") or "")
-        self._aliases = {}
-        for entry in (alias_raw.get("entries") or []) if isinstance(alias_raw, dict) else []:
-            if isinstance(entry, dict) and entry.get("equipmentId"):
-                self._aliases[str(entry["equipmentId"])] = [
-                    str(a) for a in entry.get("aliases") or [] if a
-                ]
-
-        self._build_index()
+        # Publish only after both payloads and the complete index are usable.
+        self._items, self._aliases = candidate._items, candidate._aliases
+        self._data_version = candidate._data_version
+        self._index, self._merged_items = candidate._index, candidate._merged_items
         return True
 
-    async def ensure_enemies(self) -> None:
+    def _primary_cache_path(self) -> Path:
+        bundle = self.cache_dir / "primary_snapshot.json"
+        return bundle if bundle.is_file() else self.cache_dir / "catalog.json"
+
+    async def ensure_enemies(self, *, force: bool = False) -> None:
         """加载敌人数据（wiki.gg Cargo）；失败静默——装备查询不受影响。
 
         下载失败后进入 15 分钟退避，避免 wiki.gg 不可用时每次查询都
         阻塞等待超时；并发调用由锁串行化，防止重复下载与 tmp 文件竞争。
         """
         async with self._enemies_lock:
-            await self._ensure_enemies_locked()
+            await self._ensure_enemies_locked(force=force)
 
-    async def _ensure_enemies_locked(self) -> None:
+    async def _ensure_enemies_locked(self, *, force: bool = False) -> None:
         enemies_path = self.cache_dir / "enemies.json"
         # 判断是否需要重新下载：文件不存在 / TTL 过期 / 缓存版本旧（无 class/damage 字段）
-        needs_refresh = not enemies_path.is_file()
+        needs_refresh = force or not enemies_path.is_file()
         if not needs_refresh:
             age = time.time() - enemies_path.stat().st_mtime
             if age > REFRESH_INTERVAL:
@@ -1016,7 +1033,7 @@ class ArsenalClient:
                     needs_refresh = True
         if needs_refresh:
             # 失败退避：上次下载失败后 15 分钟内不再尝试
-            if time.time() - self._enemies_failed_at < ENEMIES_RETRY_BACKOFF:
+            if not force and time.time() - self._enemies_failed_at < ENEMIES_RETRY_BACKOFF:
                 logger.debug("[HD2] enemies download in failure backoff")
             else:
                 timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
@@ -1031,6 +1048,9 @@ class ArsenalClient:
                         ) as resp:
                             if resp.status == 200:
                                 body = await self._read_capped(resp)
+                                payload = json.loads(body)
+                                if not isinstance(payload, dict) or not isinstance(payload.get("cargoquery"), list) or not payload["cargoquery"]:
+                                    raise ValueError("invalid enemies response")
                                 tmp = enemies_path.with_suffix(".tmp")
                                 tmp.write_bytes(body)
                                 tmp.replace(enemies_path)
@@ -1105,15 +1125,7 @@ class ArsenalClient:
                     "wiki": {"url": f"https://helldivers.wiki.gg/wiki/{name.replace(' ', '_')}"},
                     }
                 )
-        # 敌人并入索引（走和装备相同的规范化逻辑）
-        for e in self._enemies:
-            for key in (e["nameZh"], e["nameEn"]):
-                k = key.strip().casefold()
-                if k and k not in self._index:
-                    self._index[k] = e
-                norm = normalize_query(k)
-                if norm and norm not in self._index:
-                    self._index[norm] = e
+        self._build_index()
 
     def enemies_available(self) -> bool:
         return bool(getattr(self, "_enemies", None))
@@ -1184,94 +1196,134 @@ class ArsenalClient:
                     pass
             return parts
 
+    async def load_cached(self) -> None:
+        """Load diagnostics from disk without making network requests."""
+        async with self._lock:
+            path = self._primary_cache_path()
+            if not self._items and path.is_file():
+                self._load_from(path, self.cache_dir / "aliases.json")
+                self._loaded_at = path.stat().st_mtime
+        async with self._dionatha_lock:
+            if not self._dionatha_disk_checked:
+                await self._try_load_dionatha_disk()
+
+    async def refresh_all(self) -> list[str]:
+        """Coalesce concurrent administrator refreshes into one shared operation."""
+        if self._refresh_task is None or self._refresh_task.done():
+            self._refresh_task = asyncio.create_task(self._refresh_sources(), name="hd2-arsenal-refresh")
+        return await asyncio.shield(self._refresh_task)
+
+    async def _refresh_sources(self) -> list[str]:
+        active = self._dionatha_task
+        if active is not None and not active.done():
+            await asyncio.shield(active)
+        results = await asyncio.gather(self.ensure_loaded(force=True, refresh_supplement=False), self.ensure_dionatha(force=True),
+                                       self.ensure_enemies(force=True), return_exceptions=True)
+        for label, result in zip(("hd2tool", "dionatha", "wiki"), results):
+            if isinstance(result, Exception):
+                HEALTH.record_fail(label, detail=f"刷新异常: {type(result).__name__}")
+        return self.diagnostic_lines()
+
+    def diagnostic_lines(self) -> list[str]:
+        from datetime import datetime, timezone
+        def timestamp(value: float) -> str:
+            return datetime.fromtimestamp(value, timezone.utc).strftime("%m-%d %H:%M UTC") if value else "无缓存"
+        lines = [f"主目录 {self._data_version or '未知版本'} · {len(self._items)} 条 · 下载 {timestamp(self._loaded_at)}"]
+        if self._primary_failed_at:
+            lines.append("主目录最近刷新失败，继续使用可用数据")
+        snapshots = self._dionatha_snapshots
+        lines.append(f"补充目录 {len(snapshots)}/7 集合 · {len(self._dionatha_items)} 条 · 合并后 {len(self._merged_items)} 条")
+        now = time.time()
+        for collection in DIONATHA_COLLECTIONS:
+            snapshot = snapshots.get(collection)
+            if snapshot is None:
+                lines.append(f"  {collection}: 无可用缓存")
+                continue
+            state = "刷新失败/保留旧数据" if collection in self._dionatha_failures else (
+                "旧缓存" if now - snapshot["updated_at"] >= REFRESH_INTERVAL else "可用")
+            lines.append(f"  {collection}: {snapshot['version']} · {len(snapshot['rows'])} 条 · {timestamp(snapshot['updated_at'])} · {state}")
+        lines.append(f"敌人 {len(self._enemies)} 种" + (" · 刷新失败/保留旧数据" if self._enemies_failed_at else ""))
+        conflicts = sum(bool(item.get("_conflicts")) for item in self._merged_items)
+        if conflicts:
+            lines.append(f"跨源字段差异 {conflicts} 项（含基础/升级口径差异）；卡片显示适用条件")
+        return lines
+
     def _build_index(self) -> None:
-        index: dict[str, dict[str, Any]] = {}
+        index: dict[str, list[dict[str, Any]]] = {}
+        merged = merge_equipment(self._items, self._dionatha_items, getattr(self, "_data_version", ""))
 
         def put(key: str, item: dict[str, Any]) -> None:
             key = (key or "").strip().casefold()
-            if key and key not in index:
-                index[key] = item
-            # 规范化键（去标点/空格 + 全半角统一）：用户漏打引号也能命中
-            norm = normalize_query(key)
-            if norm and norm not in index:
-                index[norm] = item
+            for candidate in dict.fromkeys((key, normalize_query(key))):
+                if candidate:
+                    bucket = index.setdefault(candidate, [])
+                    if all(existing is not item for existing in bucket):
+                        bucket.append(item)
 
-        for item in self._items:
-            put(str(item.get("nameZh") or ""), item)
-            put(str(item.get("nameEn") or ""), item)
-            put(str(item.get("model") or ""), item)
-            put(str(item.get("id") or ""), item)
-            for name in item.get("alternateNames") or []:
-                put(str(name), item)
-            for alias in self._aliases.get(str(item.get("id") or ""), []):
-                put(alias, item)
-        # 补充目录（dionatha）排主目录之后：键冲突时 HD2Tool 优先
-        for item in self._dionatha_items:
-            put(str(item.get("nameEn") or ""), item)
-            put(str(item.get("slug") or ""), item)
-            put(str(item.get("model") or ""), item)
-            put(str(item.get("id") or ""), item)
-            for name in item.get("alternateNames") or []:
-                put(str(name), item)
+        for item in [*merged, *getattr(self, "_enemies", [])]:
+            kind = PRODUCT_KIND_ZH.get(str(item.get("productKind")), "")
+            names = [str(item.get(field) or "") for field in ("nameZh", "nameEn", "model", "id", "slug")]
+            names += [str(name) for name in item.get("alternateNames") or []]
+            names += self._aliases.get(str(item.get("id") or ""), [])
+            names += item.get("_search_ids") or []
+            for name in names:
+                put(name, item)
+                if name and kind:
+                    put(f"{name} {kind}", item)
+                    put(f"{kind} {name}", item)
+            if item.get("_collection") and item.get("slug"):
+                put(f"dionatha:{item['_collection']}:{item['slug']}", item)
+        for item in merged:
+            if item.get("_collection") and item.get("slug"):
+                selector = f"dionatha:{item['_collection']}:{item['slug']}"
+            else:
+                selector = f"hd2tool:{item.get('productKind', '')}:{item['id']}"
+            put(selector, item)
+            name = str(item.get("nameZh") or item.get("nameEn") or "?")
+            kind = PRODUCT_KIND_ZH.get(str(item.get("productKind")), "装备")
+            hint = f"{name} {kind}"
+            matches = index.get(hint.casefold()) or index.get(normalize_query(hint)) or []
+            item["_query_hint"] = hint if len(matches) == 1 and matches[0] is item else selector
+        self._merged_items = merged
         self._index = index
 
     def aliases_for(self, item_id: str) -> list[str]:
-        """返回某物品的玩家俗称列表（无则空）。"""
         return self._aliases.get(str(item_id or ""), [])
 
     def search(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
-        """精确 → 规范化精确 → 前缀 → 规范化子串的多路匹配，去重保序。"""
-        query = (query or "").strip()
-        if not query:
+        """Exact names can return several categories; never hide helmet/armor twins."""
+        q = str(query or "").strip().casefold()
+        if not q:
             return []
-        q = query.casefold()
-        exact = self._index.get(q)
-        if exact is not None:
-            return [exact]
-        # 规范化精确匹配（去标点/空格，如 "飞鹰500KG炸弹" → "飞鹰500kg炸弹"）
         qn = normalize_query(q)
-        if qn and qn != q:
-            hit = self._index.get(qn)
-            if hit is not None:
-                return [hit]
-        # 型号前缀提取：从查询中提取 "字母+数字" 前缀（如 "m102gunnerfrv" → "m102"）
-        # 让 "M-102 Gunner FRV" 能命中 "M-102 Fast Recon Vehicle"
-        prefix_match = re.match(r"^([a-z]+[0-9]+)", qn or "")
-        qp = prefix_match.group(1) if prefix_match and len(prefix_match.group(1)) >= 3 else None
+        exact = self._index.get(q) or self._index.get(qn)
+        if exact:
+            return exact[:limit]
+        match = re.match(r"^([a-z]+[0-9]+)", qn)
+        prefix = match[1] if match and len(match[1]) >= 3 else ""
+        found: list[dict[str, Any]] = []
         seen: set[int] = set()
-        results: list[dict[str, Any]] = []
-        for key, item in self._index.items():
-            ident = id(item)
-            if ident in seen:
-                continue
-            if key.startswith(q) or (qn and key.startswith(qn)) or (qp and key.startswith(qp) and len(qp) >= 3):
-                seen.add(ident)
-                results.append(item)
-        for key, item in self._index.items():
-            ident = id(item)
-            if ident in seen:
-                continue
-            if q in key or (qn and qn in key) or (qp and qp in key and len(qp) >= 4):
-                seen.add(ident)
-                results.append(item)
-            if len(results) >= limit:
-                break
-        # 中文错字容错：前面全部未命中时，做编辑距离 ≤1 的模糊匹配
-        # （错一字如"无后座力炮"、多一字如"无后坐力炮机"、少一字如"后坐力炮"）。
-        # 只对较长的中文查询生效，避免短查询产生大量误匹配。
-        if not results and len(q) >= 4 and re.search(r"[\u4e00-\u9fff]", q):
-            fuzzy_seen: set[int] = set()
-            for key, item in self._index.items():
-                # 只和长度相近的中文键比较；同一物品的多个键都命中时只取一次
-                ident = id(item)
-                if ident in fuzzy_seen:
-                    continue
+        for partial in (False, True):
+            for key, bucket in self._index.items():
+                matches = (q in key or (qn and qn in key) or (len(prefix) >= 4 and prefix in key)) if partial else (
+                    key.startswith(q) or (qn and key.startswith(qn)) or (prefix and key.startswith(prefix)))
+                if matches:
+                    for item in bucket:
+                        if id(item) not in seen:
+                            seen.add(id(item))
+                            found.append(item)
+                if len(found) >= limit:
+                    return found[:limit]
+        if not found and len(q) >= 4 and re.search(r"[\u4e00-\u9fff]", q):
+            for key, bucket in self._index.items():
                 if abs(len(key) - len(q)) <= 1 and _edit_distance_le1(q, key):
-                    fuzzy_seen.add(ident)
-                    results.append(item)
-                    if len(results) >= limit:
-                        break
-        return results[:limit]
+                    for item in bucket:
+                        if id(item) not in seen:
+                            seen.add(id(item))
+                            found.append(item)
+                if len(found) >= limit:
+                    break
+        return found[:limit]
 
 
 __all__ = [

@@ -166,6 +166,11 @@ _SCHEMA: dict[str, tuple[str, Any]] = {
         "HD2_BILIBILI_MAX_BYTES", 16 * 1024 * 1024
     ),
     "bilibili_image_max_pixels": ("HD2_BILIBILI_MAX_PIXELS", 64_000_000),
+    # —— 待补发推送队列（v2.0.0 持久化重试）——
+    "push_pending_max_entries": ("HD2_PUSH_PENDING_MAX_ENTRIES", 100),
+    "push_pending_retention_days": ("HD2_PUSH_PENDING_RETENTION_DAYS", 7),
+    "push_pending_image_max_mb": ("HD2_PUSH_PENDING_IMAGE_MAX_MB", 128),
+    "push_retry_base_seconds": ("HD2_PUSH_RETRY_BASE_SECONDS", 60),
 }
 
 

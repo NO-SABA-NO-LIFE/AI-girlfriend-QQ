@@ -1,7 +1,7 @@
-"""Standalone Pillow renderer for Democracy Space Station tactical reports.
+"""Pillow renderer for Democracy Space Station tactical reports.
 
-The renderer accepts a normalized station dictionary and deliberately has no hard
-AstrBot dependency.  It produces a deterministic, minute-granularity cached PNG:
+The renderer accepts a normalized station dictionary and uses AstrBot's official
+logger. It produces a deterministic, minute-granularity cached PNG:
 identical content rendered in the same UTC minute resolves to the same path.
 """
 
@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import math
 import os
 import re
@@ -22,10 +21,7 @@ from .visual_assets import prune_render_outputs
 from typing import Any, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-try:  # AstrBot is optional; its logger is used when available.
-    from .._logging import logger as logger
-except Exception:  # pragma: no cover - standalone use is the normal fallback
-    logger = logging.getLogger(__name__)
+from .._logging import logger
 
 try:
     from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -1374,7 +1370,7 @@ class DSSRenderer:
         _draw_planet(base, station, planet, planet_box, now_utc, self.local_timezone)
         _draw_actions(base, station, actions_box, now_utc)
         draw = ImageDraw.Draw(base, "RGBA")
-        footer = "超级地球武装部队 // DSS 遥测 // api.helldivers2.dev"
+        footer = str(station.get("_cache_note") or "超级地球武装部队 // DSS 遥测 // api.helldivers2.dev")
         draw.text((28, 942), footer, font=_font(8, True), fill=_DIM)
 
         if (self.width, self.height) != (WIDTH, HEIGHT):

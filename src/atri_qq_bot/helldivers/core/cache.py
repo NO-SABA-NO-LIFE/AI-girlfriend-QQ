@@ -12,6 +12,8 @@ from typing import Any, Awaitable, Callable
 
 from .._logging import logger
 
+from .persistence import finish_disk_call, write_json_atomic
+
 Fetcher = Callable[[], Awaitable[Any]]
 
 
@@ -112,25 +114,15 @@ class CacheService:
 
     def _save_disk(self, name: str, entry: CacheEntry) -> None:
         path = self._disk_path(name)
-        tmp = path.with_suffix(".tmp")
         payload = {
             "data": entry.data,
             "updated_at": entry.updated_at,
             "name": name,
         }
         try:
-            tmp.write_text(
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                encoding="utf-8",
-            )
-            os.replace(tmp, path)
+            write_json_atomic(path, payload)
         except Exception as e:
             logger.warning(f"[HD2] save disk cache {name} failed: {e}")
-            try:
-                if tmp.exists():
-                    tmp.unlink()
-            except Exception:
-                pass
 
     def save_all(self) -> None:
         for name, entry in list(self._entries.items()):
@@ -141,7 +133,7 @@ class CacheService:
         async with self._lock:
             self._entries[name] = entry
         async with self._disk_lock:
-            await asyncio.to_thread(self._save_disk, name, entry)
+            await finish_disk_call(self._save_disk, name, entry)
 
     async def get(self, name: str) -> Any | None:
         async with self._lock:
@@ -242,7 +234,7 @@ class CacheService:
             await asyncio.gather(self._once_task, return_exceptions=True)
         self._once_task = None
         async with self._disk_lock:
-            await asyncio.to_thread(self.save_all)
+            await finish_disk_call(self.save_all)
 
     async def _loop(self) -> None:
         first = True

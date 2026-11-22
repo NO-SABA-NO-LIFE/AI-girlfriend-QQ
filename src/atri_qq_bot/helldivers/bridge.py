@@ -34,6 +34,7 @@ from .clients.bilibili_monitor import (
 )
 from .clients.companion_news_monitor import CompanionNewsMonitor, news_fingerprint
 from .clients.companion_screenshot import (
+    CompanionCaptureSnapshot,
     CompanionConfigurationError,
     CompanionPlaywrightClient,
     CompanionScreenshotClient,
@@ -50,6 +51,8 @@ from .clients.wiki_client import WikiCache, WikiClient
 from .config import HelldiversConfig
 from .core.campaign_trends import CampaignTrendStore
 from .core.cache import CacheService
+from .core.push import GroupListProvider, QQGroupSubscriptionChecker
+from .core.push_policy import PushPolicy
 from .core.diagnostics import (
     HEALTH,
     build_ping_report,
@@ -165,10 +168,20 @@ class HelldiversBridge:
         self.bilibili_auto_enabled = False
         # 主动推送回调（框架注入；未注入时无法主动推送）
         self._push_sender: PushSender | None = None
+        # QQ 在线群列表提供者（OneBot 注入），用于退群后清理订阅；
+        # 未注入或查询失败时一律保留订阅，绝不误删。
+        self._group_list_provider: GroupListProvider | None = None
+        self._push_session_checker: QQGroupSubscriptionChecker | None = None
 
     def set_push_sender(self, sender: PushSender | None) -> None:
         """注入主动推送能力，保持 helldivers 包不反向依赖 onebot。"""
         self._push_sender = sender
+
+    def set_group_list_provider(self, provider: GroupListProvider | None) -> None:
+        """注入在线群列表查询协程，并同步给已构造的订阅检查器。"""
+        self._group_list_provider = provider
+        if self._push_session_checker is not None:
+            self._push_session_checker.group_list_provider = provider
 
     @staticmethod
     def parse_session_key(session_key: str) -> tuple[str, str]:
@@ -388,6 +401,12 @@ class HelldiversBridge:
                 "dashboard_low_impact_threshold", 800
             ),
             drop_untranslated_content=cfg.get("drop_untranslated_content", True),
+            companion_translation_batch_timeout=float(
+                cfg.get("companion_translation_batch_timeout", 20.0) or 20.0
+            ),
+            companion_translation_budget=float(
+                cfg.get("companion_translation_timeout", 60.0) or 60.0
+            ),
             arsenal_client=(
                 ArsenalClient(
                     data_dir / "arsenal",
@@ -419,6 +438,27 @@ class HelldiversBridge:
                 LEGACY_GALAXY_NEWS_UID, GALAXY_NEWS_UID,
             )
             configured_bilibili_uid = GALAXY_NEWS_UID
+        # 待补发队列策略与退群订阅检查器（v2.0.0 持久化推送）。
+        push_policy = PushPolicy(
+            max_entries=max(
+                1, int(cfg.get("push_pending_max_entries", 100) or 100)
+            ),
+            ttl_seconds=max(
+                1, int(cfg.get("push_pending_retention_days", 7) or 7)
+            )
+            * 86400,
+            max_image_bytes=max(
+                1, int(cfg.get("push_pending_image_max_mb", 128) or 128)
+            )
+            * 1024
+            * 1024,
+            retry_base_seconds=max(
+                1, int(cfg.get("push_retry_base_seconds", 60) or 60)
+            ),
+        )
+        self._push_session_checker = QQGroupSubscriptionChecker(
+            self._group_list_provider
+        )
         self.bilibili_monitor = BilibiliMonitor(
             data_dir / "bilibili_galaxy_news",
             uid=configured_bilibili_uid,
@@ -431,6 +471,8 @@ class HelldiversBridge:
             send_post=self._send_bilibili_post,
             log_info=logger.info,
             log_warning=logger.warning,
+            before_check=self._prune_push_subscriptions,
+            policy=push_policy,
             image_cache=RemoteImageCache(
                 data_dir / "bilibili_galaxy_news" / "secure_images_v3",
                 allowed_hosts=frozenset(
@@ -473,7 +515,7 @@ class HelldiversBridge:
                 "[HD2] 建议在配置中填写 api_contact（联系邮箱），以遵守 Helldivers API 礼仪"
             )
         self.companion_news_monitor = CompanionNewsMonitor(
-            data_dir / "companion_news"
+            data_dir / "companion_news", policy=push_policy
         )
         self._start_companion_warmup()
 
@@ -1100,12 +1142,19 @@ class HelldiversBridge:
                         and push_enabled
                         and self.companion_news_monitor is not None
                     )
-                    path = await self.companion_playwright.capture(  # type: ignore[union-attr]
-                        target, force=force
-                    )
-                    logger.info("[HD2] Companion 预热完成：%s", target.kind)
                     if target.kind == "news_latest":
-                        await self._check_companion_news_change(path)
+                        # 新闻页取不可变快照（含文本与 stale 标记），供变更检测。
+                        snapshot = await self.companion_playwright.capture_snapshot(  # type: ignore[union-attr]
+                            target, force=force
+                        )
+                        await self._check_companion_news_change(
+                            snapshot, retry_pending=False
+                        )
+                    else:
+                        await self.companion_playwright.capture(  # type: ignore[union-attr]
+                            target, force=force
+                        )
+                    logger.info("[HD2] Companion 预热完成：%s", target.kind)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -1118,13 +1167,49 @@ class HelldiversBridge:
                 await asyncio.sleep(5)  # 截图之间留间隔，避免突发
             await asyncio.sleep(interval)
 
-    async def _check_companion_news_change(self, path: Path) -> None:
-        """用文本指纹判断新闻是否变化，变化则排队推送给订阅群。"""
+    async def _prune_push_subscriptions(self) -> None:
+        """清理已退出的 QQ 群订阅及其待补发队列；不确定时保留全部。"""
+        monitors = [
+            monitor
+            for monitor in (
+                self.bilibili_monitor,
+                self.companion_news_monitor,
+            )
+            if monitor is not None
+        ]
+        sessions = list(
+            dict.fromkeys(
+                origin for monitor in monitors for origin in monitor.sessions
+            )
+        )
+        if self._push_session_checker is None:
+            self._push_session_checker = QQGroupSubscriptionChecker(
+                self._group_list_provider
+            )
+        removed = await self._push_session_checker.removed_sessions(sessions)
+        for origin in removed:
+            for monitor in monitors:
+                if not monitor._state_error:
+                    monitor.unsubscribe(origin)
+            logger.info("[HD2] 已清理退出的 QQ 群推送订阅：%s", origin)
+
+    async def _check_companion_news_change(
+        self,
+        snapshot: CompanionCaptureSnapshot,
+        *,
+        retry_pending: bool = True,
+    ) -> None:
+        """用文本指纹判断新闻是否变化，变化则持久化排队并推送给订阅群。"""
         monitor = self.companion_news_monitor
-        client = self.companion_playwright
-        if monitor is None or client is None:
+        if monitor is None:
             return
-        texts = client.capture_texts("news_latest")
+        await self._prune_push_subscriptions()
+        push_enabled = bool(
+            self.config.get("companion_news_push_enabled", False)
+        )
+        if push_enabled and retry_pending:
+            await monitor.retry_pending(self._push_companion_news)
+        texts = list(snapshot.texts)
         if not texts:
             return
         fingerprint = news_fingerprint(texts)
@@ -1134,18 +1219,30 @@ class HelldiversBridge:
             logger.info("[HD2] Companion 新闻已更新，但无订阅群，跳过推送")
             monitor.commit_fingerprint(fingerprint)
             return
-        if not bool(self.config.get("companion_news_push_enabled", False)):
+        if not push_enabled:
             logger.info("[HD2] Companion 新闻已更新，但推送总开关未启用，跳过推送")
             monitor.commit_fingerprint(fingerprint)
             return
-        # 翻译未完成时拿到的是旧缓存截图，先不推，等下一轮拿到新截图。
-        if self._served_companion_stale("news_latest"):
+        # 翻译未完成时快照是旧缓存截图（stale-while-revalidate），文本指纹
+        # 却已是新内容——此时推送的是过期图片。跳过且不提交指纹，等下一轮。
+        if snapshot.stale:
             logger.info(
                 "[HD2] Companion 新闻已更新，但截图为旧缓存，本轮跳过，下一轮重试"
             )
             return
-        await monitor.enqueue(fingerprint, path)
-        await self._deliver_pending_companion_news()
+        try:
+            queued = await monitor.queue_news(
+                fingerprint, snapshot.image_bytes
+            )
+        except OSError as exc:
+            logger.warning(
+                "[HD2] Companion 待发送截图保存失败，下一轮重试：%s", exc
+            )
+            return
+        if queued:
+            await monitor.retry_pending(
+                self._push_companion_news, [fingerprint]
+            )
 
     async def _deliver_pending_companion_news(self) -> None:
         """重试投递已排队的新闻，按会话逐个确认送达。"""
@@ -1154,24 +1251,8 @@ class HelldiversBridge:
             self.config.get("companion_news_push_enabled", False)
         ):
             return
-        monitor.prune_pending()
-        for fingerprint, sessions in list(monitor.pending.items()):
-            for session in list(sessions):
-                if session not in sessions:
-                    continue
-                if session not in monitor.sessions:
-                    monitor.mark_delivered(fingerprint, session)
-                    continue
-                try:
-                    delivered = await self._push_companion_news(
-                        monitor.pending_image(fingerprint), [session]
-                    )
-                except Exception as exc:
-                    logger.warning("[HD2] Companion 新闻重试失败：%s", exc)
-                    continue
-                if delivered:
-                    monitor.mark_delivered(fingerprint, session)
-            monitor.finish_pending(fingerprint)
+        await self._prune_push_subscriptions()
+        await monitor.retry_pending(self._push_companion_news)
 
     async def _push_companion_news(
         self, path: Path, sessions: list[str]

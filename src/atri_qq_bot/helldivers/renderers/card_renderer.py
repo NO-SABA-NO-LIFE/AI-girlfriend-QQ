@@ -256,7 +256,9 @@ class CardRenderer:
                 elif t == "divider":
                     layout.append(("divider", el, None))
                     y += 18
-            y += 20 + 34  # footer
+            footer_lines = _wrap(pdraw, card.footer, f_small, content_w) if card.footer else []
+            footer_height = 34 + max(0, len(footer_lines) - 1) * 20
+            y += 20 + footer_height
             height = max(180, int(y))
 
             # ---- 绘制 ----
@@ -385,14 +387,13 @@ class CardRenderer:
 
             # 页脚
             draw.line(
-                (PAD_X, height - 40, WIDTH - PAD_X, height - 40),
+                (PAD_X, height - footer_height - 6, WIDTH - PAD_X, height - footer_height - 6),
                 fill=DIVIDER,
                 width=1,
             )
             if card.footer and f_small:
-                draw.text(
-                    (PAD_X, height - 30), card.footer, font=f_small, fill=FG_MUTED
-                )
+                for index, line in enumerate(footer_lines):
+                    draw.text((PAD_X, height - footer_height + 4 + index * 20), line, font=f_small, fill=FG_MUTED)
 
             self._cleanup()
             out = self.output_dir / f"card_{uuid.uuid4().hex}.png"

@@ -14,6 +14,7 @@ from .glossary import (
     PLANET_NAMES as _PLANET_NAMES,
     SECTOR_NAMES,
     STRATAGEM_NAMES,
+    canonical_planet_name,
 )
 
 
@@ -509,10 +510,12 @@ def format_status(value: object, default: str | None = None) -> str:
     return t(key, default or str(value) if value not in (None, "") else t("status.unknown")) if key else (default or str(value) if value not in (None, "") else t("status.unknown"))
 
 
-def format_planet(value: object, default: str | None = None) -> str:
+def format_planet(
+    value: object, default: str | None = None, *, index: object = None
+) -> str:
     """Translate an API planet name to its official Simplified Chinese name."""
 
-    official = lookup_planet_name(value)
+    official = lookup_planet_name(value, index=index)
     if official:
         return official
     if value not in (None, ""):
@@ -520,10 +523,10 @@ def format_planet(value: object, default: str | None = None) -> str:
     return default or t("common.unknown")
 
 
-def lookup_planet_name(value: object) -> str | None:
+def lookup_planet_name(value: object, *, index: object = None) -> str | None:
     """Return an official planet translation, without treating an unknown name as one."""
 
-    return _PLANET_NAMES.get(_token(value))
+    return _PLANET_NAMES.get(_token(canonical_planet_name(value, index=index)))
 
 
 def known_planet_names() -> tuple[str, ...]:

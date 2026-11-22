@@ -18,7 +18,7 @@ Helldivers 2 银河战争 {PLUGIN_VERSION}
 /map                  战争地图（阵营领土）
 /global_events        全球事件
 /warfront <阵营>      阵营战线战况
-/planet <名称/编号>   星球详情
+/planet <名称/编号>   星球详情（含当前星球效果）
 /dss                  民主空间站图文
 /steam                Steam 新闻图片
 【网页截图 · 快报】
@@ -54,7 +54,7 @@ HDHELP_TEXT = f"""\
 /map                  银河战争地图
 /warfront <阵营>      阵营战线 Top 10
 /global_events        全球事件
-/planet <名称/编号>   星球详情（支持中文名、编号）
+/planet <名称/编号>   星球详情（支持中文名、编号，含当前星球效果）
 /dss                  民主空间站面板
 
 【Companion 网页截图】

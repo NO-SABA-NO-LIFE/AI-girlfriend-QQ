@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import math
 import os
 import random
@@ -28,17 +27,14 @@ try:
     from .visual_assets import asset_image, asset_sha256, paste_contain
 except Exception:  # pragma: no cover
     format_faction = lambda value, default=None: default or str(value)  # type: ignore
-    format_planet = lambda value, default=None: default or str(value)  # type: ignore
+    format_planet = lambda value, default=None, **kwargs: default or str(value)  # type: ignore
     format_status = lambda value, default=None: default or str(value)  # type: ignore
     t = lambda key, default=None: default or str(key)  # type: ignore
     asset_image = None  # type: ignore
     asset_sha256 = lambda value: ""  # type: ignore
     paste_contain = None  # type: ignore
 
-try:
-    from .._logging import logger
-except Exception:  # pragma: no cover
-    logger = logging.getLogger(__name__)
+from .._logging import logger
 
 try:
     from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -335,7 +331,7 @@ class MapRenderer:
             normalised.append(
                 {
                     "index": idx,
-                    "name": format_planet(raw.get("name") or raw.get("planetName"), ""),
+                    "name": format_planet(raw.get("name") or raw.get("planetName"), "", index=idx),
                     "x": round(x, 6),
                     "y": round(y, 6),
                     "owner": owner,

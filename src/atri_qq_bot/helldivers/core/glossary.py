@@ -38,6 +38,38 @@ def _token(value: object) -> str:
     return str(value).strip().casefold() if value is not None else ""
 
 
+def normalize_planet_name(value: object) -> str:
+    """Treat old ``(Void)`` names and current ``- Void`` names as aliases."""
+
+    name = " ".join(str(value or "").replace("_", " ").split())
+    return re.sub(r"\s*(?:\(\s*void\s*\)|-\s*void)$", " - Void", name, flags=re.I)
+
+
+# The API uses localized game names, which omit the Void suffix in en-US.
+# These indices distinguish the Void copies from their original planets.
+_VOID_PLANET_NAMES: Final[dict[int, str]] = {
+    275: "UVP Gamma - Void",
+    277: "UVP Delta - Void",
+    278: "UVP Alpha - Void",
+    279: "UVP Beta - Void",
+    280: "Senge 23 - Void",
+    281: "Hydrobius - Void",
+}
+
+
+def canonical_planet_name(value: object, *, index: object = None) -> str:
+    """Use a known planet index to disambiguate localized API names."""
+
+    if not isinstance(index, bool) and isinstance(index, (int, str)):
+        try:
+            known = _VOID_PLANET_NAMES.get(int(index))
+        except ValueError:
+            known = None
+        if known:
+            return known
+    return normalize_planet_name(value)
+
+
 # ---- four canonical tables (loaded once at import) ----
 
 ENEMY_NAMES: Final[dict[str, str]] = _load_json("enemies")
@@ -59,6 +91,8 @@ def lookup_term(category: str, value: object) -> str | None:
     table = _TABLES.get(category)
     if table is None:
         return None
+    if category == "planet":
+        value = normalize_planet_name(value)
     return table.get(_token(value))
 
 
@@ -224,6 +258,8 @@ __all__ = [
     "SECTOR_NAMES",
     "STRATAGEM_NAMES",
     "all_terms",
+    "canonical_planet_name",
+    "normalize_planet_name",
     "contains_cjk",
     "lookup_term",
     "preapply_glossary",

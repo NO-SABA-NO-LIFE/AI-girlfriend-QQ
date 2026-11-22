@@ -593,6 +593,15 @@ def build_planet_card(planet: dict[str, Any]) -> Card:
     hnames = [h for h in hnames if h]
     if hnames:
         card.field("环境灾害", "、".join(hnames[:5]))
+    effects = planet.get("planet_effects")
+    if isinstance(effects, list) and effects:
+        from ..core.planet_effects import MAX_DISPLAY_EFFECTS
+
+        card.divider().heading("星球效果")
+        for effect in effects[:MAX_DISPLAY_EFFECTS]:
+            card.field(str(effect["name"]), str(effect.get("description") or ""))
+        if len(effects) > MAX_DISPLAY_EFFECTS:
+            card.text(f"另有 {len(effects) - MAX_DISPLAY_EFFECTS} 项效果。", muted=True)
     event = planet.get("event") if isinstance(planet.get("event"), dict) else None
     if event:
         card.divider().heading("行星事件")
@@ -666,6 +675,18 @@ def build_arsenal_card(item: dict[str, Any], *, aliases: list[str] | None = None
 
     if aliases:
         card.text(f"玩家俗称: {'、'.join(aliases[:5])}", muted=True)
+    if "potentially_outdated" in (item.get("_source_flags") or []):
+        card.text("Wiki 标记：该条目部分资料可能尚未更新", muted=True)
+    conflicts = [row for row in item.get("_conflicts") or [] if not row.get("resolved_upgrade")]
+    if conflicts:
+        card.text("部分属性存在来源差异，请结合条件与下方来源核对。", muted=True)
+    updated_at = item.get("_updated_at")
+    if isinstance(updated_at, (int, float)) and updated_at > 0:
+        from datetime import datetime, timezone
+        import time
+        if time.time() - updated_at >= 86400:
+            stamp = datetime.fromtimestamp(updated_at, timezone.utc).strftime("%m-%d %H:%M UTC")
+            card.text(f"正在使用旧缓存，最后成功获取：{stamp}", muted=True)
     description = str(item.get("description") or "")
     if description:
         card.text(description[:160], muted=True)
@@ -713,9 +734,13 @@ def build_arsenal_card(item: dict[str, Any], *, aliases: list[str] | None = None
                     pen = value.get("labelZh") or f"等级{value.get('value', '?')}"
                     parts.append(f"穿甲 {pen}")
                 elif isinstance(value, (int, float)):
-                    parts.append(f"{zh} {int(value) if float(value).is_integer() else value}")
+                    unit = " /秒" if key in {"standardDamage", "durableDamage"} and fields.get("damageUnit") == "per_second" else ""
+                    field_label = f"单弹丸{zh}" if key in {"standardDamage", "durableDamage"} and fields.get("pellets", 1) > 1 else zh
+                    parts.append(f"{field_label} {int(value) if float(value).is_integer() else value}{unit}")
                 elif value:
                     parts.append(f"{zh} {value}")
+            if fields.get("pellets", 1) > 1:
+                parts.insert(0, f"每发 {fields['pellets']} 弹丸")
             if parts:
                 card.field(f"{label}{suffix}", " · ".join(parts[:7]))
 
@@ -724,11 +749,11 @@ def build_arsenal_card(item: dict[str, Any], *, aliases: list[str] | None = None
     if isinstance(handling, dict) and handling:
         pairs = []
         for key, zh in HANDLING_ZH.items():
-            if key in handling and handling[key] not in (None, "", 0):
+            if key in handling and handling[key] not in (None, ""):
                 value = handling[key]
                 if key == "fireRate":
-                    pairs.append((zh, f"{value} RPM"))
-                elif key == "reloadSeconds":
+                    pairs.append((zh, f"{'/'.join(str(v) for v in value) if isinstance(value, list) else value} RPM"))
+                elif key in {"reloadSeconds", "upgradedReloadSeconds"}:
                     pairs.append((zh, f"{value}s"))
                 elif isinstance(value, list):
                     pairs.append((zh, "/".join(str(v) for v in value[:4])))
@@ -737,18 +762,25 @@ def build_arsenal_card(item: dict[str, Any], *, aliases: list[str] | None = None
         if pairs:
             card.grid(pairs)
 
-    # 战备部署信息
+    # Base and upgraded durations are separate facts, including valid zeroes.
     deploy = item.get("deployment")
-    if isinstance(deploy, dict) and deploy.get("cooldownSeconds"):
-        # 输入码方向 → 箭头符号（"↓↑→↑←↑"），避免打出 Python 原始列表
+    if isinstance(deploy, dict):
+        pairs = []
+        for field, label in (
+            ("cooldownSeconds", "基础冷却" if deploy.get("cooldownBasis", deploy.get("basis")) == "base" else "冷却（条件未注明）"),
+            ("upgradedCooldownSeconds", "全升级冷却"),
+            ("callInSeconds", "基础呼叫" if deploy.get("callInBasis", deploy.get("basis")) == "base" else "呼叫时间"),
+            ("upgradedCallInSeconds", "升级后呼叫"),
+            ("rearmSeconds", "基础重新装填"),
+        ):
+            if deploy.get(field) is not None:
+                pairs.append((label, f"{deploy[field]}s"))
+        if pairs:
+            card.divider().heading("战备部署").grid(pairs)
         code = deploy.get("code")
-        code_text = ""
         if isinstance(code, list) and code:
             arrows = {"up": "↑", "down": "↓", "left": "←", "right": "→"}
-            code_text = " · 输入码 " + "".join(
-                arrows.get(str(step).lower(), "?") for step in code
-            )
-        card.field("战备", f"冷却 {deploy['cooldownSeconds']}s" + code_text)
+            card.field("输入码", "".join(arrows.get(str(step).lower(), "?") for step in code))
 
     wiki = item.get("wiki") or {}
     if wiki.get("url"):
@@ -767,7 +799,7 @@ def build_arsenal_candidates_card(
         emblem="super_earth",
         footer=(
             "数据: HD2Tool + wiki.gg 补充目录"
-            if any(it.get("_source") == "dionatha" for it in items)
+            if any(it.get("_source") in {"dionatha", "merged"} for it in items)
             else "数据: HD2Tool (MIT) · 用 /hd2data <名称> 查看详情"
         ),
     )
@@ -780,6 +812,8 @@ def build_arsenal_candidates_card(
         model = str(it.get("model") or "").strip()
         label = f"{name}（{model}）" if model else name
         card.text(f"[{i}] {label} · {kind}", muted=False)
+        hint = it.get("_query_hint") or f"{name} {kind}"
+        card.text(f"查询：/hd2data {hint}", muted=True)
     if len(items) > 8:
         card.text(f"...共 {len(items)} 条", muted=True)
     return card

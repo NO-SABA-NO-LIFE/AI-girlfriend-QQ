@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 import os
 import re
 import time
@@ -78,6 +81,9 @@ class TranslationService:
         self.min_interval = max(0.0, float(min_interval or 0))
         self._next_request_at = 0.0
         self._openai_cooldown_until = 0.0
+        self._builtin_cooldown_until = 0.0
+        self._builtin_lock = asyncio.Lock()
+        self._builtin_pause_reason = ""
         # 请求级失败（超时/网络异常）的瞬态窗口：与 429/5xx 冷却不同，
         # 这些失败不代表配额耗尽，但同样不应被上层当成"翻不动"写负缓存。
         self.transient_failure_window = 60.0
@@ -86,12 +92,23 @@ class TranslationService:
         self.mode = self._resolve_mode()
 
     def in_cooldown(self) -> bool:
-        """Whether the openai-compatible backend is currently rate-limiting."""
+        """Whether the selected provider is paused for rate limits or quota."""
+        until = self._openai_cooldown_until if self.mode == "openai" else self._builtin_cooldown_until
+        return time.monotonic() < until
 
-        return (
-            self.mode == "openai"
-            and time.monotonic() < self._openai_cooldown_until
-        )
+    def resume(self) -> None:
+        """Administrator-triggered recovery after a quota or configuration change."""
+        self._openai_cooldown_until = 0.0
+        self._builtin_cooldown_until = 0.0
+        self._transient_failure_until = 0.0
+        self._builtin_pause_reason = ""
+
+    def pause_status(self) -> str:
+        if not self.in_cooldown():
+            return ""
+        until = self._openai_cooldown_until if self.mode == "openai" else self._builtin_cooldown_until
+        reason = self._builtin_pause_reason if self.mode == "builtin" else "接口限流"
+        return f"{reason}，约 {max(1, int(until - time.monotonic()))} 秒后重试；管理员可 /hd2翻译恢复"
 
     def in_transient_failure(self) -> bool:
         """Whether a request-level failure (timeout/network) happened recently."""
@@ -142,6 +159,7 @@ class TranslationService:
             "key_present": bool(self.api_key),
             "target_lang": self.target_lang,
             "error_cooldown": self.error_cooldown,
+            "pause_status": self.pause_status(),
         }
 
     def bind_session(self, session: aiohttp.ClientSession | None) -> None:
@@ -346,53 +364,77 @@ class TranslationService:
         }
         return payload, headers, None
 
-    async def _translate_builtin(self, text: str, to_lang: str | None) -> str:
-        payload, headers, params = self._builtin_request(text, to_lang)
-        started = time.perf_counter()
+    @staticmethod
+    def _retry_delay(value: Any) -> float:
         try:
-            session = await self._ensure_session()
-            async with session.post(
-                self.api_url,
-                params=params,
-                json=payload,
-                headers=headers,
-                proxy=self.proxy_url,
-                timeout=self.timeout,
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning(
-                        f"[HD2] translation API status={resp.status} for text={text[:40]!r}"
-                    )
-                    HEALTH.record_fail("translate", detail=f"builtin HTTP {resp.status}")
-                    return text
-                data = await resp.json(content_type=None)
-                if not isinstance(data, dict):
-                    HEALTH.record_fail("translate", detail="builtin 响应非 JSON 对象")
-                    return text
-                translated = self._extract_builtin_translation(data)
-                if translated and translated != text.strip():
-                    HEALTH.record_ok(
-                        "translate",
-                        detail=f"builtin {len(text)}字符",
-                        latency_ms=(time.perf_counter() - started) * 1000.0,
-                    )
-                    return translated
-                nested = data.get("data")
-                logger.warning(
-                    "[HD2] translation response missing translated text; keys=%s data_keys=%s",
-                    sorted(str(key) for key in data.keys())[:12],
-                    sorted(str(key) for key in nested.keys())[:12]
-                    if isinstance(nested, dict)
-                    else [],
-                )
-                HEALTH.record_fail("translate", detail="builtin 响应缺译文")
+            delay = float(value)
+        except (TypeError, ValueError):
+            try:
+                delay = parsedate_to_datetime(str(value)).timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError):
+                return 0.0
+        return min(31 * 86400, max(0.0, delay)) if math.isfinite(delay) else 0.0
+
+    def _pause_builtin(self, status: int, data: Any, headers: Any) -> None:
+        data = data if isinstance(data, dict) else {}
+        code = data.get("code") if isinstance(data.get("code"), str) else data.get("error")
+        code = str(code or "")
+        quota = code in {"VISITOR_MONTHLY_QUOTA_EXHAUSTED", "INSUFFICIENT_CREDITS"} or status == 402
+        delay = max(3600 if quota else max(1, self.error_cooldown), self._retry_delay(headers.get("Retry-After")))
+        if quota:
+            # Only explicit reset fields are treated as absolute timestamps.
+            for key in ("reset_at", "next_reset_at", "next_available_at"):
+                raw = data.get(key)
+                try:
+                    reset = float(raw) if isinstance(raw, (int, float)) else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+                    if math.isfinite(reset) and time.time() < reset <= time.time() + 31 * 86400:
+                        delay = max(delay, reset - time.time())
+                except (TypeError, ValueError, OSError, OverflowError):
+                    pass
+        self._builtin_cooldown_until = time.monotonic() + delay
+        self._builtin_pause_reason = "翻译额度不足" if quota else "翻译接口暂时不可用"
+        request_id = str(headers.get("X-Request-ID") or "")[:80]
+        HEALTH.record_fail("translate", detail=f"builtin HTTP {status} {code} 暂停 {int(delay)}s request={request_id}")
+
+    async def _translate_builtin(self, text: str, to_lang: str | None) -> str:
+        # A shared lock stops queued batches from making more calls after a 429.
+        async with self._builtin_lock:
+            if self.in_cooldown() or self.in_transient_failure():
                 return text
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.warning(f"[HD2] translation failed: {e}")
-            HEALTH.record_fail("translate", detail=f"builtin: {e}")
-            return text
+            payload, headers, params = self._builtin_request(text, to_lang)
+            started = time.perf_counter()
+            try:
+                if self.min_interval:
+                    delay = self._next_request_at - time.monotonic()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    self._next_request_at = time.monotonic() + self.min_interval
+                session = await self._ensure_session()
+                async with session.post(self.api_url, params=params, json=payload,
+                                        headers=headers, proxy=self.proxy_url, timeout=self.timeout) as resp:
+                    if resp.status != 200:
+                        try:
+                            data = await resp.json(content_type=None)
+                        except (ValueError, aiohttp.ClientError):
+                            data = {}
+                        self._pause_builtin(resp.status, data, getattr(resp, "headers", {}) or {})
+                        logger.warning(f"[HD2] builtin translation HTTP {resp.status}; {self.pause_status()}")
+                        return text
+                    data = await resp.json(content_type=None)
+                    if not isinstance(data, dict):
+                        raise ValueError("translation response is not an object")
+                    translated = self._extract_builtin_translation(data)
+                    if translated:
+                        HEALTH.record_ok("translate", detail=f"builtin {len(text)}字符", latency_ms=(time.perf_counter() - started) * 1000)
+                        return translated
+                    raise ValueError("translation response has no translation")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._transient_failure_until = time.monotonic() + self.transient_failure_window
+                logger.warning(f"[HD2] builtin translation failed: {type(exc).__name__}")
+                HEALTH.record_fail("translate", detail=f"builtin: {type(exc).__name__}")
+                return text
 
     async def _translate_openai(self, text: str, to_lang: str | None) -> str:
         lang = to_lang or self.target_lang or "zh"

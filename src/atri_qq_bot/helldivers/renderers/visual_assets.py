@@ -7,7 +7,6 @@ matching pre-rendered PNG files so Pillow remains the only image dependency.
 from __future__ import annotations
 
 import hashlib
-import logging
 import math
 import re
 from functools import lru_cache
@@ -18,7 +17,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 from .asset_resolver import AssetResolver, AssetResolverError
 
-logger = logging.getLogger(__name__)
+from .._logging import logger
 
 RGB: TypeAlias = tuple[int, int, int]
 RGBA: TypeAlias = tuple[int, int, int, int]

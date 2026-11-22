@@ -199,6 +199,37 @@ class OneBotConnectionMixin(OneBotServerMixin):
         # 注入主动推送能力：订阅的新闻/快报由 bridge 回调本方法，再经当前
         # NapCat 连接发出去。这样 helldivers 包无需知道 OneBot 的存在。
         self.helldivers.set_push_sender(self._hd2_push_sender)
+        # 注入在线群列表查询：bridge 退群清理前先确认 QQ 在线且健康，再读取
+        # 群列表；任何一步不确定都由 bridge 保留订阅，绝不误删。
+        self.helldivers.set_group_list_provider(self._hd2_group_list_provider)
+
+    async def _hd2_group_list_provider(self) -> list[str]:
+        """确认 QQ 在线后返回当前加入的群号字符串列表；不确定即抛错。"""
+        websocket = self._first_active_websocket()
+        if websocket is None:
+            raise RuntimeError("NapCat 当前未连接，无法确认在线群列表")
+        # 先确认 QQ 内核在线且健康，连接存在不代表已登录。
+        status = await self.call_action_and_wait(
+            websocket, "get_status", {}, 5.0
+        )
+        if not _onebot_status_is_healthy(status):
+            raise RuntimeError(
+                _onebot_action_error_detail(
+                    status, default="QQ 内核报告离线或异常，跳过订阅清理"
+                )
+            )
+        result = await self.call_action_and_wait(
+            websocket, "get_group_list", {}, 8.0
+        )
+        data = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(data, list):
+            raise RuntimeError("get_group_list 未返回列表，跳过订阅清理")
+        group_ids: list[str] = []
+        for item in data:
+            if not isinstance(item, dict) or not item.get("group_id"):
+                continue
+            group_ids.append(str(item.get("group_id")))
+        return group_ids
 
     async def _hd2_push_sender(
         self, session_key: str, messages: list[Any]

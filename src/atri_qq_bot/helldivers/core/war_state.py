@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+from .glossary import canonical_planet_name, normalize_planet_name
+from .i18n import known_planet_names, lookup_planet_name
+from .planet_effects import resolve_planet_effects
 
 
 FACTION_ALIASES: dict[str, str] = {
@@ -231,6 +236,7 @@ class WarState:
         space_stations: list[dict[str, Any]] | None = None,
         war: dict[str, Any] | None = None,
         global_events: list[dict[str, Any]] | None = None,
+        planet_effects: list[dict[str, Any]] | None = None,
     ) -> None:
         self.planets: list[dict[str, Any]] = list(planets or [])
         self.campaigns: list[dict[str, Any]] = list(campaigns or [])
@@ -240,6 +246,19 @@ class WarState:
         self._global_events: list[dict[str, Any]] = list(global_events or [])
         self._by_index: dict[int, dict[str, Any]] = {}
         self._events_by_planet: dict[int, dict[str, Any]] = {}
+        self._effects_by_planet: dict[int, list[dict[str, Any]]] = {}
+        for effect in planet_effects or []:
+            if not isinstance(effect, dict):
+                continue
+            index = effect.get("index", effect.get("planetIndex"))
+            if isinstance(index, bool) or not isinstance(index, (int, str)):
+                continue
+            try:
+                idx = int(index)
+            except ValueError:
+                continue
+            if idx >= 0:
+                self._effects_by_planet.setdefault(idx, []).append(effect)
         for event in self.planet_events:
             if not isinstance(event, dict):
                 continue
@@ -262,9 +281,21 @@ class WarState:
         return self._events_by_planet.get(idx) if idx is not None else None
 
     def find_planets(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
-        q = (query or "").strip()
+        q = normalize_planet_name(query)
         if not q:
             return []
+        numbered = re.search(r"\s+\((\d{1,6})\)$", q)
+        if numbered:
+            planet = self.get_planet(int(numbered.group(1)))
+            return [planet] if planet else []
+        # Preserve the formerly unique Chinese alias for the Void copy of Senge 23.
+        if q == "仙盖23号":
+            q = "Senge 23 - Void"
+        for source in known_planet_names():
+            translated = lookup_planet_name(source)
+            if translated and translated.casefold() == q.casefold():
+                q = normalize_planet_name(source)
+                break
         # 112-Name
         if "-" in q:
             head = q.split("-", 1)[0].strip()
@@ -276,19 +307,29 @@ class WarState:
             return [p] if p else []
 
         ql = q.lower()
+        void_query = ql.endswith(" - void")
         exact: list[dict[str, Any]] = []
+        raw_exact: list[dict[str, Any]] = []
         partial: list[dict[str, Any]] = []
         for p in self.planets:
             name = planet_name(p)
-            nl = name.lower()
+            nl = canonical_planet_name(name, index=planet_index(p)).casefold()
+            raw_name = normalize_planet_name(name).casefold()
             if nl == ql:
                 exact.append(p)
-            elif ql in nl or nl in ql:
+            elif raw_name == ql:
+                raw_exact.append(p)
+            elif ql in nl or (not void_query and nl in ql):
                 partial.append(p)
         exact.sort(key=planet_players, reverse=True)
+        raw_exact.sort(key=planet_players, reverse=True)
         partial.sort(key=planet_players, reverse=True)
-        out = exact + [p for p in partial if p not in exact]
-        return out[:limit]
+        return (exact or raw_exact or partial)[:limit]
+
+    def effects_for_planet(self, planet: dict[str, Any]) -> list[dict[str, Any]]:
+        """Resolve active effect IDs without changing the cached planet payload."""
+
+        return resolve_planet_effects(self._effects_by_planet.get(planet_index(planet), []))
 
     def dss_station(self) -> dict[str, Any] | None:
         if not self.space_stations:
@@ -398,7 +439,7 @@ class WarState:
             points.append(
                 {
                     "index": idx,
-                    "name": planet_name(p),
+                    "name": canonical_planet_name(planet_name(p), index=idx),
                     "x": x,
                     "y": y,
                     "owner": display_owner,
@@ -447,8 +488,8 @@ class WarState:
         return {
             "campaign": campaign,
             "planet": p,
-            "name": planet_name(p),
-            "planet_name": planet_name(p),
+            "name": canonical_planet_name(planet_name(p), index=idx),
+            "planet_name": canonical_planet_name(planet_name(p), index=idx),
             "index": idx,
             "planet_index": idx,
             "identity": identity,

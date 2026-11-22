@@ -8,7 +8,7 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse
@@ -16,7 +16,9 @@ from urllib.parse import quote, urlencode, urlparse
 import aiohttp
 
 from ..core.diagnostics import HEALTH
-from ..core.push_policy import MAX_PENDING_ENTRIES, PENDING_TTL_SECONDS, queued_timestamp
+from ..core.persistence import write_json_atomic
+from ..core.push_policy import DeliveryState, PushPolicy, backup_push_state, read_push_state
+from ..core.push import has_group_subscription, normalize_sessions
 
 GALAXY_NEWS_UID = "3546777720457465"
 LEGACY_GALAXY_NEWS_UID = "3493282298464839"
@@ -48,6 +50,12 @@ class BilibiliPost:
     @property
     def url(self) -> str:
         return f"https://www.bilibili.com/opus/{self.dynamic_id}"
+
+
+@dataclass
+class PendingBilibiliPost(DeliveryState):
+    post: BilibiliPost
+    sessions: list[str]
 
 
 class BilibiliRiskControlError(RuntimeError):
@@ -231,10 +239,12 @@ class BilibiliMonitor:
         proxy_url: str,
         timeout: int,
         max_image_bytes: int,
-        send_post: Callable[[BilibiliPost, list[Path], list[str]], Awaitable[int | None]],
+        send_post: Callable[[BilibiliPost, list[Path], list[str]], Awaitable[int]],
         log_info: Callable[[str], None],
         log_warning: Callable[[str], None],
         image_cache: Any | None = None,
+        before_check: Callable[[], Awaitable[None]] | None = None,
+        policy: PushPolicy | None = None,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.image_dir = self.data_dir / "images"
@@ -250,9 +260,14 @@ class BilibiliMonitor:
         self.log_info = log_info
         self.log_warning = log_warning
         self.image_cache = image_cache
+        self.before_check = before_check
+        self.policy = policy or PushPolicy()
+        self._state_error = ""
         self.sessions: list[str] = []
         self.seen_ids: list[str] = []
-        self.pending: dict[str, dict[str, Any]] = {}
+        self.pending_posts: dict[str, PendingBilibiliPost] = {}
+        self._baseline_initialized = False
+        self._check_lock = asyncio.Lock()
         self._session: aiohttp.ClientSession | None = None
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
@@ -265,104 +280,141 @@ class BilibiliMonitor:
     def has_login_cookie(self) -> bool:
         return "SESSDATA=" in self.cookie.upper()
 
+    def _ensure_writable(self) -> None:
+        if self._state_error:
+            raise RuntimeError(f"Bilibili 推送状态受保护，未覆盖原文件: {self._state_error}")
+
     def _load_state(self) -> None:
         try:
-            raw = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            return
-        if not isinstance(raw, dict):
-            return
-        self.sessions = [str(x) for x in raw.get("sessions", []) if str(x).strip()]
-        if str(raw.get("uid") or "") != self.uid:
-            self.seen_ids = []
-            return
-        self.seen_ids = [str(x) for x in raw.get("seen_ids", []) if str(x).strip()][
-            :200
-        ]
-        pending = raw.get("pending", {})
-        if isinstance(pending, dict):
-            self.pending = {
-                str(key): value
-                for key, value in pending.items()
-            }
+            raw, migrate = read_push_state(self.state_path, "pending_posts")
+            self.sessions = normalize_sessions(raw.get("sessions"))
+            if raw and str(raw.get("uid") or "") != self.uid:
+                backup_push_state(self.state_path)
+                return
+            self.seen_ids = normalize_sessions(raw.get("seen_ids"))[:200]
+            self._baseline_initialized = bool(raw.get("baseline_initialized", self.seen_ids))
+            pending = raw.get("pending_posts", [])
+            if "pending" in raw:
+                pending = []
+                for key, row in raw["pending"].items():
+                    if not isinstance(row, dict) or not isinstance(row.get("post"), dict) or row["post"].get("dynamic_id") != key:
+                        raise ValueError("invalid legacy Bilibili entry")
+                    pending.append(row)
+            for row in pending:
+                if not isinstance(row, dict) or not isinstance(row.get("post"), dict) or not isinstance(row.get("sessions"), list):
+                    raise ValueError("invalid pending Bilibili entry")
+                data = row["post"]
+                if (not isinstance(data.get("dynamic_id"), str) or not data["dynamic_id"].strip()
+                    or not isinstance(data.get("author"), str) or not isinstance(data.get("text"), str)
+                    or not isinstance(data.get("image_urls"), list)
+                    or not all(isinstance(url, str) for url in data["image_urls"])):
+                    raise ValueError("invalid pending Bilibili post")
+                targets = [origin for origin in normalize_sessions(row["sessions"]) if origin in self.sessions]
+                if not targets:
+                    continue
+                post = BilibiliPost(data["dynamic_id"], data["author"], data["text"], tuple(data["image_urls"]))
+                item = PendingBilibiliPost(post, targets)
+                item.load_delivery(row, time.time())
+                if post.dynamic_id in self.pending_posts:
+                    raise ValueError("duplicate Bilibili pending ID")
+                self.pending_posts[post.dynamic_id] = item
+            if migrate:
+                backup_push_state(self.state_path)
+                self._save_state()
             self.prune_pending()
+        except Exception as exc:
+            self._state_error = str(exc)
+            self.sessions = []
+            self.pending_posts = {}
+            self.log_warning(f"[HD2] Bilibili state protected; push disabled: {exc}")
 
-    @staticmethod
-    def _pending_post(dynamic_id: str, entry: Any) -> BilibiliPost:
-        if not isinstance(entry, dict) or not isinstance(entry.get("sessions"), list):
-            raise ValueError("invalid pending entry/recipients")
-        raw = entry.get("post")
-        if not isinstance(raw, dict):
-            raise ValueError("invalid pending post")
-        post = BilibiliPost(**raw)
-        if (
-            not isinstance(post.dynamic_id, str)
-            or not post.dynamic_id.strip()
-            or post.dynamic_id != dynamic_id
-            or not isinstance(post.author, str)
-            or not isinstance(post.text, str)
-            or not isinstance(post.image_urls, (list, tuple))
-            or any(not isinstance(url, str) for url in post.image_urls)
-        ):
-            raise ValueError("invalid pending post fields")
-        return post
-
-    def prune_pending(self) -> None:
-        now = time.time()
-        for key, entry in list(self.pending.items()):
-            try:
-                self._pending_post(key, entry)
-            except (TypeError, ValueError) as exc:
-                self.log_warning(f"[HD2] dropped invalid pending Bilibili post: {key}: {exc}")
-                self.pending.pop(key)
-                continue
-            entry["queued_at"] = queued_timestamp(entry.get("queued_at"), now)
-            entry["sessions"][:] = [s for s in entry["sessions"] if s in self.sessions]
-            if not entry["sessions"] or now - entry["queued_at"] >= PENDING_TTL_SECONDS:
-                if entry["sessions"]:
-                    self.log_warning(f"[HD2] dropped expired pending Bilibili post: {key}")
-                self.pending.pop(key)
-        oldest = sorted(self.pending, key=lambda key: self.pending[key]["queued_at"])
-        for key in oldest[:max(0, len(self.pending) - MAX_PENDING_ENTRIES)]:
-            self.log_warning(f"[HD2] dropped oldest pending Bilibili post (retention limit): {key}")
-            self.pending.pop(key)
-        self._save_state()
+    def _remove_invalid_pending(self) -> None:
+        for key, item in list(self.pending_posts.items()):
+            post = item.post if isinstance(item, PendingBilibiliPost) else None
+            valid = (isinstance(post, BilibiliPost) and post.dynamic_id == key
+                     and isinstance(post.author, str) and isinstance(post.text, str)
+                     and isinstance(post.image_urls, (list, tuple))
+                     and all(isinstance(url, str) for url in post.image_urls)
+                     and isinstance(item.sessions, list))
+            if not valid:
+                self.log_warning(f"[HD2] discarded invalid in-memory Bilibili pending record: {key}")
+                self.pending_posts.pop(key, None)
 
     def _save_state(self) -> None:
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        temporary = self.state_path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(
-                {
-                    "uid": self.uid,
-                    "sessions": self.sessions,
-                    "seen_ids": self.seen_ids[:200],
-                    "pending": self.pending,
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-            encoding="utf-8",
-        )
-        temporary.replace(self.state_path)
+        self._ensure_writable()
+        self._remove_invalid_pending()
+        write_json_atomic(self.state_path, {
+            "state_version": 3, "uid": self.uid, "sessions": self.sessions,
+            "seen_ids": self.seen_ids[:200], "baseline_initialized": self._baseline_initialized,
+            "pending_posts": [{"post": {"dynamic_id": item.post.dynamic_id, "author": item.post.author,
+                                        "text": item.post.text, "image_urls": list(item.post.image_urls)},
+                               "sessions": item.sessions, **item.delivery_json()}
+                              for item in self.pending_posts.values()],
+        })
+
+    def prune_pending(self) -> None:
+        self._ensure_writable()
+        self._remove_invalid_pending()
+        now = time.time()
+        removed = {}
+        for key, item in self.pending_posts.items():
+            if not item.sessions or now - item.queued_at >= self.policy.ttl_seconds:
+                removed[key] = "expired/no recipients"
+        remaining = sorted((key for key in self.pending_posts if key not in removed),
+                           key=lambda key: self.pending_posts[key].queued_at)
+        for key in remaining[:max(0, len(remaining) - self.policy.max_entries)]:
+            removed[key] = "retention count limit"
+        if removed:
+            previous = dict(self.pending_posts)
+            for key in removed:
+                self.pending_posts.pop(key, None)
+            try:
+                self._save_state()
+            except OSError:
+                self.pending_posts = previous
+                raise
+            for key, reason in removed.items():
+                self.log_warning(f"[HD2] Bilibili pending discarded: {key} reason={reason}")
 
     def subscribe(self, unified_msg_origin: str) -> bool:
+        self._ensure_writable()
         value = str(unified_msg_origin).strip()
-        if not value or value in self.sessions:
+        if not value or has_group_subscription(self.sessions, value):
             return False
         self.sessions.append(value)
-        self._save_state()
+        try:
+            self._save_state()
+        except OSError:
+            self.sessions.remove(value)
+            raise
         return True
 
     def unsubscribe(self, unified_msg_origin: str) -> bool:
+        self._ensure_writable()
         value = str(unified_msg_origin).strip()
         if value not in self.sessions:
             return False
+        previous_sessions = list(self.sessions)
+        previous_pending = dict(self.pending_posts)
+        previous_delivery = {
+            key: (list(item.sessions), dict(item.retries))
+            for key, item in previous_pending.items()
+        }
         self.sessions.remove(value)
-        for entry in self.pending.values():
-            if value in entry["sessions"]:
-                entry["sessions"].remove(value)
-        self._save_state()
+        for dynamic_id, item in list(self.pending_posts.items()):
+            item.sessions = [origin for origin in item.sessions if origin != value]
+            item.retries.pop(value, None)
+            if not item.sessions:
+                del self.pending_posts[dynamic_id]
+        try:
+            self._save_state()
+        except OSError:
+            self.sessions[:] = previous_sessions
+            self.pending_posts = previous_pending
+            # Preserve the item objects held by an in-flight delivery coroutine.
+            for key, item in previous_pending.items():
+                item.sessions, item.retries = previous_delivery[key]
+            raise
         return True
 
     async def start(self) -> None:
@@ -412,10 +464,16 @@ class BilibiliMonitor:
             sleep_seconds = self.interval
             try:
                 sent = await self.check_once()
-                HEALTH.record_ok(
-                    "bilibili",
-                    detail=f"轮询正常，推送 {sent} 条" if sent else "轮询正常",
-                )
+                if self.pending_posts:
+                    HEALTH.record_fail(
+                        "bilibili",
+                        detail=f"推送 {sent} 条，待补发 {len(self.pending_posts)} 条",
+                    )
+                else:
+                    HEALTH.record_ok(
+                        "bilibili",
+                        detail=f"轮询正常，推送 {sent} 条" if sent else "轮询正常",
+                    )
                 self._risk_warning_logged = False
             except asyncio.CancelledError:
                 raise
@@ -568,78 +626,102 @@ class BilibiliMonitor:
         )
 
     async def check_once(self) -> int:
-        try:
-            posts = await self.fetch_posts()
-        except Exception:
-            # A feed outage must not block retrying already queued posts.
-            await self._deliver_pending()
-            raise
+        async with self._check_lock:
+            if self.before_check is not None:
+                await self.before_check()
+            return await self._check_once()
+
+    async def _check_once(self) -> int:
+        self._ensure_writable()
+        self.prune_pending()
+        # Retry saved content even when the source API is down or the post left its feed.
+        sent = await self._deliver_pending(list(self.pending_posts))
+        posts = await self.fetch_posts()
         current_ids = [post.dynamic_id for post in posts]
-        if not self.seen_ids and not self.pending:
+        if not self._baseline_initialized and not self.seen_ids:
+            self._baseline_initialized = True
             self.seen_ids = current_ids[:200]
             self._save_state()
             self.log_info(
                 f"[HD2] Bilibili monitor baseline initialized: {len(current_ids)}"
             )
-            return 0
+            return sent
 
-        known = set(self.seen_ids)
+        previous_seen, previous_pending = self.seen_ids, dict(self.pending_posts)
+        previous_baseline = self._baseline_initialized
+        self._baseline_initialized = True
+        known = set(self.seen_ids) | set(self.pending_posts)
         new_posts = [post for post in reversed(posts) if post.dynamic_id not in known]
+        queued: list[str] = []
         for post in new_posts:
-            if self.matches(post) and self.sessions and post.dynamic_id not in self.pending:
-                self.pending[post.dynamic_id] = {
-                    "post": asdict(post),
-                    "sessions": list(self.sessions),
-                    "queued_at": time.time(),
-                }
-        # Seen means observed/enqueued; delivery is tracked independently.
+            if (
+                self.matches(post)
+                and self.sessions
+                and post.dynamic_id not in self.pending_posts
+            ):
+                self.pending_posts[post.dynamic_id] = PendingBilibiliPost(
+                    post, list(self.sessions)
+                )
+                queued.append(post.dynamic_id)
+        # seen_ids tracks discovery; pending_posts tracks outstanding recipients.
+        # Persist the whole batch before sending so a restart cannot lose later posts.
         self.seen_ids = list(dict.fromkeys(current_ids + self.seen_ids))[:200]
-        self._save_state()
-        return await self._deliver_pending()
+        try:
+            self._save_state()
+        except OSError:
+            self.seen_ids, self.pending_posts = previous_seen, previous_pending
+            self._baseline_initialized = previous_baseline
+            raise
+        return sent + await self._deliver_pending(queued)
 
-    async def _deliver_pending(self) -> int:
+    async def _deliver_pending(self, dynamic_ids: list[str]) -> int:
         self.prune_pending()
         sent = 0
-        for dynamic_id, entry in list(self.pending.items()):
+        for dynamic_id in dynamic_ids:
+            item = self.pending_posts.get(dynamic_id)
+            if item is None or not any(item.due(origin) for origin in item.sessions):
+                continue
             try:
-                post = self._pending_post(dynamic_id, entry)
-            except (TypeError, ValueError) as exc:
+                paths = await self.download_images(item.post)
+                if len(paths) != len(item.post.image_urls):
+                    raise RuntimeError("Bilibili images incomplete; keeping pending delivery")
+            except Exception as exc:  # noqa: BLE001 - isolate each pending post
                 self.log_warning(
-                    f"[HD2] dropped invalid pending Bilibili post: {dynamic_id}: {exc}"
+                    f"[HD2] Bilibili pending images failed: dynamic={dynamic_id} error={exc}"
                 )
-                self.pending.pop(dynamic_id, None)
+                for origin in item.sessions:
+                    if item.due(origin):
+                        item.failed(origin, self.policy)
                 self._save_state()
                 continue
-            remaining = [s for s in entry["sessions"] if s in self.sessions]
-            entry["sessions"] = remaining
-            if remaining:
-                try:
-                    paths = await self.download_images(post)
-                except Exception as exc:
-                    self.log_warning(f"[HD2] Bilibili pending images failed: {exc}")
+            delivered = False
+            for origin in list(item.sessions):
+                if origin not in self.sessions or origin not in item.sessions or not item.due(origin):
                     continue
-                delivered = False
-                for session in list(remaining):
-                    if session not in remaining or session not in self.sessions:
-                        continue
-                    try:
-                        count = await self.send_post(post, paths, [session])
-                    except Exception as exc:
-                        self.log_warning(
-                            f"[HD2] Bilibili pending push failed: {session}: {exc}"
-                        )
-                        continue
-                    # Legacy callbacks return None on success; current ones return 1.
-                    if count is not None and count <= 0:
-                        continue
-                    if session in remaining:
-                        remaining.remove(session)
+                try:
+                    count = await self.send_post(item.post, paths, [origin])
+                except Exception as exc:  # noqa: BLE001 - isolate each recipient
+                    self.log_warning(
+                        f"[HD2] Bilibili pending push failed: session={origin} "
+                        f"dynamic={dynamic_id} error={exc}"
+                    )
+                    count = 0
+                if not count:
+                    item.failed(origin, self.policy)
                     self._save_state()
-                    delivered = True
-                sent += int(delivered)
-            if not remaining:
-                self.pending.pop(dynamic_id, None)
+                    continue
+                delivered = True
+                item.retries.pop(origin, None)
+                if origin in item.sessions:
+                    item.sessions.remove(origin)
+                if not item.sessions:
+                    self.pending_posts.pop(dynamic_id, None)
+                # Acknowledge each group before attempting the next one.
+                self.seen_ids = list(
+                    dict.fromkeys([dynamic_id] + self.seen_ids)
+                )[:200]
                 self._save_state()
+            sent += int(delivered)
         return sent
 
     def matches(self, post: BilibiliPost) -> bool:

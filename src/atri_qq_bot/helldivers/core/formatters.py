@@ -517,6 +517,17 @@ def format_planet_message(planet: dict[str, Any]) -> str:
             lines.append(f"▎生物群系: {biome}")
         if hazard_names:
             lines.append(f"▎灾害: {', '.join(hazard_names[:5])}")
+        effects = planet.get("planet_effects")
+        if isinstance(effects, list) and effects:
+            from .planet_effects import MAX_DISPLAY_EFFECTS
+
+            lines.extend(["-------------", "▎星球效果"])
+            for effect in effects[:MAX_DISPLAY_EFFECTS]:
+                lines.append(f"· {effect['name']}")
+                if effect.get("description"):
+                    lines.append(str(effect["description"]))
+            if len(effects) > MAX_DISPLAY_EFFECTS:
+                lines.append(f"另有 {len(effects) - MAX_DISPLAY_EFFECTS} 项效果。")
         if event:
             lines.append("-------------")
             lines.append(

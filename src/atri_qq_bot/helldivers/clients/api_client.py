@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 import re
 import time
@@ -522,9 +523,18 @@ class HD2Client:
         published_iso = ""
         try:
             client_time = float(data.get("clientTime")) / 1000
-            time_since_start = float(data.get("timeSinceStart"))
+            war_status = data.get("warStatus")
+            if not isinstance(war_status, dict):
+                raise ValueError("missing war clock")
+            war_time = float(war_status.get("time"))
             published = float(article.get("published"))
-            timestamp = client_time - time_since_start + published
+            if not all(math.isfinite(value) for value in (client_time, war_time, published)):
+                raise ValueError("non-finite clock")
+            if client_time < 1704067200 or not 0 <= published <= war_time:
+                raise ValueError("invalid news clock")
+            timestamp = client_time - war_time + published
+            if timestamp < 1704067200:
+                raise ValueError("news predates supported war")
             published_iso = datetime.fromtimestamp(
                 timestamp, timezone.utc
             ).isoformat().replace("+00:00", "Z")
@@ -572,11 +582,8 @@ class HD2Client:
         return data if isinstance(data, list) else None
 
     async def fetch_space_stations(self) -> Optional[list[dict[str, Any]]]:
-        # v2 优先，失败回退 v1
+        # v1 has been retired. None keeps the last successful CacheService entry.
         data = await self.get_json("/api/v2/space-stations")
-        if isinstance(data, list):
-            return data
-        data = await self.get_json("/api/v1/space-stations")
         return data if isinstance(data, list) else None
 
     async def fetch_global_events(self) -> Optional[list[dict[str, Any]]]:

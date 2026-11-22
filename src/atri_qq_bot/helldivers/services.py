@@ -49,8 +49,9 @@ from .core.formatters import (
     format_wiki_summary,
 )
 from .renderers.global_event_renderer import GlobalEventRenderer
-from .core.glossary import contains_cjk, preapply_glossary, translate_query
+from .core.glossary import canonical_planet_name, contains_cjk, normalize_planet_name, preapply_glossary, translate_query
 from .core.i18n import known_planet_names, lookup_planet_name
+from .core.planet_effects import MAX_DISPLAY_EFFECTS
 from .renderers.major_order_renderer import MajorOrderRenderer
 from .renderers.map_renderer import MapRenderer
 from .clients.remote_image_cache import RemoteImageCache
@@ -603,6 +604,7 @@ class HelldiversService:
             if (
                 cached_text == original
                 and self.drop_untranslated_content
+                and not self._translation_rate_limited()
                 and _has_translatable_english(original)
             ):
                 return ""
@@ -1086,6 +1088,7 @@ class HelldiversService:
             if (
                 cached_text == extract
                 and self.drop_untranslated_content
+                and not self._translation_rate_limited()
                 and _has_translatable_english(extract)
             ):
                 return ""
@@ -1133,9 +1136,7 @@ class HelldiversService:
         """数据库查询（装备 + 敌人）。返回图片路径列表；文案提示时返回 str。"""
         if self.arsenal_client is None:
             return "❌ 数据库功能未启用。"
-        loaded = await self.arsenal_client.ensure_loaded()
-        if not loaded:
-            return "❌ 装备数据加载失败（下载失败且无本地缓存），请稍后重试。"
+        await self.arsenal_client.ensure_loaded()
         # 敌人数据独立加载，失败不影响装备查询
         try:
             await self.arsenal_client.ensure_enemies()
@@ -1148,6 +1149,13 @@ class HelldiversService:
         )
 
         results = self.arsenal_client.search(query)
+        if not results:
+            await self.arsenal_client.wait_for_supplement()
+            results = self.arsenal_client.search(query)
+        if not results and self.arsenal_client._dionatha_task is not None and not self.arsenal_client._dionatha_task.done():
+            return "⏳ 装备目录正在同步，请稍后重试查询。"
+        if not self.arsenal_client.available:
+            return "❌ 暂无可用装备或敌人缓存，上游请求失败，请稍后重试。"
         if not results:
             card = build_arsenal_candidates_card(query, [])
             p = await self._render_card(card)
@@ -1297,6 +1305,12 @@ class HelldiversService:
             space_stations=stations if isinstance(stations, list) else [],
             war=war if isinstance(war, dict) else {},
             global_events=global_events if isinstance(global_events, list) else [],
+            planet_effects=(
+                war_status.get("planetActiveEffects", [])
+                if isinstance(war_status, dict)
+                and isinstance(war_status.get("planetActiveEffects"), list)
+                else []
+            ),
         )
 
     @staticmethod
@@ -1344,6 +1358,7 @@ class HelldiversService:
                 return cached_text
             if (
                 allow_source_fallback
+                or self._translation_rate_limited()
                 or not self.drop_untranslated_content
                 or not _has_translatable_english(text)
             ):
@@ -1613,14 +1628,14 @@ class HelldiversService:
         )
 
     async def _localize_planet_name(
-        self, value: Any, *, include_english: bool = True
+        self, value: Any, *, include_english: bool = True, index: int | None = None
     ) -> str:
         """Prefer an official name; otherwise retain English beside API translation."""
 
         original = " ".join(str(value or "").split())
         if not original:
             return "未知星球"
-        official = lookup_planet_name(original)
+        official = lookup_planet_name(original, index=index)
         if official:
             return official
         if not self.enable_translation or re.search(r"[\u3400-\u9fff]", original):
@@ -1638,19 +1653,25 @@ class HelldiversService:
     ) -> None:
         """Localize the small set of names that a report can actually display."""
 
-        localized: dict[str, str] = {}
+        localized: dict[tuple[int | None, str], str] = {}
         for row in rows:
             planet = row.get("planet") if isinstance(row.get("planet"), dict) else None
+            row_index = planet_index(planet) if planet is not None else planet_index(row)
+            if row_index is None:
+                row_index = planet_index(row)
+            if row_index is None:
+                row_index = planet_index({"index": row.get("planet_index")})
             containers = [row] + ([planet] if planet is not None else [])
             for container in containers:
                 for key in ("name", "planet_name", "planetName"):
                     value = container.get(key)
                     if not isinstance(value, str) or not value.strip():
                         continue
-                    token = value.casefold()
+                    index = row_index
+                    token = (index, value.casefold())
                     if token not in localized:
                         localized[token] = await self._localize_planet_name(
-                            value, include_english=include_english
+                            value, include_english=include_english, index=index
                         )
                     container[key] = localized[token]
 
@@ -1715,15 +1736,35 @@ class HelldiversService:
             self._station_with_planet(state),
             include_actions=False,
         )
-        return format_dss_message(station)
+        entry = await self.cache.get_entry(self.CACHE_SPACE_STATIONS)
+        if entry is None:
+            return "❌ DSS 数据请求失败，当前没有可用缓存。"
+        from datetime import datetime, timezone
+        timestamp = datetime.fromtimestamp(entry.updated_at, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        stale = not await self.cache.is_fresh(self.CACHE_SPACE_STATIONS)
+        note = "旧缓存，上游暂未刷新" if stale else "数据时间"
+        return f"{format_dss_message(station)}\n{note}：{timestamp}"
 
     async def get_dss_image(self) -> list[Path]:
         state = await self._build_war_state()
         station = await self._prepare_dss_station(self._station_with_planet(state))
+        entry = await self.cache.get_entry(self.CACHE_SPACE_STATIONS)
+        if entry is None:
+            card = build_dss_card(None)
+            card.text("上游请求失败，当前没有可用缓存。")
+            path = await self._render_card(card)
+            return [path] if path else []
+        from datetime import datetime, timezone
+        stamp = datetime.fromtimestamp(entry.updated_at, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        stale = not await self.cache.is_fresh(self.CACHE_SPACE_STATIONS)
+        note = f"{'旧缓存' if stale else '数据时间'}：{stamp}"
+        if station is not None:
+            station["_cache_note"] = note
         if self.dss_renderer is not None:
             p = await asyncio.to_thread(self.dss_renderer.render, station)
             return [p] if p else []
         card = build_dss_card(station)
+        card.text(note, muted=True)
         p = await self._render_card(card)
         return [p] if p else []
 
@@ -1863,7 +1904,7 @@ class HelldiversService:
         if not matches:
             return format_planet_candidates(query, [])
         if len(matches) == 1:
-            return format_planet_message(await self._prepare_planet(matches[0]))
+            return format_planet_message(await self._prepare_planet(matches[0], state=state))
         # 精确名唯一
         ql = query.lower()
         exact = [
@@ -1873,13 +1914,17 @@ class HelldiversService:
             or str(planet_index_safe(p)) == query
         ]
         if len(exact) == 1:
-            return format_planet_message(await self._prepare_planet(exact[0]))
+            return format_planet_message(await self._prepare_planet(exact[0], state=state))
         candidates = copy.deepcopy(matches)
         await self._localize_planet_rows(candidates, include_english=False)
         return format_planet_candidates(query, candidates)
 
-    async def _prepare_planet(self, planet: dict[str, Any]) -> dict[str, Any]:
+    async def _prepare_planet(
+        self, planet: dict[str, Any], *, state: WarState | None = None
+    ) -> dict[str, Any]:
         view = copy.deepcopy(planet)
+        if state is not None:
+            view["planet_effects"] = state.effects_for_planet(planet)
         await self._localize_planet_rows([view], include_english=False)
         for field in ("sector", "biomeName"):
             text = view.get(field)
@@ -1906,6 +1951,17 @@ class HelldiversService:
                         hazard[field] = await self._translate_cached_text(
                             "planet_hazard", f"{index}:{field}", text
                         )
+        for effect in view.get("planet_effects", [])[:MAX_DISPLAY_EFFECTS]:
+            for field in ("name", "description"):
+                text = effect.get(f"{field}_zh") or effect.get(field)
+                if isinstance(text, str) and text.strip():
+                    if effect.get(f"{field}_zh") or not _has_translatable_english(text):
+                        effect[field] = text
+                    else:
+                        effect[field] = await self._translate_cached_text(
+                            "planet_effect", f"{effect['id']}:{field}", text,
+                            allow_source_fallback=True,
+                        )
         return view
 
     async def resolve_companion_planet(
@@ -1917,13 +1973,7 @@ class HelldiversService:
             return "❌ 用法: /planet <星球名称、编号、slug 或 Companion 链接>", None, None
 
         # 用户可能直接输入带下划线的 slug（如 super_earth），统一按空格匹配
-        normalized = query.replace("_", " ")
-        query_folded = normalized.casefold()
-        for source_name in known_planet_names():
-            translated = lookup_planet_name(source_name)
-            if translated and translated.casefold() == query_folded:
-                normalized = source_name
-                break
+        normalized = normalize_planet_name(query)
 
         state = await self._build_war_state()
         if not state.planets:
@@ -1940,7 +1990,7 @@ class HelldiversService:
             exact = [
                 planet
                 for planet in matches
-                if planet_name(planet).casefold() == exact_name
+                if normalize_planet_name(planet_name(planet)).casefold() == exact_name
                 or str(planet_index(planet)) == normalized
             ]
             if len(exact) == 1:
@@ -1948,10 +1998,12 @@ class HelldiversService:
         if selected is None:
             return format_planet_candidates(query, matches), None, None
 
-        canonical_name = planet_name(selected).strip()
+        canonical_name = canonical_planet_name(
+            planet_name(selected), index=planet_index(selected)
+        ).strip()
         if not canonical_name:
             return "❌ 星球数据缺少名称，无法打开 Companion 页面。", None, None
-        slug = re.sub(r"\s+", "_", canonical_name.casefold())
+        slug = re.sub(r"\s+", "_", normalize_planet_name(canonical_name).casefold())
         # 2026-08 网站改版：详情路由要求 `_{(index)}` 编号后缀，缺后缀会被
         # 网站弹回首页。index 取战争数据中的星球编号。
         index = planet_index_safe(selected)
@@ -1973,7 +2025,7 @@ class HelldiversService:
             p = await self._render_card(card)
             return "", [p] if p else []
         if len(matches) == 1:
-            card = build_planet_card(await self._prepare_planet(matches[0]))
+            card = build_planet_card(await self._prepare_planet(matches[0], state=state))
             p = await self._render_card(card)
             return "", [p] if p else []
         ql = query.lower()
@@ -1984,7 +2036,7 @@ class HelldiversService:
             or str(planet_index_safe(p)) == query
         ]
         if len(exact) == 1:
-            card = build_planet_card(await self._prepare_planet(exact[0]))
+            card = build_planet_card(await self._prepare_planet(exact[0], state=state))
             p = await self._render_card(card)
             return "", [p] if p else []
         candidates = copy.deepcopy(matches)
