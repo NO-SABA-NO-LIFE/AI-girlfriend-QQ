@@ -69,6 +69,16 @@ def test_completion_without_tool_calls_omits_them():
     assert "tool_calls" not in message
 
 
+def test_missing_finish_reason_is_preserved_not_faked_as_stop():
+    # 流被干净切断、没有任何 finish 信号时，必须保留 None，
+    # 让调用方识别为截断，而不是伪造 "stop" 把半句当成正常结束。
+    state = new_stream_state()
+    apply_sse_event(state, _chunk("哼，这种基础"))
+    completion = completion_from_state(state)
+    assert completion["choices"][0]["finish_reason"] is None
+    assert completion["choices"][0]["message"]["content"] == "哼，这种基础"
+
+
 def test_event_without_choices_is_ignored():
     state = new_stream_state()
     apply_sse_event(state, {"choices": []})

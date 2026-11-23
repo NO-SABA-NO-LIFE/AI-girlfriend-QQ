@@ -838,6 +838,13 @@ class EngineToolsMixin(PersonaEngineMixin):
         import httpx
         import time
 
+        class TruncatedCompletionError(httpx.TransportError):
+            """200 响应但内容被截断：finish=length 或流结束时没有 finish 信号。
+
+            归入 TransportError，使外层 post_once 的现有重试/备用链逻辑像处理
+            超时一样自动重试同模型或切换备用模型，而不是把半句当成成功回复。
+            """
+
         use_stream = bool(getattr(self.config, "chat_stream_enabled", True))
         # 候选列表：主模型始终在前，其后按配置顺序接上整条备用模型链。
         candidates: list[tuple[str, str]] = [
@@ -869,6 +876,29 @@ class EngineToolsMixin(PersonaEngineMixin):
         for candidate in candidates:
             attempt_plan.extend([candidate] * per_model_attempts)
 
+        def guard_completion(
+            completion: dict[str, Any], model: str, *, streamed: bool
+        ) -> dict[str, Any]:
+            """识别 200 响应里的截断，避免把半句当成成功回复。
+
+            显式 finish=length 一定是截断。流式路径下，若流结束时没有任何 finish
+            信号且已经吐出部分内容，说明连接被切断，也按截断处理；空内容则交给
+            外层既有的空回复重试逻辑。非流式路径能拿到完整 JSON，连接中断会直接
+            抛传输错误，因此缺失 finish 时不在此重复判定。
+            """
+
+            choice = (completion.get("choices") or [{}])[0]
+            finish_reason = choice.get("finish_reason")
+            content = str((choice.get("message") or {}).get("content") or "")
+            truncated = finish_reason == "length" or (
+                streamed and finish_reason in (None, "") and bool(content)
+            )
+            if truncated:
+                raise TruncatedCompletionError(
+                    f"Truncated completion from {model}: finish_reason={finish_reason!r}"
+                )
+            return completion
+
         async def send_candidate(
             request_payload: dict[str, Any],
             model: str,
@@ -880,15 +910,17 @@ class EngineToolsMixin(PersonaEngineMixin):
             candidate_payload["model"] = model
             url = f"{base_url}/chat/completions"
             if use_stream:
-                return await self._stream_chat_response(
+                completion = await self._stream_chat_response(
                     client, headers, candidate_payload, url, candidate_timeout
                 )
-            response = await client.post(
-                url, headers=headers, json=candidate_payload,
-                timeout=candidate_timeout,
-            )
-            response.raise_for_status()
-            return response.json()
+            else:
+                response = await client.post(
+                    url, headers=headers, json=candidate_payload,
+                    timeout=candidate_timeout,
+                )
+                response.raise_for_status()
+                completion = response.json()
+            return guard_completion(completion, model, streamed=use_stream)
 
         async def post_once(request_payload: dict[str, Any]) -> dict[str, Any]:
             deadline = time.monotonic() + total_budget

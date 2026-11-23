@@ -55,7 +55,12 @@ def apply_sse_event(state: dict[str, Any], event: dict[str, Any]) -> dict[str, A
 
 
 def completion_from_state(state: dict[str, Any]) -> dict[str, Any]:
-    """把累加状态重组成与非流式 response.json() 同构的 chat completion。"""
+    """把累加状态重组成与非流式 response.json() 同构的 chat completion。
+
+    finish_reason 如实返回：上游明确给出时为 "stop"/"length"/"tool_calls" 等；
+    若整条流没有任何 finish 信号（连接被干净切断），这里保留 None，由调用方
+    判定为截断并重试，而不是伪装成正常的 "stop"。
+    """
 
     tool_calls = [state["tool_calls"][key] for key in sorted(state["tool_calls"])]
     message: dict[str, Any] = {
@@ -72,7 +77,7 @@ def completion_from_state(state: dict[str, Any]) -> dict[str, Any]:
             {
                 "index": 0,
                 "message": message,
-                "finish_reason": state["finish_reason"] or "stop",
+                "finish_reason": state["finish_reason"],
             }
         ],
     }

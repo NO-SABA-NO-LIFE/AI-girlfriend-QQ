@@ -180,3 +180,63 @@ def test_fallback_fields_default_empty():
     engine = _engine()
     assert engine.config.openai_fallback_models == ()
     assert engine.config.openai_fallback_base_url == ""
+
+
+def _truncated_lines(mode: str) -> list[str]:
+    if mode == "length":
+        # 上游明确以 length 结束：内容被 token 上限切断。
+        return [
+            "data: " + json.dumps(
+                {"choices": [{"index": 0, "delta": {"content": "哼，这种基础"},
+                              "finish_reason": None}]}
+            ),
+            "data: " + json.dumps(
+                {"choices": [{"index": 0, "delta": {},
+                              "finish_reason": "length"}]}
+            ),
+            "data: [DONE]",
+        ]
+    # 干净切断：吐出部分内容后流结束，没有任何 finish 信号。
+    return [
+        "data: " + json.dumps(
+            {"choices": [{"index": 0, "delta": {"content": "哼，这种基础"},
+                          "finish_reason": None}]}
+        ),
+        "data: [DONE]",
+    ]
+
+
+def _install_truncating_fake(monkeypatch, *, seen, mode):
+    ok_line = "data: " + json.dumps(
+        {"choices": [{"index": 0, "delta": {"content": "备用回复"},
+                      "finish_reason": "stop"}]}
+    )
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            self.timeout = SimpleNamespace(read=kwargs.get("timeout"))
+
+        def stream(self, method, url, headers, json, timeout=None):
+            model = json["model"]
+            seen["models"].append(model)
+            if model == PRIMARY:
+                return _FakeStream(_truncated_lines(mode))
+            return _FakeStream([ok_line, "data: [DONE]"])
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    return FakeAsyncClient(timeout=25.0)
+
+
+@pytest.mark.parametrize("mode", ["length", "cut"])
+def test_truncated_primary_falls_back_to_next_model(monkeypatch, mode):
+    seen = {"models": []}
+    outer = _install_truncating_fake(monkeypatch, seen=seen, mode=mode)
+    engine = _engine(openai_fallback_models=(FALLBACK1,))
+    payload = {"model": PRIMARY, "messages": [{"role": "user", "content": "x"}]}
+
+    result = asyncio.run(
+        engine._post_chat_completion(outer, {"Authorization": "Bearer k"}, payload)
+    )
+    # 主模型两次截断尝试都不被接受，随后切到备用模型拿到完整回复。
+    assert result["choices"][0]["message"]["content"] == "备用回复"
+    assert seen["models"] == [PRIMARY, PRIMARY, FALLBACK1]
