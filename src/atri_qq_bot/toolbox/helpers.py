@@ -147,6 +147,7 @@ def _is_retryable_vision_resource_error(exc: Exception) -> bool:
             "mem_buffer",
             "out of memory",
             "model runner has unexpectedly stopped",
+            "http 404",
             "http 429",
             "http 500",
             "http 502",

@@ -726,6 +726,73 @@ def test_cloud_vision_fallback_starts_local_ollama_on_demand(
     assert calls[2] == "local:qwen3-vl:4b-instruct"
 
 
+def test_vision_404_is_classified_as_retryable() -> None:
+    import httpx
+    from atri_qq_bot.toolbox.helpers import _is_retryable_vision_resource_error
+
+    request = httpx.Request("POST", "https://vision.example/v1/chat/completions")
+    not_found = httpx.HTTPStatusError(
+        "404", request=request, response=httpx.Response(404, request=request)
+    )
+    # 404（模型名失效/未上线）必须可重试，从而切到备用模型。
+    assert _is_retryable_vision_resource_error(not_found) is True
+    # 无关的普通错误仍不重试，避免把任意异常都当成可切换。
+    assert _is_retryable_vision_resource_error(RuntimeError("other failure")) is False
+
+
+def test_cloud_vision_404_switches_to_fallback_model(monkeypatch, tmp_path) -> None:
+    """云端主模型 404 时必须切到备用模型，而不是静默降级。"""
+    import httpx
+    from PIL import Image
+
+    source = io.BytesIO()
+    Image.new("RGB", (64, 64), "white").save(source, format="PNG")
+    config = replace(
+        _config(tmp_path),
+        toolbox_vision_enabled=True,
+        toolbox_vision_model="dead-vision",
+        toolbox_vision_fallback_model="backup-vision",
+        toolbox_vision_base_url="https://vision.example.invalid/v1",
+    )
+    analyzer = ToolAnalyzer(config)
+    analyzer.vision_retry_count = 1
+    seen_models: list[str] = []
+
+    async def fake_openai(encoded, mimes, system_prompt, user_prompt,
+                          *, model=None, base_url=None):
+        seen_models.append(model)
+        if model == "dead-vision":
+            request = httpx.Request("POST", "https://x/v1/chat/completions")
+            raise httpx.HTTPStatusError(
+                "404", request=request,
+                response=httpx.Response(404, request=request),
+            )
+        return _VisionModelResponse(
+            "直接回答：备用视觉成功；图中文字：无明显文字；人物/主体：测试卡片；"
+            "身份/出处：未确认；表情/情绪：中性；表达含义/社交意图：展示测试；"
+            "依据：画面；置信度：高；需要联网核验：否；检索关键词：",
+            {"provider": "openai-compatible"},
+        )
+
+    async def no_op(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        analyzer, "_analyze_image_with_openai_compatible", fake_openai
+    )
+    monkeypatch.setattr(
+        analyzer, "_release_vision_model_after_failure", no_op
+    )
+
+    text, limitation = asyncio.run(
+        analyzer._analyze_image_with_vision(source.getvalue(), "404-test.png")
+    )
+
+    assert "备用视觉成功" in text
+    assert limitation == ""
+    assert seen_models == ["dead-vision", "backup-vision"]
+
+
 def test_ollama_start_accepts_only_api_ready_service(monkeypatch) -> None:
     from atri_qq_bot.runtime import services
 
