@@ -240,3 +240,97 @@ def test_truncated_primary_falls_back_to_next_model(monkeypatch, mode):
     # 主模型两次截断尝试都不被接受，随后切到备用模型拿到完整回复。
     assert result["choices"][0]["message"]["content"] == "备用回复"
     assert seen["models"] == [PRIMARY, PRIMARY, FALLBACK1]
+
+
+def _malformed_streaming_tool_lines() -> list[str]:
+    # 复刻网关流式 bug：空参 query_helldivers + 未请求过的 "tool" 包装。
+    def chunk(tool_calls=None, finish=None):
+        delta = {"tool_calls": tool_calls} if tool_calls is not None else {}
+        return "data: " + json.dumps(
+            {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+        )
+
+    return [
+        chunk([{"index": 0, "id": "c0", "type": "function",
+                "function": {"name": "query_helldivers", "arguments": ""}}]),
+        chunk([{"index": 0, "function": {"arguments": "{}"}}]),
+        chunk([{"index": 1, "id": "c1", "type": "function",
+                "function": {"name": "tool", "arguments": ""}}]),
+        chunk([{"index": 1, "function": {
+            "arguments": json.dumps({"arguments": json.dumps(
+                {"command": "hd2data", "argument": "扫荡者"})})}}]),
+        chunk(finish="tool_calls"),
+        "data: [DONE]",
+    ]
+
+
+def test_malformed_streaming_tool_call_retries_non_stream(monkeypatch):
+    from atri_qq_bot.llm_tools.schema import _hd2_query_schema
+
+    seen = {"stream": 0, "post": 0}
+
+    class _FakeResponse:
+        def __init__(self, data):
+            self._data = data
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._data
+
+    correct = {
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "c0", "type": "function",
+                            "function": {
+                                "name": "query_helldivers",
+                                "arguments": json.dumps(
+                                    {"command": "hd2data", "argument": "扫荡者"}
+                                ),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            self.timeout = SimpleNamespace(read=kwargs.get("timeout"))
+
+        def stream(self, method, url, headers, json, timeout=None):
+            seen["stream"] += 1
+            return _FakeStream(_malformed_streaming_tool_lines())
+
+        async def post(self, url, headers, json, timeout=None):
+            seen["post"] += 1
+            # 兜底必须显式关闭流式，重发同一请求。
+            assert json.get("stream") is False
+            return _FakeResponse(correct)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    outer = FakeAsyncClient(timeout=25.0)
+    engine = _engine()
+    payload = {
+        "model": PRIMARY,
+        "messages": [{"role": "user", "content": "帮我查扫荡者"}],
+        "tools": [_hd2_query_schema()],
+    }
+
+    result = asyncio.run(
+        engine._post_chat_completion(outer, {"Authorization": "Bearer k"}, payload)
+    )
+    call = result["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "query_helldivers"
+    assert json.loads(call["function"]["arguments"]) == {
+        "command": "hd2data", "argument": "扫荡者"
+    }
+    # 一次流式尝试被判定损坏，随后一次非流式重发成功。
+    assert seen == {"stream": 1, "post": 1}

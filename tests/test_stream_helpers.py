@@ -5,6 +5,7 @@ from atri_qq_bot.persona.stream_helpers import (
     apply_sse_event,
     completion_from_state,
     new_stream_state,
+    tool_calls_match_schema,
 )
 
 
@@ -84,6 +85,48 @@ def test_event_without_choices_is_ignored():
     apply_sse_event(state, {"choices": []})
     apply_sse_event(state, {})
     assert state == new_stream_state()
+
+
+def _completion_with_calls(calls):
+    return {"choices": [{"message": {"content": "", "tool_calls": calls}}]}
+
+
+def test_tool_call_match_passes_without_tool_calls():
+    assert tool_calls_match_schema({"choices": [{"message": {"content": "嗨"}}]},
+                                   ["query_helldivers"]) is True
+
+
+def test_tool_call_match_passes_for_known_names_and_valid_args():
+    completion = _completion_with_calls([
+        {"function": {"name": "query_helldivers",
+                      "arguments": json.dumps({"command": "hd2data",
+                                               "argument": "扫荡者"})}}
+    ])
+    assert tool_calls_match_schema(completion, ["query_helldivers"]) is True
+
+
+def test_tool_call_match_rejects_unknown_function_name():
+    # 网关流式 bug：空参的真实函数 + 一个未请求过的通用包装函数。
+    completion = _completion_with_calls([
+        {"function": {"name": "query_helldivers", "arguments": "{}"}},
+        {"function": {"name": "tool",
+                      "arguments": json.dumps({"arguments": "{}"})}},
+    ])
+    assert tool_calls_match_schema(completion, ["query_helldivers"]) is False
+
+
+def test_tool_call_match_rejects_unparseable_arguments():
+    completion = _completion_with_calls([
+        {"function": {"name": "query_helldivers", "arguments": "{not json"}},
+    ])
+    assert tool_calls_match_schema(completion, ["query_helldivers"]) is False
+
+
+def test_tool_call_match_rejects_non_object_arguments():
+    completion = _completion_with_calls([
+        {"function": {"name": "query_helldivers", "arguments": json.dumps([1, 2])}},
+    ])
+    assert tool_calls_match_schema(completion, ["query_helldivers"]) is False
 
 
 class _FakeStream:

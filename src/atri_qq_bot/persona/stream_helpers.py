@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
@@ -81,3 +82,36 @@ def completion_from_state(state: dict[str, Any]) -> dict[str, Any]:
             }
         ],
     }
+
+
+def tool_calls_match_schema(
+    completion: dict[str, Any], valid_tool_names: Any
+) -> bool:
+    """校验流式重组出的工具调用是否都对应本轮实际下发的函数。
+
+    没有工具调用时直接通过。否则每个工具调用都必须：函数名出现在
+    ``valid_tool_names`` 中，且非空 arguments 能解析成 JSON 对象。网关在
+    流式序列化异常时可能吐出我们从未请求的函数名（例如把一次函数调用拆成
+    空参调用加一个通用包装），此时返回 False，由调用方改用非流式重发，
+    而不是把坏调用喂给模型或静默降级。
+    """
+
+    choice = (completion.get("choices") or [{}])[0]
+    tool_calls = ((choice.get("message") or {}).get("tool_calls")) or []
+    if not tool_calls:
+        return True
+    allowed = {str(name) for name in (valid_tool_names or [])}
+    for call in tool_calls:
+        function = call.get("function") or {}
+        name = str(function.get("name") or "")
+        if name not in allowed:
+            return False
+        raw_arguments = function.get("arguments")
+        if isinstance(raw_arguments, str) and raw_arguments.strip():
+            try:
+                parsed = json.loads(raw_arguments)
+            except ValueError:
+                return False
+            if not isinstance(parsed, dict):
+                return False
+    return True

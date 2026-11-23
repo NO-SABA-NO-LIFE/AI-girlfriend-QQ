@@ -5,6 +5,7 @@ from .stream_helpers import (
     apply_sse_event,
     completion_from_state,
     new_stream_state,
+    tool_calls_match_schema,
 )
 
 
@@ -909,10 +910,28 @@ class EngineToolsMixin(PersonaEngineMixin):
             candidate_payload = dict(request_payload)
             candidate_payload["model"] = model
             url = f"{base_url}/chat/completions"
+            streamed = use_stream
             if use_stream:
                 completion = await self._stream_chat_response(
                     client, headers, candidate_payload, url, candidate_timeout
                 )
+                valid_names = [
+                    str(schema.get("function", {}).get("name") or "")
+                    for schema in candidate_payload.get("tools") or []
+                ]
+                if not tool_calls_match_schema(completion, valid_names):
+                    # 网关把流式工具调用错误序列化（吐出未请求的函数名或坏
+                    # 参数）。非流式工具调用经实测可靠，改用非流式重发同一请求，
+                    # 避免坏调用在 agent 循环里空转，也不静默降级。
+                    fallback_payload = dict(candidate_payload)
+                    fallback_payload["stream"] = False
+                    response = await client.post(
+                        url, headers=headers, json=fallback_payload,
+                        timeout=candidate_timeout,
+                    )
+                    response.raise_for_status()
+                    completion = response.json()
+                    streamed = False
             else:
                 response = await client.post(
                     url, headers=headers, json=candidate_payload,
@@ -920,7 +939,7 @@ class EngineToolsMixin(PersonaEngineMixin):
                 )
                 response.raise_for_status()
                 completion = response.json()
-            return guard_completion(completion, model, streamed=use_stream)
+            return guard_completion(completion, model, streamed=streamed)
 
         async def post_once(request_payload: dict[str, Any]) -> dict[str, Any]:
             deadline = time.monotonic() + total_budget
