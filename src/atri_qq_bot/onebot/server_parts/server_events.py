@@ -29,6 +29,7 @@ from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
     forced_event_block_reason,
     object_requires_mention,
 )
+from ...llm_tools.hd2_intent import detect_hd2_command_hint
 
 # 运行时会由 _sync_server_globals 注入 server.py 的同名 logger；这里显式声明一份，
 # 便于模块被单独导入（单元测试）时也能正常记录。
@@ -718,6 +719,18 @@ class OneBotEventMixin(OneBotServerMixin):
             and is_bot_mentioned(event, self.config.bot_qq, plain_text)
         )
 
+        extra_system = self._reply_strategy_system_prompt(strategy_limits)
+        if hd2_nl_allowed:
+            # 确定性命令提示：用户提到强命令词/缩写时，明确告诉模型对应的规范
+            # 命令，提高 NL 召回；只提示不强制，模型仍结合上下文判断是否调用。
+            hinted_command = detect_hd2_command_hint(plain_text)
+            if hinted_command:
+                extra_system = (
+                    f"{extra_system}\n用户提到了“{hinted_command}”，这对应 query_helldivers"
+                    f" 工具的 command=\"{hinted_command}\"。若确认是在询问《Helldivers 2》"
+                    "情报，请直接调用该工具；与游戏无关则正常对话。"
+                )
+
         try:
             reply_text = await self.reply_engine.reply(
                 conversation_id,
@@ -727,7 +740,7 @@ class OneBotEventMixin(OneBotServerMixin):
                 observed=True,
                 tool_context=tool_context,
                 reply_focus=group_reply_focus,
-                extra_system=self._reply_strategy_system_prompt(strategy_limits),
+                extra_system=extra_system,
                 hd2_nl_allowed=hd2_nl_allowed,
             )
         except Exception as exc:

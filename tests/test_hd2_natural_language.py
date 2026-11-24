@@ -23,6 +23,8 @@ from atri_qq_bot.llm_tools.hd2_intent import (
     HD2_CANONICAL_COMMANDS,
     HD2IntentError,
     build_hd2_slash,
+    detect_hd2_command_hint,
+    has_hd2_capability_contradiction,
     normalize_hd2_arguments,
 )
 from atri_qq_bot.llm_tools.schema import available_tool_schemas
@@ -83,6 +85,40 @@ def test_build_hd2_slash_with_and_without_argument() -> None:
 def test_canonical_commands_count_and_unique() -> None:
     assert len(HD2_CANONICAL_COMMANDS) == 22
     assert len(set(HD2_CANONICAL_COMMANDS)) == 22
+
+
+# ---------------------------------------------------------------------------
+# 1b. 矛盾文本检测与命令提示
+# ---------------------------------------------------------------------------
+
+
+def test_capability_contradiction_detects_incapability_claims() -> None:
+    assert has_hd2_capability_contradiction("我手头又没连着面板，查不到 DSS 在哪")
+    assert has_hd2_capability_contradiction("这个我做不到哦")
+    assert has_hd2_capability_contradiction("无法连接实时数据")
+
+
+def test_capability_contradiction_ignores_normal_guide() -> None:
+    assert not has_hd2_capability_contradiction("卡片来啦，自己看一眼吧")
+    assert not has_hd2_capability_contradiction("")
+
+
+def test_detect_hint_maps_english_abbreviation_with_word_boundary() -> None:
+    assert detect_hd2_command_hint("看看 dss 的状态") == "dss"
+    assert detect_hd2_command_hint("DSS now") == "dss"
+    # 词边界：dss 不应命中包含它的更长单词。
+    assert detect_hd2_command_hint("discuss this") is None
+
+
+def test_detect_hint_maps_chinese_aliases_with_specific_first() -> None:
+    assert detect_hd2_command_hint("民主空间站现在什么情况") == "dss"
+    assert detect_hd2_command_hint("帮我看看战况总览") == "dashboard"
+    assert detect_hd2_command_hint("军需簿里有啥") == "hd2data"
+
+
+def test_detect_hint_returns_none_for_unrelated_text() -> None:
+    assert detect_hd2_command_hint("今天天气真好") is None
+    assert detect_hd2_command_hint("") is None
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +257,95 @@ def test_engine_reports_executor_exception() -> None:
         )
     )
     assert "获取失败" in result
+
+
+def test_contradiction_text_after_ready_card_is_rejected(monkeypatch) -> None:
+    import httpx
+
+    posts: list[dict[str, Any]] = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, Any]) -> None:
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return self._payload
+
+    def _tool_call_response() -> FakeResponse:
+        return FakeResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-hd2",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "query_helldivers",
+                                        "arguments": json.dumps({"command": "dss"}),
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+        )
+
+    def _text_response(text: str) -> FakeResponse:
+        return FakeResponse(
+            {
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": text},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+        )
+
+    class FakeAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(
+            self, url: str, headers: dict[str, str], json: dict[str, Any],
+            timeout: Any = None,
+        ) -> FakeResponse:
+            posts.append(json)
+            if len(posts) == 1:
+                return _tool_call_response()
+            if len(posts) == 2:
+                return _text_response("查不到 DSS 现在停在哪")
+            return _text_response("卡片来啦，自己看一眼")
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    engine = _engine()
+
+    async def executor(*_: Any) -> str:
+        return "Helldivers 情报已就绪，会随本轮回复一起发出。"
+
+    engine.set_hd2_tool_executor(executor)
+    reply = asyncio.run(
+        engine._reply_with_api("private:1", "看看 dss 的状态", None)
+    )
+
+    # 第 2 次的"查不到"被拒，第 3 次的正确引导才作为最终回复。
+    assert reply == "卡片来啦，自己看一眼"
+    assert len(posts) == 3
 
 
 # ---------------------------------------------------------------------------

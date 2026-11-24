@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import re
+
 # 22 个功能各自的规范命令词。顺序与 help_text 的分组大致对应，便于人工核对。
 # 每个字符串都必须是 HelldiversBridge._COMMANDS 中真实存在的 key。
 HD2_CANONICAL_COMMANDS: tuple[str, ...] = (
@@ -102,3 +104,80 @@ def build_hd2_slash(command: str, argument: str = "") -> str:
     if argument:
         return f"/{command} {argument}"
     return f"/{command}"
+
+
+# 成功发卡后，最终文本若仍声称查不到/做不到，即与已就绪的卡片自相矛盾。
+# 仅在本轮确实有成功的 HD2 卡片时才据此判定，避免误伤普通闲聊。
+_HD2_INCAPABILITY_MARKERS: tuple[str, ...] = (
+    "查不到", "查不了", "找不到", "做不到", "没法", "无法",
+    "连不上", "没连", "未连接", "没连着", "不能查", "手头又没",
+)
+
+
+def has_hd2_capability_contradiction(text: str) -> bool:
+    """成功卡片已就绪时，文本却声称无法查询，返回 True。"""
+    normalized = re.sub(r"\s+", "", str(text or ""))
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in _HD2_INCAPABILITY_MARKERS)
+
+
+# 自然语句里的强命令词 -> 规范命令。先长后短，确保更具体的词优先命中。
+# 用于在允许的轮次注入确定性提示，提高模型对缩写/别名的召回；提示不强制
+# 调用，模型仍结合上下文判断，避免普通聊天被误触发。
+_HD2_KEYWORD_HINTS: tuple[tuple[str, str], ...] = (
+    ("民主空间站", "dss"),
+    ("空间站", "dss"),
+    ("dss", "dss"),
+    ("战况总览", "dashboard"),
+    ("总览", "dashboard"),
+    ("dashboard", "dashboard"),
+    ("最高命令", "order"),
+    ("major_order", "order"),
+    ("order", "order"),
+    ("全球事件", "global_events"),
+    ("global_events", "global_events"),
+    ("军需簿", "hd2data"),
+    ("武器库", "hd2data"),
+    ("数据库", "hd2data"),
+    ("hd2data", "hd2data"),
+    ("银河快报", "银河快报"),
+    ("galaxy_news", "银河快报"),
+    ("战线", "warfront"),
+    ("warfront", "warfront"),
+    ("维基", "wiki"),
+    ("百科", "wiki"),
+    ("wiki", "wiki"),
+    ("地图", "map"),
+    ("map", "map"),
+    ("星球", "planet"),
+    ("planet", "planet"),
+    ("steam", "steam"),
+    ("companion", "companion"),
+    ("刷新缓存", "hd2refresh"),
+    ("hd2refresh", "hd2refresh"),
+    ("自检", "hd2ping"),
+    ("诊断", "hd2ping"),
+    ("hd2ping", "hd2ping"),
+    ("hd2stats", "hd2stats"),
+)
+
+_ASCII_TOKEN_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+def detect_hd2_command_hint(text: str) -> str | None:
+    """从自然语句里识别强命令词，返回规范命令，无可靠命中返回 None。
+
+    ASCII 词按词边界匹配（避免 dss 命中包含它的更长单词），中文按子串匹配；
+    关键词表已按先长后短排列，命中第一个即返回。
+    """
+    normalized = str(text or "").lower()
+    if not normalized.strip():
+        return None
+    for keyword, command in _HD2_KEYWORD_HINTS:
+        if _ASCII_TOKEN_RE.match(keyword):
+            if re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", normalized):
+                return command
+        elif keyword in normalized:
+            return command
+    return None

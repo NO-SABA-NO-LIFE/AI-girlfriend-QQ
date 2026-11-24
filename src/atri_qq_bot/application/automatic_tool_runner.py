@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .contracts import AgentRunResult, ToolReceipt
+from ..llm_tools.hd2_intent import has_hd2_capability_contradiction
 from ..llm_tools.registry import ToolRegistry
 from ..llm_tools.tool_loop import append_tool_results, tool_calls_from_message
 
@@ -83,6 +84,43 @@ class AutomaticToolRunner:
             )
 
         content = self._normalize_reply(str(message.get("content") or "")).strip()
+        # 成功的 HD2 卡片已就绪时，最终文本若声称查不到/做不到，属于自相矛盾：
+        # 带纠正回执重新请求，直到模型给出一致引导或达到上限，避免把"做不到"
+        # 和已就绪的卡片一起发给用户。
+        hd2_card_ready = any(
+            receipt.ok and receipt.name == "query_helldivers" for receipt in receipts
+        )
+        correction_attempts = 0
+        while (
+            hd2_card_ready
+            and has_hd2_capability_contradiction(content)
+            and correction_attempts < 2
+        ):
+            messages.extend(
+                [
+                    {"role": "assistant", "content": content},
+                    {
+                        "role": "system",
+                        "content": (
+                            "Helldivers 情报卡片已经就绪，会随本轮回复发出。"
+                            "上一条却说查不到或做不到，自相矛盾，不能发送。"
+                            "请立即用一句简短自然的话引导用户查看卡片（可带情绪），"
+                            "不要复述数据，也不要说自己做不到。"
+                        ),
+                    },
+                ]
+            )
+            correction_payload = dict(payload)
+            correction_payload["messages"] = messages
+            correction_payload.pop("tools", None)
+            correction_payload.pop("tool_choice", None)
+            message = self._message_from_response(
+                await self._request_model(correction_payload)
+            )
+            content = self._normalize_reply(
+                str(message.get("content") or "")
+            ).strip()
+            correction_attempts += 1
         return AgentRunResult(
             reply_text=content[:1200],
             tool_receipts=tuple(receipts),
