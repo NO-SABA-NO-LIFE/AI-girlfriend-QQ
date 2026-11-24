@@ -910,8 +910,20 @@ class EngineToolsMixin(PersonaEngineMixin):
             candidate_payload = dict(request_payload)
             candidate_payload["model"] = model
             url = f"{base_url}/chat/completions"
-            streamed = use_stream
-            if use_stream:
+            # 网关流式路径会把工具调用错误序列化（实测在 query_helldivers 上稳定
+            # 复现），而工具调用是短结构化 JSON、流式也没有逐字送达收益，因此本轮
+            # 一旦提供 HD2 查询工具（私聊直接 / 群里被 @），决策请求直接走非流式，
+            # 避免"先坏一次再补发"的双倍延迟。其余工具（时间/天气/联网等）与纯文本
+            # 仍保持流式，兼顾长回复的连接健壮性。下面的流式校验兜底继续保留，作为
+            # 其它工具或异常情况下的安全网。
+            has_hd2_tool = any(
+                str(schema.get("function", {}).get("name") or "")
+                == "query_helldivers"
+                for schema in candidate_payload.get("tools") or []
+            )
+            should_stream = use_stream and not has_hd2_tool
+            streamed = should_stream
+            if should_stream:
                 completion = await self._stream_chat_response(
                     client, headers, candidate_payload, url, candidate_timeout
                 )

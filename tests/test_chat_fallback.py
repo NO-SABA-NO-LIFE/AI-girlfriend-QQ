@@ -264,22 +264,9 @@ def _malformed_streaming_tool_lines() -> list[str]:
     ]
 
 
-def test_malformed_streaming_tool_call_retries_non_stream(monkeypatch):
-    from atri_qq_bot.llm_tools.schema import _hd2_query_schema
-
-    seen = {"stream": 0, "post": 0}
-
-    class _FakeResponse:
-        def __init__(self, data):
-            self._data = data
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self._data
-
-    correct = {
+def _correct_hd2_tool_completion() -> dict:
+    # 非流式路径下网关返回的、结构正确的 query_helldivers 工具调用。
+    return {
         "choices": [
             {
                 "message": {
@@ -301,19 +288,36 @@ def test_malformed_streaming_tool_call_retries_non_stream(monkeypatch):
         ]
     }
 
+
+class _FakeResponse:
+    def __init__(self, data):
+        self._data = data
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._data
+
+
+def test_tool_bearing_request_uses_non_stream_directly(monkeypatch):
+    from atri_qq_bot.llm_tools.schema import _hd2_query_schema
+
+    seen = {"stream": 0, "post": 0}
+
     class FakeAsyncClient:
         def __init__(self, *args, **kwargs):
             self.timeout = SimpleNamespace(read=kwargs.get("timeout"))
 
-        def stream(self, method, url, headers, json, timeout=None):
-            seen["stream"] += 1
-            return _FakeStream(_malformed_streaming_tool_lines())
+        def stream(self, *args, **kwargs):
+            # 带工具的请求必须直接非流式，绝不进入流式路径再等失败。
+            raise AssertionError("tool-bearing request must not stream")
 
         async def post(self, url, headers, json, timeout=None):
             seen["post"] += 1
-            # 兜底必须显式关闭流式，重发同一请求。
-            assert json.get("stream") is False
-            return _FakeResponse(correct)
+            # 直接非流式：不能带 stream=True。
+            assert json.get("stream") is not True
+            return _FakeResponse(_correct_hd2_tool_completion())
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
     outer = FakeAsyncClient(timeout=25.0)
@@ -332,5 +336,44 @@ def test_malformed_streaming_tool_call_retries_non_stream(monkeypatch):
     assert json.loads(call["function"]["arguments"]) == {
         "command": "hd2data", "argument": "扫荡者"
     }
-    # 一次流式尝试被判定损坏，随后一次非流式重发成功。
+    # 没有任何流式尝试，一次非流式直接成功，省掉双倍往返。
+    assert seen == {"stream": 0, "post": 1}
+
+
+def test_unsolicited_streaming_tool_call_retries_non_stream(monkeypatch):
+    seen = {"stream": 0, "post": 0}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            self.timeout = SimpleNamespace(read=kwargs.get("timeout"))
+
+        def stream(self, method, url, headers, json, timeout=None):
+            seen["stream"] += 1
+            return _FakeStream(_malformed_streaming_tool_lines())
+
+        async def post(self, url, headers, json, timeout=None):
+            seen["post"] += 1
+            # 兜底必须显式关闭流式，重发同一请求。
+            assert json.get("stream") is False
+            return _FakeResponse(_correct_hd2_tool_completion())
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    outer = FakeAsyncClient(timeout=25.0)
+    engine = _engine()
+    # 本轮并未下发 tools（纯文本请求），网关却在流式里塞回未请求的工具调用：
+    # valid_names 为空，校验不通过，触发非流式兜底。
+    payload = {
+        "model": PRIMARY,
+        "messages": [{"role": "user", "content": "帮我查扫荡者"}],
+    }
+
+    result = asyncio.run(
+        engine._post_chat_completion(outer, {"Authorization": "Bearer k"}, payload)
+    )
+    call = result["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "query_helldivers"
+    assert json.loads(call["function"]["arguments"]) == {
+        "command": "hd2data", "argument": "扫荡者"
+    }
+    # 一次流式（未请求工具却返回工具调用）被判定损坏，随后一次非流式重发成功。
     assert seen == {"stream": 1, "post": 1}
