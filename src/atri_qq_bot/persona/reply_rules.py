@@ -620,6 +620,26 @@ def _strip_relative_time_tags(text: str) -> str:
     return cleaned
 
 
+def _has_substantive_content(text: str) -> bool:
+    """判断回复是否含真正的对话内容，而非只有 @称呼/括号元数据/标点。
+
+    模型偶发生成“@某某 (steam好友码:…) [N分钟前]。”这类元数据式空回复。依次
+    剥掉圆括号片段、方括号片段、@提及，再去掉标点和空白后，若没有任何实质字符
+    即判定无内容。单个语气词（如“哼”）算实质内容，不会误判。
+    """
+
+    cleaned = str(text or "")
+    # 去掉圆括号及其内部内容（如 steam 好友码、头衔），兼容中英文括号。
+    cleaned = re.sub(r"（[^（）]*）|\([^()]*\)", "", cleaned)
+    # 去掉方括号/方头括号片段（时间标签等）。
+    cleaned = re.sub(r"\[[^\[\]]*\]|【[^【】]*】", "", cleaned)
+    # 去掉 @ 提及：@ 后到空格或标点为止的称呼。
+    cleaned = re.sub(r"@[^\s@，。！？；：、（）()\[\]【】]+", "", cleaned)
+    # 只保留文字（中文等 \w 字符），忽略标点与空白。
+    cleaned = re.sub(r"[\s\W_]+", "", cleaned, flags=re.UNICODE)
+    return bool(cleaned)
+
+
 def _normalize_reply(text: str) -> str:
     text = text.strip()
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)

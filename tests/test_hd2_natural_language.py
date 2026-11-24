@@ -348,6 +348,58 @@ def test_contradiction_text_after_ready_card_is_rejected(monkeypatch) -> None:
     assert len(posts) == 3
 
 
+def test_metadata_only_reply_is_regenerated_with_real_content(monkeypatch) -> None:
+    import httpx
+
+    posts: list[dict[str, Any]] = []
+
+    class FakeResponse:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": self._text},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(
+            self, url: str, headers: dict[str, str], json: dict[str, Any],
+            timeout: Any = None,
+        ) -> FakeResponse:
+            posts.append(json)
+            # 第 1 次：只有 @称呼/括号/时间标签的空壳回复；第 2 次：真正的问候。
+            if len(posts) == 1:
+                return FakeResponse("@天心 (steam好友码:46109848) [27分钟前]。")
+            return FakeResponse("早呀，今天也要元气满满")
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    engine = _engine()
+    # 空内容的重试发生在 guarded_api 层（而非 runner 内部），故驱动该方法。
+    reply = asyncio.run(engine._reply_with_guarded_api("private:1", "早呀", None))
+
+    # 第 1 次空壳回复被拒，第 2 次重新生成出真实问候。
+    assert reply == "早呀，今天也要元气满满"
+    assert len(posts) == 2
+
+
 # ---------------------------------------------------------------------------
 # 4. server 执行器
 # ---------------------------------------------------------------------------

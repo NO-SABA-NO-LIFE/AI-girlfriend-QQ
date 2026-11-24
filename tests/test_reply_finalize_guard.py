@@ -86,3 +86,20 @@ def test_non_time_brackets_are_preserved() -> None:
     # 不是相对时间标签的方括号（编号/索引等）必须原样保留，不能误伤。
     text = "战线排名：[3] 某星球，注意 [DONE] 标记。"
     assert reply_rules._strip_relative_time_tags(text) == text
+
+
+def test_metadata_only_reply_has_no_substantive_content() -> None:
+    # 剥掉 @称呼、圆括号、时间标签和标点后没有任何实质字符 → 空回复。
+    assert reply_rules._has_substantive_content(
+        "@天心 (steam好友码:46109848) [27分钟前]。"
+    ) is False
+
+
+def test_real_greeting_has_substantive_content() -> None:
+    cases = (
+        "早上好呀！",
+        "@天心 早呀，今天也精神满满",
+        "哼。",  # 单个语气词也算实质内容，不能误判。
+    )
+    for text in cases:
+        assert reply_rules._has_substantive_content(text) is True

@@ -1112,6 +1112,12 @@ class EngineToolsMixin(PersonaEngineMixin):
             retry_system = extra_system
             if attempt:
                 parts = [extra_system, LANGUAGE_RETRY_PROMPT]
+                if last_reply and not _has_substantive_content(last_reply):
+                    # 上一条非空但只有 @称呼/括号/时间标签，没有实际内容，给明确纠正。
+                    parts.append(
+                        "上一条只有 @称呼、括号或时间标签，没有实际内容。请直接给出真正的"
+                        "中文回复，不要输出 [N分钟前] 这类时间标签，也不要只复述对方名字。"
+                    )
                 if last_reply:
                     parts.append(f"不合格回复：{_shorten(last_reply, 160)}")
                 retry_system = "\n\n".join(part for part in parts if part)
@@ -1141,7 +1147,11 @@ class EngineToolsMixin(PersonaEngineMixin):
                 hd2_nl_allowed=hd2_nl_allowed,
             )
             last_reply = reply
-            if reply and not has_illegal_language_or_garbage(reply):
+            if (
+                reply
+                and _has_substantive_content(reply)
+                and not has_illegal_language_or_garbage(reply)
+            ):
                 return reply
         raise RuntimeError("模型连续 3 次返回空内容、乱码或异常语言")
 
