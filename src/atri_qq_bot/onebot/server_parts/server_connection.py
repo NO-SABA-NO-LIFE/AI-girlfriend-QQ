@@ -406,6 +406,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
             build_hd2_slash,
             detect_hd2_redisplay_hint,
             detect_hd2_refresh_hint,
+            hd2_entity_label,
             normalize_hd2_entity,
         )
 
@@ -420,6 +421,9 @@ class OneBotConnectionMixin(OneBotServerMixin):
             # 也不能拿几分钟前那张图糊弄“我要新的”。模型显式说了 auto 就听它的。
             wants_latest = True
         entity = normalize_hd2_entity(command, argument)
+        # 回执里带上规范阵营名：模型看不到图片内容，得靠这句话才知道查的是哪条战线。
+        label = hd2_entity_label(command, entity)
+        label_note = f"（阵营：{label}）" if label else ""
         store = getattr(self, "_hd2_intel_cache", None)
         if not isinstance(store, dict):
             store = {}
@@ -441,7 +445,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
                 )
                 if same_request:
                     return (
-                        "用户引用的就是你自己刚发出的这份情报图，内容在他眼前。"
+                        f"用户引用的就是你自己刚发出的这份情报图{label_note}，内容在他眼前。"
                         "本轮不要重复发图，用一句自然的话回应即可（可以评论数据，"
                         "需要时提醒他向上翻看）；只有他明确要求再看或刷新时，"
                         "才用 freshness=\"latest\" 再调用一次。"
@@ -462,7 +466,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
                         else f"约 {int(age // 60)} 分钟前"
                     )
                     return (
-                        f"已复用{when}发过的同一份情报，会随本轮回复一起发出（未重新抓取）。"
+                        f"已复用{when}发过的同一份情报{label_note}，会随本轮回复一起发出（未重新抓取）。"
                         "你只需用一句简短自然的话引导，不要复述卡片数据。"
                         "若用户明确要求刷新到最新数据，请用 freshness=\"latest\" 再调用一次。"
                     )
@@ -494,7 +498,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
             store.pop(oldest_key, None)
         _record_hd2_last_intel(self, conversation_id, command, entity)
         return (
-            "Helldivers 情报已就绪，会随本轮回复一起发出。"
+            f"Helldivers 情报已就绪{label_note}，会随本轮回复一起发出。"
             "你只需用一句简短自然的话引导（可带情绪），不要复述卡片里的数据，"
             "不要罗列编号，也不要说自己做不到或正在查询。"
         )

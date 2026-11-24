@@ -31,6 +31,7 @@ from atri_qq_bot.llm_tools.hd2_intent import (
     has_explicit_hd2_freshness,
     has_hd2_capability_contradiction,
     normalize_hd2_arguments,
+    hd2_entity_label,
     normalize_hd2_entity,
     normalize_hd2_freshness,
 )
@@ -788,6 +789,23 @@ def test_normalize_hd2_entity_aliases() -> None:
         assert normalize_hd2_entity("warfront", alias) == "humans"
     # 不认识的写法原样保留，不要硬并到某个阵营上。
     assert normalize_hd2_entity("warfront", "虚空族") == "虚空族"
+
+
+def test_executor_receipt_names_the_faction_for_the_model(tmp_path) -> None:
+    """模型看不到图片，回执里必须告诉它这一轮是哪条战线。"""
+    image = tmp_path / "warfront.png"
+    image.write_bytes(b"png")
+    harness = _reuse_harness([SimpleNamespace(kind="image", content=str(image))])
+
+    receipt = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "东线", "auto"
+        )
+    )
+    assert "阵营：终结族 / Terminids" in receipt
+    # 别的命令不该被塞进阵营标签。
+    assert hd2_entity_label("dss", "") == ""
+    assert hd2_entity_label("planet", "erataprime") == ""
 
 
 def test_normalize_hd2_planet_entity_collapses_names() -> None:

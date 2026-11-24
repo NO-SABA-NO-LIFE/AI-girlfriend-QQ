@@ -78,8 +78,10 @@ def _hd2_query_schema() -> dict[str, Any]:
                     "argument": {
                         "type": "string",
                         "description": (
-                            "查询实体：warfront 填阵营（终结族/虫族/机器人/铁卫/光能者/"
-                            "超级地球，中英文俗称都认），"
+                            "查询实体：warfront 填阵营，同一阵营的多种说法都等价——"
+                            "终结族=虫族=虫子=东线=Terminids，"
+                            "机器人=自动机=铁卫=西线=Automaton，"
+                            "光能者=光能=鱿鱼=南线=Illuminate，超级地球=人类=Humans；"
                             "planet 填星球名称/编号/链接（中文官方译名也可以），"
                             "wiki 填关键词，hd2data 填"
                             "武器/护甲/敌人名称；其它命令留空字符串。"

@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 
 from ..helldivers.core.glossary import PLANET_NAMES, normalize_planet_name
-from ..helldivers.core.war_state import FACTION_ALIASES
+from ..helldivers.core.war_state import FACTION_ALIASES, FACTION_CN
 
 # 22 个功能各自的规范命令词。顺序与 help_text 的分组大致对应，便于人工核对。
 # 每个字符串都必须是 HelldiversBridge._COMMANDS 中真实存在的 key。
@@ -195,6 +195,23 @@ def _build_planet_keys() -> dict[str, str]:
 
 _HD2_FACTION_KEYS: dict[str, str] = _build_faction_keys()
 _HD2_PLANET_KEYS: dict[str, str] = _build_planet_keys()
+_HD2_FACTION_CN: dict[str, str] = {
+    str(canonical).casefold(): chinese for canonical, chinese in FACTION_CN.items()
+}
+
+
+def hd2_entity_label(command: str, entity: str) -> str:
+    """给模型看的实体标签：战线返回「终结族 / Terminids」，其余命令返回空串。
+
+    模型拿到的是工具回执文本，看不到图片内容；不告诉它这一轮查的是哪个阵营，
+    它就只能靠猜，容易把「东线」说成西线或者干脆说不知道。
+    """
+    if str(command or "") != "warfront":
+        return ""
+    chinese = _HD2_FACTION_CN.get(str(entity or ""))
+    if not chinese:
+        return ""
+    return f"{chinese} / {str(entity).capitalize()}"
 
 
 def has_explicit_hd2_freshness(arguments: dict[str, object]) -> bool:
