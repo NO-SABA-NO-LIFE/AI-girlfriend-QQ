@@ -1133,14 +1133,6 @@ def test_proactive_ambient_focus_frames_chime_in(monkeypatch, tmp_path) -> None:
 
     sent: list[str] = []
 
-    async def fake_send_reply(websocket, event, messages, **kwargs):
-        if isinstance(messages, str):
-            sent.append(messages)
-            return
-        for message in messages:
-            if getattr(message, "kind", "") == "text":
-                sent.append(str(message))
-
     gate_calls: list[dict] = []
 
     async def fake_gate(plain_text, group_context, speaker_name=""):
@@ -1148,6 +1140,16 @@ def test_proactive_ambient_focus_frames_chime_in(monkeypatch, tmp_path) -> None:
             {"text": plain_text, "context": group_context, "speaker": speaker_name}
         )
         return True  # 模型门判断这条值得主动接
+
+    async def fake_send_reply(websocket, event, messages, **kwargs):
+        # 与真实 send_reply 一致：返回已送达文本；返回空串才代表"未确认送达"。
+        if isinstance(messages, str):
+            sent.append(messages)
+            return messages
+        for message in messages:
+            if getattr(message, "kind", "") == "text":
+                sent.append(str(message))
+        return "\n".join(sent)
 
     monkeypatch.setattr(engine, "reply", fake_reply)
     monkeypatch.setattr(server.tools, "analyze", fake_analyze)
@@ -1167,6 +1169,53 @@ def test_proactive_ambient_focus_frames_chime_in(monkeypatch, tmp_path) -> None:
     assert focus.source == "proactive_ambient"
     assert "强制回复焦点" not in focus.prompt_context()
     assert len(sent) == 1
+    # 真正发出之后才记冷却；认领同时清空。
+    assert server._last_ambient_group_reply_at.get(str(GROUP_ID))
+    assert getattr(server, "_ambient_group_not_before", {}) == {}
+
+
+def test_ambient_blocked_downstream_does_not_consume_cooldown(monkeypatch, tmp_path) -> None:
+    """模型门通过、但被去重拦下：不发消息、不记 120 秒冷却，只留短暂退避。"""
+    import time as _time
+
+    engine, server = _fallback_server(tmp_path, reply_mode="smart")
+
+    async def fake_reply(*args, **kwargs):
+        return "模型回复"
+
+    async def fake_analyze(*args, **kwargs):
+        return None
+
+    sent: list[str] = []
+
+    async def fake_send_reply(websocket, event, messages, **kwargs):
+        if isinstance(messages, str):
+            sent.append(messages)
+            return
+        for message in messages:
+            if getattr(message, "kind", "") == "text":
+                sent.append(str(message))
+
+    async def fake_gate(plain_text, group_context, speaker_name=""):
+        return True  # 模型门判断这条值得接
+
+    monkeypatch.setattr(engine, "reply", fake_reply)
+    monkeypatch.setattr(server.tools, "analyze", fake_analyze)
+    monkeypatch.setattr(server, "send_reply", fake_send_reply)
+    monkeypatch.setattr(server, "_llm_ambient_gate_should_reply", fake_gate)
+    # 强制下游去重拦下：这是"门通过但没发出"的最短路径。
+    monkeypatch.setattr(
+        server, "_duplicate_group_content", lambda event, conversation_id, text: True
+    )
+
+    event = _group_event(10002, _text("你说话太规整了 谁教的"))
+    event.update({"self_id": BOT_QQ, "sender": {"card": "小鱿鱼"}})
+    asyncio.run(server._handle_event(object(), event))
+
+    assert sent == []
+    assert server._last_ambient_group_reply_at == {}
+    not_before = server._ambient_group_not_before[str(GROUP_ID)]
+    assert 0 < not_before - _time.time() <= 31
 
 
 def test_relative_time_label_boundaries() -> None:

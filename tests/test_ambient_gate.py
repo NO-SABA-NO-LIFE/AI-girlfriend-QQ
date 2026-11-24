@@ -159,3 +159,114 @@ def test_ambient_reply_disabled_switch() -> None:
     server.config.group_ambient_reply_enabled = False
     event = _base_event()
     assert asyncio.run(server._maybe_ambient_group_reply(event, "有人在吗")) is False
+
+
+# --- 冷却只在真正发出后记账（认领 + 退避）---
+
+def test_ambient_approval_does_not_commit_cooldown() -> None:
+    """通过模型门只是认领，不能立刻把 120 秒冷却记上（否则被拦下就白耗）。"""
+    server = _make_server()
+
+    async def fake_gate(text: str, group_context: str = "", speaker_name: str = "") -> bool:
+        return True
+
+    server._llm_ambient_gate_should_reply = fake_gate
+    server._format_ambient_group_context = lambda event: ""
+    event = _base_event()
+    assert asyncio.run(server._maybe_ambient_group_reply(event, "有人在吗")) is True
+    assert server._last_ambient_group_reply_at == {}
+    assert server._ambient_group_not_before
+
+
+def test_ambient_claim_blocks_concurrent_attempt_before_send() -> None:
+    """同群已有一次搭话在判定/生成中时，第二条消息不得再开一次判定。"""
+    server = _make_server()
+    gate_calls: list[str] = []
+
+    async def fake_gate(text: str, group_context: str = "", speaker_name: str = "") -> bool:
+        gate_calls.append(text)
+        return True
+
+    server._llm_ambient_gate_should_reply = fake_gate
+    server._format_ambient_group_context = lambda event: ""
+    event = _base_event()
+    assert asyncio.run(server._maybe_ambient_group_reply(event, "第一条")) is True
+    assert asyncio.run(server._maybe_ambient_group_reply(event, "第二条")) is False
+    assert gate_calls == ["第一条"]
+
+
+def test_ambient_gate_rejection_releases_claim() -> None:
+    """模型判"不接"时立刻释放认领：下一条消息仍可马上判定，不占冷却。"""
+    server = _make_server()
+    gate_calls: list[str] = []
+
+    async def fake_gate(text: str, group_context: str = "", speaker_name: str = "") -> bool:
+        gate_calls.append(text)
+        return False
+
+    server._llm_ambient_gate_should_reply = fake_gate
+    server._format_ambient_group_context = lambda event: ""
+    event = _base_event()
+    assert asyncio.run(server._maybe_ambient_group_reply(event, "第一条")) is False
+    assert server._ambient_group_not_before == {}
+    assert asyncio.run(server._maybe_ambient_group_reply(event, "第二条")) is False
+    assert gate_calls == ["第一条", "第二条"]
+
+
+def test_ambient_claim_finish_records_cooldown_only_when_delivered() -> None:
+    """发出后记 120 秒冷却；没发出只做 30 秒退避，不占整段冷却。"""
+    import time as _time
+
+    server = _make_server()
+    event = _base_event()
+
+    server._ambient_group_not_before = {"20001": _time.time() + 180}
+    server._finish_ambient_claim(event, delivered=False)
+    assert server._last_ambient_group_reply_at == {}
+    assert 0 < server._ambient_group_not_before["20001"] - _time.time() <= 31
+
+    server._ambient_group_not_before = {"20001": _time.time() + 180}
+    server._finish_ambient_claim(event, delivered=True)
+    assert server._ambient_group_not_before == {}
+    assert "20001" in server._last_ambient_group_reply_at
+
+
+def test_ambient_backoff_blocks_retry_until_it_expires() -> None:
+    """失败退避期内不再判定；退避过期后又能正常尝试。"""
+    import time as _time
+
+    server = _make_server()
+    gate_calls: list[str] = []
+
+    async def fake_gate(text: str, group_context: str = "", speaker_name: str = "") -> bool:
+        gate_calls.append(text)
+        return True
+
+    server._llm_ambient_gate_should_reply = fake_gate
+    server._format_ambient_group_context = lambda event: ""
+    event = _base_event()
+
+    server._ambient_group_not_before = {"20001": _time.time() + 30}
+    assert asyncio.run(server._maybe_ambient_group_reply(event, "退避中")) is False
+    assert gate_calls == []
+
+    server._ambient_group_not_before = {"20001": _time.time() - 1}
+    assert asyncio.run(server._maybe_ambient_group_reply(event, "退避到期")) is True
+    assert gate_calls == ["退避到期"]
+
+
+def test_ambient_skips_group_that_requires_mention(monkeypatch) -> None:
+    """「仅 @ 回复」的群永远不接普通消息：提前返回，不白跑一次模型判定。"""
+    server = _make_server()
+
+    async def fake_gate(text: str, group_context: str = "", speaker_name: str = "") -> bool:
+        raise AssertionError("仅 @ 群不应调用接话判断")
+
+    server._llm_ambient_gate_should_reply = fake_gate
+    monkeypatch.setattr(
+        "atri_qq_bot.onebot.server_parts.server_events.object_requires_mention",
+        lambda **kwargs: True,
+    )
+    event = _base_event()
+    assert asyncio.run(server._maybe_ambient_group_reply(event, "有人在吗")) is False
+    assert getattr(server, "_ambient_group_not_before", {}) == {}

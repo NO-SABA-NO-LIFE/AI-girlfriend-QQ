@@ -174,7 +174,9 @@ class OneBotConnectionMixin(OneBotServerMixin):
             str, list[tuple[float, dict[str, Any], str, str]]
         ] = {}
         # 普通群聊偶尔搭话的上次时间记录：key=群号，用于冷却控制。
+        # 只在真正发出后记账；判定/生成期间用 _ambient_group_not_before 占位防双发。
         self._last_ambient_group_reply_at: dict[str, float] = {}
+        self._ambient_group_not_before: dict[str, float] = {}
         self._event_log = PROJECT_ROOT / "logs" / "onebot-events.log"
         self._reply_event_log = PROJECT_ROOT / "logs" / "reply-events.jsonl"
         self._voice_event_log = PROJECT_ROOT / "logs" / "voice-events.log"

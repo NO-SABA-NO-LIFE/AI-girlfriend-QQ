@@ -44,6 +44,13 @@ _POKE_DONE_FALLBACK_REPLIES = (
     "戳一下而已，我可没那么大反应。",
 )
 
+# 主动搭话的「认领」有效期：从通过模型门到真正发出这段时间，同一群不允许再开第二次
+# 判定。正常发送成功/明确失败都会立刻结束认领；这里只兜住异常路径，防止永久占位。
+_AMBIENT_CLAIM_TTL_SECONDS = 180.0
+# 搭话被判通过、却因为去重/回复策略/生成或发送失败没发出去时，只让本群退避这么久，
+# 而不是把整段 120 秒冷却记上——既不浪费机会，也不至于下一条消息立刻再烧一次判定。
+_AMBIENT_RETRY_BACKOFF_SECONDS = 30.0
+
 # 群里有人明确表示“不聊了”时，回一句再收尾：确定性、不调模型，既尊重对方
 # 想停的意愿，又不至于完全静默。
 _END_CONVERSATION_FALLBACK_REPLIES = (
@@ -449,6 +456,10 @@ class OneBotEventMixin(OneBotServerMixin):
                 )
 
         if not should_send_reply:
+            # 主动搭话在模型门通过后被去重/策略/信任层拦下：释放认领、不记冷却，
+            # 让群里下一条值得接的话仍能马上尝试。
+            if proactive_ambient:
+                self._finish_ambient_claim(event, delivered=False)
             return
 
         # 常见点歌表达在聊天模型之前处理。它们只读取 data/music 直属的成品，
@@ -499,6 +510,8 @@ class OneBotEventMixin(OneBotServerMixin):
                     model_type="voice",
                     model_name=self._delivery_model_name("voice"),
                 )
+                if proactive_ambient:
+                    self._finish_ambient_claim(event, delivered=False)
                 return
             recorded_reply = delivered_text
             if self.cognition_shadow is not None:
@@ -526,6 +539,9 @@ class OneBotEventMixin(OneBotServerMixin):
                 reply_focus_source=str(getattr(group_reply_focus, "source", "") or ""),
                 reply_focus_text=str(getattr(group_reply_focus, "focus_text", "") or ""),
             )
+            # 点歌回复已经发出：若是主动搭话接的这轮，按「已送达」记冷却。
+            if proactive_ambient:
+                self._finish_ambient_claim(event, delivered=True)
             return
 
         if group_reply_focus is not None and group_reply_focus.source == "previous_same_sender":
@@ -588,6 +604,8 @@ class OneBotEventMixin(OneBotServerMixin):
                 model_type="voice",
                 model_name=self._delivery_model_name("voice"),
             )
+            if proactive_ambient:
+                self._finish_ambient_claim(event, delivered=False)
             return
 
         has_current_visual = _event_has_visual_material(analysis_event)
@@ -799,6 +817,10 @@ class OneBotEventMixin(OneBotServerMixin):
                     delivered_text="",
                     voice_mode="",
                 )
+            # 这轮只发了"想太久"降级话术，不算一次成功的主动搭话：释放认领，
+            # 让下一句值得接的话还能尝试（不当成已搭话而锁两分钟）。
+            if proactive_ambient:
+                self._finish_ambient_claim(event, delivered=False)
             return
         voice_request = self.reply_engine.consume_voice_request(conversation_id)
         consume_reply_voice_choice = getattr(
@@ -962,7 +984,12 @@ class OneBotEventMixin(OneBotServerMixin):
                     delivered_text="",
                     voice_mode=getattr(voice_request, "mode", "") if voice_request else "",
                 )
+            if proactive_ambient:
+                self._finish_ambient_claim(event, delivered=False)
             return
+        if proactive_ambient:
+            # 主回复已确认发出：这时才把主动搭话的冷却时间落账。
+            self._finish_ambient_claim(event, delivered=True)
         self._mark_smart_group_reply(event, conversation_id, plain_text)
         self._remember_group_reply_key(event, conversation_id, plain_text)
         # 主回复已发出，再把本轮自然语言 HD2 工具产出的情报（图片/文本卡片）发出。
@@ -1079,7 +1106,11 @@ class OneBotEventMixin(OneBotServerMixin):
         event: dict[str, Any],
         plain_text: str,
     ) -> bool:
-        """普通群聊里由模型按内容判断是否主动搭话，带冷却；只对有真实文字的普通消息生效。"""
+        """普通群聊里由模型按内容判断是否主动搭话，带冷却；只对有真实文字的普通消息生效。
+
+        冷却只在**真正发出**后记账（见 ``_finish_ambient_claim``）：通过模型门后若被
+        去重/回复策略/发送失败拦下，不会白白吃掉两分钟的搭话机会。
+        """
         if not getattr(self.config, "group_ambient_reply_enabled", True):
             return False
         if event.get("message_type") != "group":
@@ -1093,14 +1124,38 @@ class OneBotEventMixin(OneBotServerMixin):
         # 纯图片/表情等占位消息不搭话，必须有真实文字。
         if not _strip_placeholder_text(str(plain_text or "")):
             return False
-        now = time.time()
         group_id = str(event.get("group_id") or "")
+        if not group_id:
+            return False
+        # 「仅 @ 回复」的群永远不会接普通消息：提前返回，避免每条普通消息都白跑一次
+        # 模型判定（该判定之后必然被回复策略拦掉）。策略文件损坏时按"不跳过"处理，
+        # 绝不能因为读策略失败而打断消息处理。
+        try:
+            requires_mention = object_requires_mention(
+                scope="group",
+                user_id=str(event.get("user_id") or ""),
+                group_id=group_id,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("主动搭话读取群模式失败，按未要求 @ 处理", exc_info=True)
+            requires_mention = False
+        if requires_mention:
+            return False
+        now = time.time()
         cooldown = max(
             0,
             int(getattr(self.config, "group_ambient_reply_cooldown_seconds", 300)),
         )
         if now - float(self._last_ambient_group_reply_at.get(group_id, 0.0)) < cooldown:
             return False
+        not_before = self._ambient_not_before_store()
+        if now < float(not_before.get(group_id, 0.0)):
+            # 本群已有一次搭话正在判定或生成（或上次失败后的退避期未到）：让开。
+            # 检查与占位之间没有 await，是原子的；两条不同成员的消息并发时
+            # 只有一条能进入模型判定。
+            return False
+        # 先认领、再等模型。旧实现把占位放在模型判定之后，跨成员并发时挡不住双发。
+        not_before[group_id] = now + _AMBIENT_CLAIM_TTL_SECONDS
         # 不再随机掷骰子：交给模型结合聊天内容判断这句话值不值得接。
         # 传入近期群聊上下文，让模型能分辨这条消息是不是别人之间的对话。
         group_context = self._format_ambient_group_context(event)
@@ -1109,9 +1164,36 @@ class OneBotEventMixin(OneBotServerMixin):
             group_context,
             speaker_name=_nickname(event) or "",
         ):
+            # 模型说不接：立刻释放认领，下一条消息可以马上再判定（不占冷却）。
+            self._ambient_not_before_store().pop(group_id, None)
             return False
-        self._last_ambient_group_reply_at[group_id] = now
         return True
+
+    def _ambient_not_before_store(self) -> dict[str, float]:
+        """每个群「下次允许做主动搭话判定」的时间点；单进程事件循环内共享，无需加锁。"""
+        store = getattr(self, "_ambient_group_not_before", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._ambient_group_not_before = store
+        return store
+
+    def _finish_ambient_claim(self, event: dict[str, Any], *, delivered: bool) -> None:
+        """结束一次主动搭话的认领：真正发出才记冷却，没发出则只做短暂退避。
+
+        ``delivered=True``：本轮确实发给了群，记下 120 秒冷却；
+        ``delivered=False``：被策略/去重拦下、生成失败或发送失败——不记冷却，
+        只让本群退避 ``_AMBIENT_RETRY_BACKOFF_SECONDS``，避免下一条消息立刻
+        再烧一次模型判定，同时不把整段冷却白白吃掉。
+        """
+        group_id = str(event.get("group_id") or "")
+        if not group_id:
+            return
+        store = self._ambient_not_before_store()
+        if delivered:
+            store.pop(group_id, None)
+            self._last_ambient_group_reply_at[group_id] = time.time()
+        else:
+            store[group_id] = time.time() + _AMBIENT_RETRY_BACKOFF_SECONDS
 
     def _format_ambient_group_context(
         self,
