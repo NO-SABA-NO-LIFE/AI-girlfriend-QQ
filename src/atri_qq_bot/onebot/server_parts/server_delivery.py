@@ -59,6 +59,59 @@ def _sender_display_name(sender: Any) -> str:
     return str(user_id).strip() if user_id not in (None, "") else ""
 
 
+def _sender_user_id(sender: Any) -> str:
+    """从 OneBot sender dict 取发送者 QQ 号；缺失时返回空串。"""
+
+    if not isinstance(sender, dict):
+        return ""
+    user_id = sender.get("user_id")
+    return str(user_id).strip() if user_id not in (None, "") else ""
+
+
+def _coerce_message_time(value: Any) -> float:
+    """把 OneBot 的 time 字段转成秒级时间戳；非法值一律当作未知（0）。"""
+
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return seconds if seconds > 0 else 0.0
+
+
+def _format_relative_age(at: float) -> str:
+    """把时间戳转成“约 N 分钟前”；用于标注引用消息发生得多久以前。"""
+
+    if not at:
+        return ""
+    delta = max(0.0, time.time() - float(at))
+    if delta < 60:
+        return "不到 1 分钟前"
+    if delta < 3600:
+        return f"约 {int(delta // 60)} 分钟前"
+    if delta < 86400:
+        return f"约 {int(delta // 3600)} 小时前"
+    return f"约 {int(delta // 86400)} 天前"
+
+
+def _quoted_media_kinds(segments: Any) -> str:
+    """概括引用消息里有哪些媒体段，返回“图片/表情/语音”这类描述。"""
+
+    kinds: list[str] = []
+    for segment in segments or []:
+        if not isinstance(segment, dict):
+            continue
+        kind = str(segment.get("type") or "").lower()
+        label = {
+            "image": "图片",
+            "mface": "表情",
+            "marketface": "表情",
+            "record": "语音",
+        }.get(kind, "")
+        if label and label not in kinds:
+            kinds.append(label)
+    return "、".join(kinds)
+
+
 def _history_event_time(event: dict[str, Any]) -> datetime | None:
     """读取 OneBot 历史消息的 epoch 秒，异常记录不参与时间范围判断。"""
 
@@ -143,13 +196,16 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         self,
         websocket: Any,
         event: dict[str, Any],
-    ) -> tuple[str, str, list[dict[str, Any]], str]:
+    ) -> tuple[str, str, list[dict[str, Any]], str, str, float]:
         """解析用户引用的消息，供本轮模型和多模态工具共同使用。
 
         QQ/OneBot 的 reply 消息段通常只携带目标消息 ID；若事件没有直接
         附带原文，就按需调用 ``get_msg``。读取失败时保留“存在引用”的
-        明确信息，但绝不根据 ID 猜测原文。返回值最后一项是被引用者的
-        显示昵称（拿不到为空串），用于标注引用图片的真实发送者。
+        明确信息，但绝不根据 ID 猜测原文。
+
+        返回 ``(消息ID, 原文, 段列表, 发送者显示名, 发送者QQ, 发送时间)``。
+        后两项用于给模型标注引用来源（例如“这是你自己 3 分钟前发的战线图”），
+        让它在评论旧情报时不必重新查询一次；拿不到时为空串 / 0。
         """
 
         message_id = extract_reply_message_id(event.get("message"))
@@ -160,7 +216,7 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                 if value not in (None, ""):
                     message_id = str(value)
         if not message_id:
-            return "", "", [], ""
+            return "", "", [], "", "", 0.0
 
         inline_message = extract_reply_inline_message(event)
         if inline_message is not None:
@@ -175,6 +231,12 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                 extract_plain_text(inline_message),
                 _message_to_segments(inline_message),
                 _sender_display_name(inline_sender),
+                _sender_user_id(inline_sender),
+                _coerce_message_time(
+                    reply_payload.get("time")
+                    if isinstance(reply_payload, dict)
+                    else None
+                ),
             )
 
         request_id: int | str = int(message_id) if message_id.isdigit() else message_id
@@ -195,11 +257,17 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                     _sender_display_name(
                         data.get("sender") if isinstance(data, dict) else None
                     ),
+                    _sender_user_id(
+                        data.get("sender") if isinstance(data, dict) else None
+                    ),
+                    _coerce_message_time(
+                        data.get("time") if isinstance(data, dict) else None
+                    ),
                 )
         except Exception as exc:
             LOGGER.warning("引用消息读取失败：message_id=%s error=%s", message_id, exc)
 
-        return message_id, "[引用消息原文暂时无法读取]", [], ""
+        return message_id, "[引用消息原文暂时无法读取]", [], "", "", 0.0
 
     def _event_with_quoted_message(
         self,
@@ -238,6 +306,55 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             + current_segments
         )
         return merged
+
+    def _quoted_provenance(
+        self,
+        sender_name: str,
+        sender_id: str,
+        sent_at: float,
+        quoted_text: str,
+        quoted_segments: list[dict[str, Any]],
+        conversation_id: str,
+    ) -> str:
+        """拼一条给模型看的引用来源说明；没有引用内容时返回空串。
+
+        只补事实（谁、多久以前、什么类型、是不是刚发的情报图），不写任何
+        “不许查询”的规则，让模型自己判断该不该重新取数。
+        """
+
+        if not (str(quoted_text or "").strip() or quoted_segments):
+            return ""
+        config = getattr(self, "config", None)
+        bot_qq = str(getattr(config, "bot_qq", "") or "")
+        is_bot = bool(sender_id) and bool(bot_qq) and str(sender_id) == bot_qq
+        name = str(sender_name or "").strip()
+        if is_bot:
+            who = f"{name or '亚托莉'}（你自己发的）"
+        elif name:
+            who = name
+        else:
+            who = "未知发送者"
+
+        parts = [who]
+        when = _format_relative_age(sent_at)
+        if when:
+            parts.append(when)
+        media = _quoted_media_kinds(quoted_segments)
+        parts.append(media or "文字")
+
+        intel_note = ""
+        if is_bot and "图片" in media:
+            store = getattr(self, "_last_hd2_intel", None)
+            entry = store.get(str(conversation_id)) if isinstance(store, dict) else None
+            if entry:
+                command, noted_at = entry
+                age = time.time() - float(noted_at or 0.0)
+                if age <= 600:  # 10 分钟内：大概率就是刚发的那张情报图
+                    intel_note = (
+                        f"，疑似刚用 /{command} 生成的情报图"
+                        f"（{_format_relative_age(noted_at)}）"
+                    )
+        return "，".join(parts) + intel_note
 
     def _allow_poke_back(self, event: dict[str, Any]) -> bool:
         """回戳动作的会话级短冷却：正常连续戳都能回戳，只防秒级狂戳刷屏。"""

@@ -5,6 +5,8 @@ import base64
 import logging
 import time
 
+from pathlib import Path
+
 from .server_support import OneBotServerMixin, _sync_server_globals
 
 # 显式导入而不是依赖 _sync_server_globals 的全局注入：账号路径是安全关键路径，
@@ -29,6 +31,43 @@ from ...runtime.paths import DATA_DIR
 # 运行时会由 _sync_server_globals 注入 server.py 的同名 logger；这里显式声明一份，
 # 保证模块在被单独导入（例如单元测试）时也能正常记录账号/连接类告警。
 LOGGER = logging.getLogger("atri.onebot")
+
+# 自然语言 HD2 结果的复用窗口：与 bridge 侧 300 秒数据缓存对齐。
+# 窗口内“再看一眼”直接重发同一份结果，既不重新抓取，也不会发不出来。
+_HD2_INTEL_REUSE_SECONDS = 300.0
+
+
+def _record_hd2_last_intel(owner: Any, conversation_id: str, command: str) -> None:
+    """记下本会话最近一次 HD2 命令，供引用元信息判断“这是不是刚才那张图”。
+
+    用模块函数而不是实例方法：执行器在单元测试里会被挂在 ``SimpleNamespace``
+    替身上，不能假定完整服务对象已经初始化。
+    """
+    store = getattr(owner, "_last_hd2_intel", None)
+    if not isinstance(store, dict):
+        store = {}
+        owner._last_hd2_intel = store
+    store[str(conversation_id)] = (str(command), time.time())
+
+
+def _hd2_intel_still_usable(messages: Any) -> bool:
+    """复用前确认缓存的 HD2 结果还能发出去：图片文件仍在、列表非空。
+
+    文本卡片没有文件依赖，直接可用；图片被缓存/清理掉时返回 False，让执行器
+    老老实实重新抓取一次，绝不把“文件不存在”的图片推给 OneBot。
+    """
+    if not messages:
+        return False
+    try:
+        for message in messages:
+            if str(getattr(message, "kind", "") or "") not in {"image", "record"}:
+                continue
+            content = str(getattr(message, "content", "") or "")
+            if not content or not Path(content).exists():
+                return False
+    except Exception:  # noqa: BLE001 - 任何异常都按“不可复用”处理
+        return False
+    return True
 
 # 账号切换时要整体替换的 server 属性。**每一项都必须换成新值或 None**，
 # 绝不能保留上一个账号的对象——那会把 A 账号的数据写进 B 账号的库。
@@ -207,6 +246,11 @@ class OneBotConnectionMixin(OneBotServerMixin):
         # 自然语言 HD2 查询在工具循环里产出的待发情报（图片/文本），按会话暂存，
         # 由事件流程在回复发出后统一消费发送；每次 handle 前会先清空，避免串轮。
         self._pending_hd2_nl: dict[str, list[Any]] = {}
+        # 最近一次成功产出的 HD2 结果：默认 5 分钟内同命令同实体直接复用，
+        # 让「再看一眼」无需重新抓取，也不会因为刷新被拦下发不出来。
+        self._hd2_intel_cache: dict[tuple[str, str, str], tuple[float, list[Any]]] = {}
+        # 最近一次 HD2 命令（供引用元信息标注“这可能是刚才的战线图”）。
+        self._last_hd2_intel: dict[str, tuple[str, float]] = {}
 
     async def _hd2_group_list_provider(self) -> list[str]:
         """确认 QQ 在线后返回当前加入的群号字符串列表；不确定即抛错。"""
@@ -241,17 +285,61 @@ class OneBotConnectionMixin(OneBotServerMixin):
         conversation_id: str,
         command: str,
         argument: str,
+        freshness: str = "auto",
     ) -> str:
         """执行自然语言 HD2 工具：重建斜杠命令并复用 bridge 情报链路。
 
         成功时把待发消息暂存到 ``_pending_hd2_nl``，返回给模型的引导回执；
         任何失败都返回文本回执，由模型自然回应，绝不伪造情报数据。
+
+        ``freshness=auto`` 时，本会话几分钟内刚产出过同命令同实体的结果就直接
+        复用那份结果重发（不再抓取/渲染），保证「再看一眼」一定发得出来；
+        ``latest`` 时跳过复用重新出图，战线类命令还会要求数据侧实时刷新。
         """
         from ...llm_tools.hd2_intent import build_hd2_slash
 
+        wants_latest = str(freshness or "auto").strip().lower() == "latest"
+        store = getattr(self, "_hd2_intel_cache", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._hd2_intel_cache = store
+        reuse_seconds = _HD2_INTEL_REUSE_SECONDS
+        key = (conversation_id, str(command), str(argument or "").strip().casefold())
+        now = time.time()
+
+        if not wants_latest:
+            cached = store.get(key)
+            if cached is not None:
+                cached_at, cached_messages = cached
+                age = now - float(cached_at)
+                if age <= reuse_seconds and _hd2_intel_still_usable(cached_messages):
+                    # 复用同一份结果：图还是那张图，但用户明确想看时照样发得出来。
+                    self._pending_hd2_nl[conversation_id] = cached_messages
+                    _record_hd2_last_intel(self, conversation_id, command)
+                    when = (
+                        "刚刚"
+                        if age < 60
+                        else f"约 {int(age // 60)} 分钟前"
+                    )
+                    return (
+                        f"已复用{when}发过的同一份情报，会随本轮回复一起发出（未重新抓取）。"
+                        "你只需用一句简短自然的话引导，不要复述卡片数据。"
+                        "若用户明确要求刷新到最新数据，请用 freshness=\"latest\" 再调用一次。"
+                    )
+
         slash_text = build_hd2_slash(command, argument)
+        realtime = wants_latest and str(command) == "warfront"
         try:
-            messages = await self.helldivers.handle(slash_text, conversation_id)
+            messages = await self.helldivers.handle(
+                slash_text, conversation_id, realtime=realtime
+            )
+        except TypeError:
+            # 兼容旧版 bridge（或不支持 realtime 关键字的替身）：退回两参调用。
+            try:
+                messages = await self.helldivers.handle(slash_text, conversation_id)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("[HD2] 自然语言情报执行失败：%s", exc)
+                return "Helldivers 情报获取失败，请自然地说明稍后再试，不要编造数据。"
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("[HD2] 自然语言情报执行失败：%s", exc)
             return "Helldivers 情报获取失败，请自然地说明稍后再试，不要编造数据。"
@@ -260,6 +348,11 @@ class OneBotConnectionMixin(OneBotServerMixin):
             return "该命令没有返回情报，请自然回应，不要编造游戏数据。"
         # 同一轮重复调用时覆盖旧结果，保证只发最后一次查询的情报。
         self._pending_hd2_nl[conversation_id] = messages
+        store[key] = (now, list(messages))
+        if len(store) > 64:
+            oldest_key = min(store, key=lambda item: store[item][0])
+            store.pop(oldest_key, None)
+        _record_hd2_last_intel(self, conversation_id, command)
         return (
             "Helldivers 情报已就绪，会随本轮回复一起发出。"
             "你只需用一句简短自然的话引导（可带情绪），不要复述卡片里的数据，"

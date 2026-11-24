@@ -580,12 +580,18 @@ class HelldiversBridge:
         return head, parts[1:]
 
     async def handle(
-        self, plain_text: str, session_key: str = ""
+        self,
+        plain_text: str,
+        session_key: str = "",
+        *,
+        realtime: bool = False,
     ) -> list[OutgoingMessage] | None:
         """处理一条文本；返回待发送消息列表，None 表示非 Helldivers 命令。
 
         session_key 为当前会话标识（group:xxx / private:xxx），订阅/退订类
         命令需要它来记录要推送到哪个会话；普通查询命令会忽略它。
+        realtime=True 时要求数据侧强制刷新（目前只有战线图支持），供模型
+        明确要求“看最新数据”时使用；其它命令忽略该参数。
         """
         parsed = self.parse(plain_text)
         if parsed is None:
@@ -597,6 +603,8 @@ class HelldiversBridge:
             ]
         handler = getattr(self, _COMMANDS[command])
         try:
+            if realtime and command == "warfront":
+                return await handler(args, session_key, realtime=True)
             return await handler(args, session_key)
         except Exception as exc:  # 兜底：任何异常都不应打断亚托莉主流程
             logger.exception("[HD2] 处理 /%s 失败: %s", command, exc)
@@ -690,9 +698,11 @@ class HelldiversBridge:
             OutgoingMessage("image", str(path)),
         ]
 
-    async def _cmd_warfront(self, args: list[str], session_key: str) -> list[OutgoingMessage]:
+    async def _cmd_warfront(
+        self, args: list[str], session_key: str, *, realtime: bool = False
+    ) -> list[OutgoingMessage]:
         faction = " ".join(args).strip()
-        err, paths = await self.service.get_warfront_image(faction)
+        err, paths = await self.service.get_warfront_image(faction, realtime=realtime)
         if err:
             return [OutgoingMessage("text", err)]
         return self._images_or_text(paths, "获取战线信息失败，请稍后重试。")

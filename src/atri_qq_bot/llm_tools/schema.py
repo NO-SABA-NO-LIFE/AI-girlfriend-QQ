@@ -5,7 +5,7 @@ from typing import Any
 from ..prompting import load_prompt
 from ..voice.policy import load_voice_behavior
 from .agent_protocol import AGENT_ACTION_PROMPT, final_answer_schema
-from .hd2_intent import HD2_CANONICAL_COMMANDS
+from .hd2_intent import HD2_CANONICAL_COMMANDS, HD2_FRESHNESS_VALUES
 
 
 # 工具选择原则由外部 Markdown 维护，避免模型能力规则和代码实现重复。
@@ -64,6 +64,8 @@ def _hd2_query_schema() -> dict[str, Any]:
                 "阵营战线、战争地图、最高命令、全球事件、民主空间站、Steam 新闻、"
                 "Wiki、军需簿以及新闻/快报订阅等。当用户明确想了解这类游戏情报时调用；"
                 "普通闲聊或与该游戏无关的问题不要调用。"
+                "用户只是想再看一次刚才那份情报、或引用旧情报图做评论时，可以不调用；"
+                "确实调用时用默认 freshness=auto 即可，系统会直接复用刚发出的同一结果，不会重复抓取。"
             ),
             "parameters": {
                 "type": "object",
@@ -79,6 +81,15 @@ def _hd2_query_schema() -> dict[str, Any]:
                             "查询实体：warfront 填阵营（终结族/机器人/光能者或英文），"
                             "planet 填星球名称/编号/链接，wiki 填关键词，hd2data 填"
                             "武器/护甲/敌人名称；其它命令留空字符串。"
+                        ),
+                    },
+                    "freshness": {
+                        "type": "string",
+                        "enum": list(HD2_FRESHNESS_VALUES),
+                        "description": (
+                            "默认 auto：本会话几分钟内刚发过同一条命令时，直接把那份结果"
+                            "再发一次（用户说“再看一眼”也走 auto）。只有用户明确要求刷新到"
+                            "最新数据时才用 latest，会重新抓取并出图。"
                         ),
                     },
                 },

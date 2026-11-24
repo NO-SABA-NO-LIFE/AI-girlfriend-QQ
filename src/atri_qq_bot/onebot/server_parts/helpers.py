@@ -122,14 +122,28 @@ def _merge_pending_visual_event(
 
 
 
-def _compose_model_input(current_text: str, quoted_text: str) -> str:
-    """将引用内容和用户当前输入放入明确边界，避免模型混淆说话人。"""
+def _compose_model_input(
+    current_text: str,
+    quoted_text: str,
+    *,
+    provenance: str = "",
+) -> str:
+    """将引用内容和用户当前输入放入明确边界，避免模型混淆说话人。
+
+    ``provenance`` 是引用来源的客观描述（谁发的、多久以前、什么类型、
+    是否刚生成的情报图），只补事实，不写限制性规则。
+    """
 
     current = str(current_text or "").strip() or "[用户未附加文字]"
     quoted = str(quoted_text or "").strip()
-    if not quoted:
+    if not quoted and not provenance:
         return current
-    return f"【引用消息】\n{quoted[:800]}\n【用户当前消息】\n{current}"
+    header = "【引用消息】"
+    if provenance:
+        header = f"{header}\n（引用来源：{provenance}）"
+    if not quoted:
+        quoted = "[引用内容无文字]"
+    return f"{header}\n{quoted[:800]}\n【用户当前消息】\n{current}"
 
 
 def _message_queue_id(event: dict[str, Any]) -> str:

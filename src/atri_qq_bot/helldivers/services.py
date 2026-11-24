@@ -1846,7 +1846,9 @@ class HelldiversService:
         campaigns = state.campaigns_for_faction(norm)
         return format_warfront_message(norm, campaigns)
 
-    async def get_warfront_image(self, faction: str) -> tuple[str, list[Path]]:
+    async def get_warfront_image(
+        self, faction: str, *, realtime: bool = False
+    ) -> tuple[str, list[Path]]:
         faction = (faction or "").strip()
         if not faction:
             return (
@@ -1860,7 +1862,7 @@ class HelldiversService:
                 "❌ 未知阵营。可选: Terminids / Automaton / Illuminate\n中文: 终结族 / 机器人 / 光能者",
                 [],
             )
-        state = await self._build_war_state()
+        state = await self._build_war_state(realtime=realtime)
         if not state.campaigns and not state.planets:
             return "❌ 暂时无法获取战线数据，请稍后重试。", []
         rows = state.warfront_rows(norm)

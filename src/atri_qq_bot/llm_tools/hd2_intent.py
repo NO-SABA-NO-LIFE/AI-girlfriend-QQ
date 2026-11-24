@@ -58,6 +58,10 @@ HD2_ARGUMENT_COMMANDS: frozenset[str] = frozenset(
 # argument 允许的最大长度，防止模型把整段废话塞进实体里。
 _MAX_ARGUMENT_LENGTH = 200
 
+# 结果新鲜度：auto 允许复用几分钟内的同一条结果（用户"再看一眼"也发得出来），
+# latest 强制重新出图（数据侧尽量取最新）。
+HD2_FRESHNESS_VALUES: tuple[str, ...] = ("auto", "latest")
+
 
 class HD2IntentError(ValueError):
     """自然语言工具参数无效时抛出，便于上层统一转成工具回执。"""
@@ -93,6 +97,19 @@ def normalize_hd2_arguments(arguments: dict[str, object]) -> tuple[str, str]:
         argument = ""
 
     return command, argument
+
+
+def normalize_hd2_freshness(arguments: dict[str, object]) -> str:
+    """读取结果新鲜度参数，缺省或非法值一律回退 ``auto``。
+
+    独立于 ``normalize_hd2_arguments``：freshness 不是命令实体，缺失不能算错，
+    更不能因为模型多塞了一个字段就让整条情报查询失败。
+    """
+    raw = arguments.get("freshness") if isinstance(arguments, dict) else None
+    if not isinstance(raw, str):
+        return "auto"
+    value = raw.strip().lower()
+    return value if value in HD2_FRESHNESS_VALUES else "auto"
 
 
 def build_hd2_slash(command: str, argument: str = "") -> str:

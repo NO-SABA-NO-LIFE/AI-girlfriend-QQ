@@ -557,6 +557,8 @@ class OneBotEventMixin(OneBotServerMixin):
             quoted_text,
             quoted_segments,
             quoted_sender_name,
+            quoted_sender_id,
+            quoted_sent_at,
         ) = await self._resolve_quoted_message(
             websocket,
             event,
@@ -567,7 +569,20 @@ class OneBotEventMixin(OneBotServerMixin):
                 quoted_segments,
                 quoted_sender_name,
             )
-        model_input_text = _compose_model_input(plain_text, quoted_text)
+        # 给模型补上引用的客观来源（谁发的、多久以前、什么类型、是不是刚发的
+        # 情报图）。模型据此判断“这是我自己刚发的战线图”，不必每次重查。
+        model_input_text = _compose_model_input(
+            plain_text,
+            quoted_text,
+            provenance=self._quoted_provenance(
+                quoted_sender_name,
+                quoted_sender_id,
+                quoted_sent_at,
+                quoted_text,
+                quoted_segments,
+                conversation_id,
+            ),
+        )
         if poke_action_done:
             # 明确告诉模型戳人动作已经完成，避免它回复“我不能操作”。
             model_input_text = (

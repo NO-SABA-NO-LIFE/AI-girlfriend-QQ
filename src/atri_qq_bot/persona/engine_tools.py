@@ -591,6 +591,7 @@ class EngineToolsMixin(PersonaEngineMixin):
             from ..llm_tools.hd2_intent import (
                 HD2IntentError,
                 normalize_hd2_arguments,
+                normalize_hd2_freshness,
             )
 
             executor = self._hd2_tool_executor
@@ -598,7 +599,8 @@ class EngineToolsMixin(PersonaEngineMixin):
                 return "Helldivers 情报当前未启用，请直接用文字自然回复。"
             try:
                 command, argument = normalize_hd2_arguments(arguments)
-                return await executor(conversation_id, command, argument)
+                freshness = normalize_hd2_freshness(arguments)
+                return await executor(conversation_id, command, argument, freshness)
             except HD2IntentError as exc:
                 return f"Helldivers 工具参数无效：{exc}。请修正后重新调用，不要编造情报。"
             except Exception as exc:  # noqa: BLE001

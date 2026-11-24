@@ -21,11 +21,13 @@ from atri_qq_bot.config import BotConfig
 from atri_qq_bot.llm_tools.hd2_intent import (
     HD2_ARGUMENT_COMMANDS,
     HD2_CANONICAL_COMMANDS,
+    HD2_FRESHNESS_VALUES,
     HD2IntentError,
     build_hd2_slash,
     detect_hd2_command_hint,
     has_hd2_capability_contradiction,
     normalize_hd2_arguments,
+    normalize_hd2_freshness,
 )
 from atri_qq_bot.llm_tools.schema import available_tool_schemas
 from atri_qq_bot.onebot.server_parts.server_connection import OneBotConnectionMixin
@@ -197,10 +199,15 @@ def _engine() -> AtriReplyEngine:
 
 def test_engine_routes_query_to_injected_executor() -> None:
     engine = _engine()
-    seen: list[tuple[str, str, str]] = []
+    seen: list[tuple[str, str, str, str]] = []
 
-    async def executor(conversation_id: str, command: str, argument: str) -> str:
-        seen.append((conversation_id, command, argument))
+    async def executor(
+        conversation_id: str,
+        command: str,
+        argument: str,
+        freshness: str = "auto",
+    ) -> str:
+        seen.append((conversation_id, command, argument, freshness))
         return "情报已就绪。"
 
     engine.set_hd2_tool_executor(executor)
@@ -213,7 +220,7 @@ def test_engine_routes_query_to_injected_executor() -> None:
         )
     )
     assert result == "情报已就绪。"
-    assert seen == [("private:1", "planet", "富源")]
+    assert seen == [("private:1", "planet", "富源", "auto")]
 
 
 def test_engine_reports_when_executor_missing() -> None:
@@ -459,3 +466,143 @@ def test_server_executor_handles_bridge_exception() -> None:
     )
     assert harness._pending_hd2_nl == {}
     assert "获取失败" in result
+
+
+# ---------------------------------------------------------------------------
+# 5. freshness：默认复用、explicit latest 重抓
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_hd2_freshness_falls_back_to_auto() -> None:
+    assert normalize_hd2_freshness({"command": "warfront"}) == "auto"
+    assert normalize_hd2_freshness({"freshness": ""}) == "auto"
+    assert normalize_hd2_freshness({"freshness": "LATEST"}) == "latest"
+    assert normalize_hd2_freshness({"freshness": 1}) == "auto"
+    assert normalize_hd2_freshness({"freshness": "whatever"}) == "auto"
+    assert "latest" in HD2_FRESHNESS_VALUES
+
+
+def _reuse_harness(messages: Any) -> SimpleNamespace:
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def handle(text: str, session_key: str, *, realtime: bool = False) -> Any:
+        calls.append((text, session_key, {"realtime": realtime}))
+        return messages
+
+    harness = SimpleNamespace(
+        helldivers=SimpleNamespace(handle=handle),
+        _pending_hd2_nl={},
+        _hd2_intel_cache={},
+        config=SimpleNamespace(hd2_intel_reuse_seconds=300),
+    )
+    harness.handle_calls = calls  # type: ignore[attr-defined]
+    return harness
+
+
+def test_executor_reuses_recent_result_without_refetch(tmp_path) -> None:
+    image = tmp_path / "warfront.png"
+    image.write_bytes(b"png")
+    outgoing = [SimpleNamespace(kind="image", content=str(image))]
+    harness = _reuse_harness(outgoing)
+
+    first = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    assert "情报已就绪" in first
+    assert len(harness.handle_calls) == 1  # type: ignore[attr-defined]
+
+    second = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    # 复用：不重新抓取，但依旧把同一份结果挂到待发队列，用户看得到图。
+    assert len(harness.handle_calls) == 1  # type: ignore[attr-defined]
+    assert "已复用" in second
+    assert harness._pending_hd2_nl == {"private:1": outgoing}
+
+
+def test_executor_latest_forces_refetch_with_realtime(tmp_path) -> None:
+    image = tmp_path / "warfront.png"
+    image.write_bytes(b"png")
+    outgoing = [SimpleNamespace(kind="image", content=str(image))]
+    harness = _reuse_harness(outgoing)
+
+    asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "latest"
+        )
+    )
+    assert len(harness.handle_calls) == 2  # type: ignore[attr-defined]
+    assert harness.handle_calls[-1][2] == {"realtime": True}  # type: ignore[attr-defined]
+
+
+def test_executor_skips_reuse_when_image_file_is_gone(tmp_path) -> None:
+    image = tmp_path / "warfront.png"
+    image.write_bytes(b"png")
+    outgoing = [SimpleNamespace(kind="image", content=str(image))]
+    harness = _reuse_harness(outgoing)
+
+    asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    image.unlink()
+    result = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    # 文件没了就不能复用，必须重新抓一次。
+    assert len(harness.handle_calls) == 2  # type: ignore[attr-defined]
+    assert "情报已就绪" in result
+
+
+def test_executor_reuse_expires_after_window(tmp_path, monkeypatch) -> None:
+    image = tmp_path / "warfront.png"
+    image.write_bytes(b"png")
+    outgoing = [SimpleNamespace(kind="image", content=str(image))]
+    harness = _reuse_harness(outgoing)
+
+    asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    # 把缓存时间戳挪到窗口之外。
+    key = ("private:1", "warfront", "终结族")
+    harness._hd2_intel_cache[key] = (time.time() - 400, outgoing)
+    asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    assert len(harness.handle_calls) == 2  # type: ignore[attr-defined]
+
+
+def test_schema_exposes_freshness_parameter() -> None:
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key="test-key",
+        openai_base_url="https://example.com/v1",
+        openai_model="test-model",
+        temperature=0.6,
+        max_tokens=350,
+        chat_stream_enabled=False,
+    )
+    schemas = available_tool_schemas(config, hd2_nl_allowed=True)
+    by_name = {item["function"]["name"]: item for item in schemas}
+    params = by_name["query_helldivers"]["function"]["parameters"]["properties"]
+    assert params["freshness"]["enum"] == ["auto", "latest"]
+    assert "freshness" not in by_name["query_helldivers"]["function"]["parameters"]["required"]

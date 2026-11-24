@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -511,6 +512,7 @@ def test_server_resolves_quoted_message_through_get_msg() -> None:
                     "card": "栞栞",
                     "nickname": "shiori",
                 },
+                "time": 1700000000,
             },
         }
 
@@ -522,13 +524,16 @@ def test_server_resolves_quoted_message_through_get_msg() -> None:
         ]
     }
 
-    message_id, text, segments, sender_name = asyncio.run(
+    message_id, text, segments, sender_name, sender_id, sent_at = asyncio.run(
         server._resolve_quoted_message(object(), event)
     )
 
     assert message_id == "1001"
     assert text == "被引用的原文"
     assert segments[0]["type"] == "text"
+    # 发送者 QQ 与时间供引用元信息标注来源。
+    assert sender_id == "200001"
+    assert sent_at == 1700000000.0
     # 群名片优先于昵称，用于标注引用图片的真实发送者。
     assert sender_name == "栞栞"
 def test_extract_plain_text_from_string() -> None:
@@ -852,3 +857,44 @@ def test_message_batch_merges_share_card_and_followup_text() -> None:
 
     assert "[视频:测试视频]" in text
     assert "分析一下" in text
+
+
+def test_quoted_provenance_marks_bot_image_and_intel_hint() -> None:
+    server = object.__new__(OneBotServer)
+    server.config = SimpleNamespace(bot_qq=100000001)
+    server._last_hd2_intel = {"private:1": ("warfront", time.time() - 180)}
+
+    text = OneBotServer._quoted_provenance(
+        server,
+        "亚托莉",
+        "100000001",
+        time.time() - 180,
+        "[图片]",
+        [{"type": "image", "data": {"file": "a.jpg"}}],
+        "private:1",
+    )
+
+    assert "你自己发的" in text
+    assert "3 分钟前" in text
+    assert "图片" in text
+    assert "/warfront" in text
+
+
+def test_quoted_provenance_empty_without_quote() -> None:
+    server = object.__new__(OneBotServer)
+    server.config = SimpleNamespace(bot_qq=100000001)
+    server._last_hd2_intel = {}
+    assert (
+        OneBotServer._quoted_provenance(server, "", "", 0.0, "", [], "private:1") == ""
+    )
+
+
+def test_compose_model_input_includes_provenance() -> None:
+    result = _compose_model_input(
+        "这数据又没动吧",
+        "[图片]",
+        provenance="亚托莉（你自己发的），约 3 分钟前，图片",
+    )
+    assert result.startswith("【引用消息】")
+    assert "（引用来源：亚托莉（你自己发的），约 3 分钟前，图片）" in result
+    assert result.endswith("【用户当前消息】\n这数据又没动吧")
