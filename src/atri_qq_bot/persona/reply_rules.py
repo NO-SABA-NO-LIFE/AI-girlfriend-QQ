@@ -601,6 +601,25 @@ def _needs_topic_guidance_repair(
     return any(question in compact for question in generic_questions)
 
 
+_RELATIVE_TIME_TAG_RE = re.compile(
+    r"\[\s*(?:\d+\s*分钟前|\d+\s*小时前|一天前|\d+\s*天前)\s*\]"
+)
+
+
+def _strip_relative_time_tags(text: str) -> str:
+    """剥除模型从历史上下文抄来的相对时间标签（如 [13分钟前]）。
+
+    这类标签只用于给模型提供时间感知，并非回复内容；模型偶尔会把它原样吐回。
+    删标签后再清理残留的连续空格、行首空格和中文标点前的空格，避免留下空洞。
+    """
+
+    cleaned = _RELATIVE_TIME_TAG_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"^[ \t]+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"[ \t]+([。，！？；：、])", r"\1", cleaned)
+    return cleaned
+
+
 def _normalize_reply(text: str) -> str:
     text = text.strip()
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
@@ -618,6 +637,8 @@ def _normalize_reply(text: str) -> str:
     text = _strip_english_reasoning(text)
     # 再剥除夹在中文之间/之后的英文推理段（敏感话题风险评估式泄漏）。
     text = _strip_english_reasoning_runs(text)
+    # 剥除从历史上下文抄来的相对时间标签（[N分钟前/小时前/天前]）。
+    text = _strip_relative_time_tags(text)
     text = text.strip()
     text = re.sub(r"^(亚托莉[:：]\s*)", "", text)
     text = re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+\n", "\n", text))

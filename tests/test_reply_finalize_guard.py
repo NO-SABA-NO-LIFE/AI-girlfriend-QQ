@@ -57,3 +57,32 @@ def test_persona_core_module_is_the_sync_source() -> None:
     """mixin 依赖 core.py 的全局注入；这里守住注入来源不被人为改名。"""
 
     assert "atri_qq_bot.persona.core" in sys.modules
+
+
+def test_relative_time_tag_at_start_is_stripped() -> None:
+    # 句首标签（私聊/群聊都出现过），删掉后不应残留行首空格。
+    assert reply_rules._normalize_reply("[34分钟前] 哼，问就问了，别催。") == "哼，问就问了，别催。"
+
+
+def test_relative_time_tag_in_middle_is_stripped() -> None:
+    # 标签夹在句中、紧贴中文句号：去掉标签并清理中文标点前的空格。
+    assert reply_rules._strip_relative_time_tags(
+        "@天心 (steam好友码:46109848) [27分钟前]。"
+    ) == "@天心 (steam好友码:46109848)。"
+
+
+def test_all_relative_time_label_forms_are_stripped() -> None:
+    cases = {
+        "[13分钟前] 光艾特不说话": "光艾特不说话",
+        "[2小时前] 你才来呀": "你才来呀",
+        "[一天前] 昨天的事": "昨天的事",
+        "[3天前] 好久不见": "好久不见",
+    }
+    for raw, expected in cases.items():
+        assert reply_rules._strip_relative_time_tags(raw) == expected
+
+
+def test_non_time_brackets_are_preserved() -> None:
+    # 不是相对时间标签的方括号（编号/索引等）必须原样保留，不能误伤。
+    text = "战线排名：[3] 某星球，注意 [DONE] 标记。"
+    assert reply_rules._strip_relative_time_tags(text) == text
