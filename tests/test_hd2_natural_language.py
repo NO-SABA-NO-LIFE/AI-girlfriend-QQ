@@ -31,6 +31,7 @@ from atri_qq_bot.llm_tools.hd2_intent import (
     has_explicit_hd2_freshness,
     has_hd2_capability_contradiction,
     normalize_hd2_arguments,
+    normalize_hd2_entity,
     normalize_hd2_freshness,
 )
 from atri_qq_bot.llm_tools.schema import available_tool_schemas
@@ -697,6 +698,116 @@ def test_hd2_refresh_and_redisplay_hints() -> None:
     assert not detect_hd2_redisplay_hint("这数据真难看")
 
 
+def test_executor_treats_faction_aliases_as_same_request(tmp_path) -> None:
+    """终结族 / Terminids 是同一个阵营：第二次不该换写法就重抓一张。"""
+    image = tmp_path / "warfront.png"
+    image.write_bytes(b"png")
+    outgoing = [SimpleNamespace(kind="image", content=str(image))]
+    harness = _reuse_harness(outgoing)
+
+    asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    harness._pending_hd2_nl.clear()
+
+    second = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "Terminids", "auto"
+        )
+    )
+    assert len(harness.handle_calls) == 1  # type: ignore[attr-defined]
+    assert "已复用" in second
+    assert harness._pending_hd2_nl == {"private:1": outgoing}
+
+
+def test_executor_suppresses_echo_even_when_it_would_refetch(tmp_path) -> None:
+    """缓存过期/写法不同也不会绕过拦截：引用着那张图吐槽时一律不再补图。"""
+    image = tmp_path / "warfront.png"
+    image.write_bytes(b"png")
+    outgoing = [SimpleNamespace(kind="image", content=str(image))]
+    harness = _reuse_harness(outgoing)
+
+    asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    harness._pending_hd2_nl.clear()
+    # 缓存作废：正常情况这里会真抓一次并补一张新图。
+    harness._hd2_intel_cache.clear()
+
+    harness._quoted_own_intel_at = {"private:1": time.time()}
+    harness._hd2_turn_text = {"private:1": "都快打完了又不打了，只剩8500人"}
+    echoed = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "Terminids", "auto", False
+        )
+    )
+    assert len(harness.handle_calls) == 1  # type: ignore[attr-defined]
+    assert "不要重复发图" in echoed
+    assert harness._pending_hd2_nl == {}
+
+
+def test_executor_keeps_other_faction_image_when_quoting(tmp_path) -> None:
+    """引用终结族战线图、却要看光能者：这是另一张图，必须照常出。"""
+    image = tmp_path / "warfront.png"
+    image.write_bytes(b"png")
+    outgoing = [SimpleNamespace(kind="image", content=str(image))]
+    harness = _reuse_harness(outgoing)
+
+    asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    harness._pending_hd2_nl.clear()
+
+    harness._quoted_own_intel_at = {"private:1": time.time()}
+    harness._hd2_turn_text = {"private:1": "这张终结族的看腻了，来张光能者的"}
+    other = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "光能者", "auto", False
+        )
+    )
+    assert len(harness.handle_calls) == 2  # type: ignore[attr-defined]
+    assert "情报已就绪" in other
+    assert harness._pending_hd2_nl == {"private:1": outgoing}
+
+
+def test_normalize_hd2_entity_aliases() -> None:
+    # 战线：直接复用 bridge 的阵营别名表，中文俗称与英文都归一。
+    for alias in (" 终结族 ", "终结虫", "虫族", "虫子", "东线", "Terminids", "terminid", "bugs"):
+        assert normalize_hd2_entity("warfront", alias) == "terminids"
+    for alias in ("机器人", "自动机", "铁卫", "西线", "bot", "bots", "Automaton"):
+        assert normalize_hd2_entity("warfront", alias) == "automaton"
+    for alias in ("光能", "光能者", "南线", "illuminate", "squids"):
+        assert normalize_hd2_entity("warfront", alias) == "illuminate"
+    for alias in ("超级地球", "super earth", "人类", "humans"):
+        assert normalize_hd2_entity("warfront", alias) == "humans"
+    # 不认识的写法原样保留，不要硬并到某个阵营上。
+    assert normalize_hd2_entity("warfront", "虚空族") == "虚空族"
+
+
+def test_normalize_hd2_planet_entity_collapses_names() -> None:
+    # 同一颗星球：英文、下划线 slug、官方中文译名、Companion 链接都同一个键。
+    assert normalize_hd2_entity("planet", "Erata Prime") == "erataprime"
+    assert normalize_hd2_entity("planet", "erata_prime") == "erataprime"
+    assert normalize_hd2_entity("planet", " 艾拉特主星 ") == "erataprime"
+    assert (
+        normalize_hd2_entity("planet", "https://hellpad.example/planets/erata_prime_(283)")
+        == "erataprime"
+    )
+    # 中文译名撞车的星球（正式星与 Void 副本同名）不合并，原样保留。
+    assert normalize_hd2_entity("planet", "哈卓毕亚斯") == "哈卓毕亚斯"
+    # 编号的几种写法同一个键（行星名 → 编号仍无法互相归一，见 docstring）。
+    for alias in ("283", "行星 283", "283号", "#283", "planet 283"):
+        assert normalize_hd2_entity("planet", alias) == "283"
+    # wiki / hd2data 是模糊关键词，没有唯一实体，只做空白与大小写归一。
+    assert normalize_hd2_entity("wiki", " 电磁 轨道炮 ") == "电磁轨道炮"
+
+
 def test_executor_latest_forces_refetch_with_realtime(tmp_path) -> None:
     image = tmp_path / "warfront.png"
     image.write_bytes(b"png")
@@ -751,7 +862,7 @@ def test_executor_reuse_expires_after_window(tmp_path, monkeypatch) -> None:
         )
     )
     # 把缓存时间戳挪到窗口之外。
-    key = ("private:1", "warfront", "终结族")
+    key = ("private:1", "warfront", "terminids")
     harness._hd2_intel_cache[key] = (time.time() - 400, outgoing)
     asyncio.run(
         OneBotConnectionMixin._hd2_nl_executor(

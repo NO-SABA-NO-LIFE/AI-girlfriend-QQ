@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import re
 
+from ..helldivers.core.glossary import PLANET_NAMES, normalize_planet_name
+from ..helldivers.core.war_state import FACTION_ALIASES
+
 # 22 个功能各自的规范命令词。顺序与 help_text 的分组大致对应，便于人工核对。
 # 每个字符串都必须是 HelldiversBridge._COMMANDS 中真实存在的 key。
 HD2_CANONICAL_COMMANDS: tuple[str, ...] = (
@@ -110,6 +113,88 @@ def normalize_hd2_freshness(arguments: dict[str, object]) -> str:
         return "auto"
     value = raw.strip().lower()
     return value if value in HD2_FRESHNESS_VALUES else "auto"
+
+
+def normalize_hd2_entity(command: str, argument: str) -> str:
+    """把同一实体的不同写法归一到同一个键（缓存复用与“是不是同一张图”都靠它）。
+
+    有规范实体的两个命令才做映射，且直接复用 bridge 自己的表，避免两份别名
+    各自漂移（``warfront`` 用 ``FACTION_ALIASES``，``planet`` 用官方中文译名
+    反查）；``wiki`` / ``hd2data`` 是模糊关键词检索、没有唯一实体，只做空白与
+    大小写归一；其余命令的 argument 已被丢弃，走不到这里。
+    """
+    text = _compact_entity(argument)
+    command = str(command or "")
+    if command == "warfront":
+        return _HD2_FACTION_KEYS.get(text, text)
+    if command == "planet":
+        # 星球另走官方归一：``erata_prime`` / ``Erata Prime`` / ``艾拉特主星`` /
+        # Companion 链接同键。
+        return _planet_entity_key(argument, text)
+    return text
+
+
+_PLANET_SLUG_RE = re.compile(r"planets/([^/?#]+)", re.IGNORECASE)
+_PLANET_INDEX_SUFFIX_RE = re.compile(r"[_\s]*\(\s*\d+\s*\)$")
+_PLANET_INDEX_ONLY_RE = re.compile(
+    r"^(?:行星|星球|planet|#)?\s*(\d{1,6})(?:\s*号)?$", re.IGNORECASE
+)
+
+
+def _planet_entity_key(argument: str, fallback: str) -> str:
+    """星球实体的归一键：先剥掉 Companion 链接与编号后缀，再查官方译名表。"""
+    text = str(argument or "")
+    match = _PLANET_SLUG_RE.search(text)
+    if match:
+        text = _PLANET_INDEX_SUFFIX_RE.sub("", match.group(1))
+    key = _compact_entity(normalize_planet_name(text))
+    index = _PLANET_INDEX_ONLY_RE.match(key)
+    if index:
+        # “行星283” / “283号” / “#283” 都是同一个编号查询。
+        return index.group(1)
+    return _HD2_PLANET_KEYS.get(key, fallback)
+
+
+def _compact_entity(value: object) -> str:
+    """去掉所有空白并统一大小写：``"Erata Prime"`` 与 ``"erata_prime"`` 同键。"""
+    return re.sub(r"\s+", "", str(value or "")).casefold()
+
+
+def _build_faction_keys() -> dict[str, str]:
+    """把 bridge 的阵营别名表压成 ``去空白小写写法 -> 规范阵营``。"""
+    keys = {
+        _compact_entity(alias): str(canonical).casefold()
+        for alias, canonical in FACTION_ALIASES.items()
+    }
+    for standard in ("Terminids", "Automaton", "Illuminate", "Humans"):
+        keys.setdefault(_compact_entity(standard), standard.casefold())
+    return keys
+
+
+def _build_planet_keys() -> dict[str, str]:
+    """用官方中文译名表做双向归一键：中文名、英文名、``- Void`` 变体同一个键。
+
+    中文译名不唯一时（同名星球/未启用副本，如 ``哈卓毕亚斯``）直接不映射，
+    宁可少复用一次，也不能把两颗不同的星球并成一个键。
+    """
+    keys: dict[str, str] = {}
+    conflicts: set[str] = set()
+    for english, chinese in PLANET_NAMES.items():
+        canonical = _compact_entity(normalize_planet_name(english))
+        keys[canonical] = canonical
+        chinese_key = _compact_entity(chinese)
+        previous = keys.get(chinese_key)
+        if previous is None:
+            keys[chinese_key] = canonical
+        elif previous != canonical:
+            conflicts.add(chinese_key)
+    for key in conflicts:
+        keys.pop(key, None)
+    return keys
+
+
+_HD2_FACTION_KEYS: dict[str, str] = _build_faction_keys()
+_HD2_PLANET_KEYS: dict[str, str] = _build_planet_keys()
 
 
 def has_explicit_hd2_freshness(arguments: dict[str, object]) -> bool:

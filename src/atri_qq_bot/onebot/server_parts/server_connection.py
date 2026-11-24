@@ -37,8 +37,10 @@ LOGGER = logging.getLogger("atri.onebot")
 _HD2_INTEL_REUSE_SECONDS = 300.0
 
 
-def _record_hd2_last_intel(owner: Any, conversation_id: str, command: str) -> None:
-    """记下本会话最近一次 HD2 命令，供引用元信息判断“这是不是刚才那张图”。
+def _record_hd2_last_intel(
+    owner: Any, conversation_id: str, command: str, entity: str = ""
+) -> None:
+    """记下本会话最近一次 HD2 命令与实体，供引用元信息判断“这是不是刚才那张图”。
 
     用模块函数而不是实例方法：执行器在单元测试里会被挂在 ``SimpleNamespace``
     替身上，不能假定完整服务对象已经初始化。
@@ -47,7 +49,27 @@ def _record_hd2_last_intel(owner: Any, conversation_id: str, command: str) -> No
     if not isinstance(store, dict):
         store = {}
         owner._last_hd2_intel = store
-    store[str(conversation_id)] = (str(command), time.time())
+    store[str(conversation_id)] = (str(command), str(entity or ""), time.time())
+
+
+def _hd2_last_intel_entry(
+    owner: Any, conversation_id: str
+) -> tuple[str, str, float] | None:
+    """读最近一次情报记录，兼容老的两元组 ``(command, at)``。"""
+    store = getattr(owner, "_last_hd2_intel", None)
+    if not isinstance(store, dict):
+        return None
+    raw = store.get(str(conversation_id))
+    if not raw:
+        return None
+    try:
+        if len(raw) == 3:
+            return str(raw[0]), str(raw[1] or ""), float(raw[2] or 0.0)
+        if len(raw) == 2:
+            return str(raw[0]), "", float(raw[1] or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return None
 
 
 # “用户正在引用机器人自己刚发的那张情报图”的时间窗：这段时间内不再补发同一张图。
@@ -327,7 +349,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
         # 让「再看一眼」无需重新抓取，也不会因为刷新被拦下发不出来。
         self._hd2_intel_cache: dict[tuple[str, str, str], tuple[float, list[Any]]] = {}
         # 最近一次 HD2 命令（供引用元信息标注“这可能是刚才的战线图”）。
-        self._last_hd2_intel: dict[str, tuple[str, float]] = {}
+        self._last_hd2_intel: dict[str, tuple[str, str, float]] = {}
         # 本轮是否正引用着机器人自己刚发的 HD2 情报图：命中时复用不再补发同一张图。
         self._quoted_own_intel_at: dict[str, float] = {}
         # 本轮用户原话：用来区分“要新的/想再看”和“只是吐槽”。
@@ -384,6 +406,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
             build_hd2_slash,
             detect_hd2_redisplay_hint,
             detect_hd2_refresh_hint,
+            normalize_hd2_entity,
         )
 
         wants_latest = str(freshness or "auto").strip().lower() == "latest"
@@ -396,13 +419,33 @@ class OneBotConnectionMixin(OneBotServerMixin):
             # 模型没给 freshness（等于没表态）时才用用户原话兜底：宁可多抓一次，
             # 也不能拿几分钟前那张图糊弄“我要新的”。模型显式说了 auto 就听它的。
             wants_latest = True
+        entity = normalize_hd2_entity(command, argument)
         store = getattr(self, "_hd2_intel_cache", None)
         if not isinstance(store, dict):
             store = {}
             self._hd2_intel_cache = store
         reuse_seconds = _HD2_INTEL_REUSE_SECONDS
-        key = (conversation_id, str(command), str(argument or "").strip().casefold())
+        # 实体先归一（终结族 / Terminids 视为同一条），否则同一个阵营换个写法
+        # 就会当成新请求，重新抓一遍再补一张图。
+        key = (conversation_id, str(command), entity)
         now = time.time()
+
+        # 用户正引用着她刚发的这张图、又没说“要看/要新”：不管这条路是复用还是
+        # 重抓，都不要再把同一张图发一遍——先判这件事，再决定要不要真去抓。
+        if not wants_latest and not detect_hd2_redisplay_hint(turn_text):
+            if _quoted_own_intel_active(self, conversation_id):
+                last = _hd2_last_intel_entry(self, conversation_id)
+                same_request = last is None or (
+                    last[0] == str(command)
+                    and (not last[1] or last[1] == entity)
+                )
+                if same_request:
+                    return (
+                        "用户引用的就是你自己刚发出的这份情报图，内容在他眼前。"
+                        "本轮不要重复发图，用一句自然的话回应即可（可以评论数据，"
+                        "需要时提醒他向上翻看）；只有他明确要求再看或刷新时，"
+                        "才用 freshness=\"latest\" 再调用一次。"
+                    )
 
         if not wants_latest:
             cached = store.get(key)
@@ -410,19 +453,9 @@ class OneBotConnectionMixin(OneBotServerMixin):
                 cached_at, cached_messages = cached
                 age = now - float(cached_at)
                 if age <= reuse_seconds and _hd2_intel_still_usable(cached_messages):
-                    if _quoted_own_intel_active(
-                        self, conversation_id
-                    ) and not detect_hd2_redisplay_hint(turn_text):
-                        # 用户引用着的就是这张图、又没说要再看：他眼前已经有它了，本轮不再补发。
-                        return (
-                            "用户引用的就是你自己刚发出的这份情报图，内容在他眼前。"
-                            "本轮不要重复发图，用一句自然的话回应即可（可以评论数据，"
-                            "需要时提醒他向上翻看）；只有他明确要求再看或刷新时，"
-                            "才用 freshness=\"latest\" 再调用一次。"
-                        )
                     # 复用同一份结果：图还是那张图，但用户明确想看时照样发得出来。
                     self._pending_hd2_nl[conversation_id] = cached_messages
-                    _record_hd2_last_intel(self, conversation_id, command)
+                    _record_hd2_last_intel(self, conversation_id, command, entity)
                     when = (
                         "刚刚"
                         if age < 60
@@ -459,7 +492,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
         if len(store) > 64:
             oldest_key = min(store, key=lambda item: store[item][0])
             store.pop(oldest_key, None)
-        _record_hd2_last_intel(self, conversation_id, command)
+        _record_hd2_last_intel(self, conversation_id, command, entity)
         return (
             "Helldivers 情报已就绪，会随本轮回复一起发出。"
             "你只需用一句简短自然的话引导（可带情绪），不要复述卡片里的数据，"

@@ -395,12 +395,11 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             and "图片" in media
             and not _quoted_image_is_sticker(quoted_segments)
         ):
-            from .server_connection import _hd2_msg_ids_of
+            from .server_connection import _hd2_last_intel_entry, _hd2_msg_ids_of
 
-            store = getattr(self, "_last_hd2_intel", None)
-            entry = store.get(str(conversation_id)) if isinstance(store, dict) else None
+            entry = _hd2_last_intel_entry(self, conversation_id)
             if entry:
-                command, noted_at = entry
+                command, _entity, noted_at = entry
                 noted = float(noted_at or 0.0)
                 age = time.time() - noted
                 # 优先按消息 ID 精确比对：她 3 分钟内连发两张图时也能分清。
