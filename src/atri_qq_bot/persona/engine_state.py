@@ -110,7 +110,9 @@ class EngineStateMixin(PersonaEngineMixin):
                 event_id=event_id,
             )
         if runtime_context:
-            self._remember_user_context(conversation_id, user_text, nickname)
+            self._remember_user_context(
+                conversation_id, user_text, nickname, actor_id=actor_id
+            )
 
     def observe_group_incoming(
         self,
@@ -133,7 +135,9 @@ class EngineStateMixin(PersonaEngineMixin):
             is_owner=is_owner,
         )
         if runtime_context:
-            self._remember_user_context(conversation_id, user_text, nickname)
+            self._remember_user_context(
+                conversation_id, user_text, nickname, actor_id=user_id
+            )
         return conversation_id, profile_id
 
     def profile_for(self, conversation_id: str) -> dict[str, Any]:

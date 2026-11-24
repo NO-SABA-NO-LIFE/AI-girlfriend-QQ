@@ -103,3 +103,41 @@ def test_real_greeting_has_substantive_content() -> None:
     )
     for text in cases:
         assert reply_rules._has_substantive_content(text) is True
+
+
+def test_current_speaker_boundary_prompt_names_speaker() -> None:
+    prompt = reply_rules._current_speaker_boundary_prompt("友川纪夫", "依旧机器人大乱斗")
+    # 必须点名当前说话人，并明确不要把别人的话安到他头上。
+    assert "友川纪夫" in prompt
+    assert "张冠李戴" in prompt
+
+
+def test_textless_turn_prompt_keeps_other_speakers_words_apart() -> None:
+    # 戳一戳无文字：服务器输入为占位符 + 回戳反馈。
+    poke_input = "[用户未附加文字]\n\n【系统动作反馈】你刚刚已经回戳了对方一下。"
+    assert reply_rules._is_textless_turn(poke_input) is True
+    prompt = reply_rules._current_speaker_boundary_prompt("潇潇", poke_input)
+    assert "潇潇" in prompt
+    # 明确当前说话人本轮没发文字。
+    assert "没有发送文字" in prompt
+    # 同 #号（哪怕昵称变了、消息很多条）都是本人说的，不同 #号属于其他群友。
+    assert "消息有很多条" in prompt
+    assert "其他群友" in prompt
+    assert "张冠李戴" in prompt
+
+
+def test_group_speaker_label_uses_qq_anchor() -> None:
+    assert reply_rules._group_speaker_label("友川纪夫", 904994489) == "友川纪夫#904994489"
+    # 没有 actor_id 的旧消息 fail-safe 退化为纯昵称。
+    assert reply_rules._group_speaker_label("友川纪夫", None) == "友川纪夫"
+    # 纯数字昵称（无昵称）兜底为“群友”，但仍带 QQ 锚点。
+    assert reply_rules._group_speaker_label("904994489", 904994489) == "群友#904994489"
+
+
+def test_normalize_reply_strips_speaker_anchor() -> None:
+    # 模型若把内部锚点抄进回复，统一清洗时必须剥除，且不影响正常文字。
+    raw = "什么叫被我拐跑啊#904994489，明明是你自己想跑。"
+    out = reply_rules._normalize_reply(raw)
+    assert "#904994489" not in out
+    assert "什么叫被我拐跑啊" in out
+    assert "明明是你自己想跑" in out

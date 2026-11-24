@@ -6,12 +6,21 @@ from .engine_support import PersonaEngineMixin
 
 class EngineContextMixin(PersonaEngineMixin):
     def _remember_user_context(
-        self, conversation_id: str, user_text: str, nickname: str | None = None
+        self,
+        conversation_id: str,
+        user_text: str,
+        nickname: str | None = None,
+        actor_id: int | str | None = None,
     ) -> None:
         if is_memory_pollution_text(user_text):
             return
         self._history[conversation_id].append(
-            {"role": "user", "content": _format_user_content(conversation_id, user_text, nickname)}
+            {
+                "role": "user",
+                "content": _format_user_content(
+                    conversation_id, user_text, nickname, actor_id
+                ),
+            }
         )
 
     def _remember(
@@ -20,12 +29,15 @@ class EngineContextMixin(PersonaEngineMixin):
         user_text: str,
         reply_text: str,
         nickname: str | None = None,
+        actor_id: int | str | None = None,
     ) -> None:
         if not is_memory_pollution_text(user_text):
             self._history[conversation_id].append(
                 {
                     "role": "user",
-                    "content": _format_user_content(conversation_id, user_text, nickname),
+                    "content": _format_user_content(
+                        conversation_id, user_text, nickname, actor_id
+                    ),
                 }
             )
         if not is_memory_pollution_text(reply_text):
@@ -73,9 +85,10 @@ class EngineContextMixin(PersonaEngineMixin):
             if role == "assistant":
                 speaker = "亚托莉"
             elif is_group:
-                speaker = str(entry.get("nickname") or "群友").strip() or "群友"
-                if re.fullmatch(r"\d{5,}", speaker):
-                    speaker = "群友"
+                # 用 QQ 号身份锚点（昵称#QQ号），昵称会变/重名，QQ 号唯一稳定。
+                speaker = _group_speaker_label(
+                    entry.get("nickname"), entry.get("actor_id")
+                )
             else:
                 speaker = "用户"
             label = relative_time_label(entry.get("at"), current_now)
@@ -125,9 +138,9 @@ class EngineContextMixin(PersonaEngineMixin):
             if is_group:
                 text = _sanitize_group_mentions(text)
             if role == "user" and is_group:
-                speaker = str(entry.get("nickname") or "群友").strip() or "群友"
-                if re.fullmatch(r"\d{5,}", speaker):
-                    speaker = "群友"
+                speaker = _group_speaker_label(
+                    entry.get("nickname"), entry.get("actor_id")
+                )
                 text = f"{speaker}: {text}"
             label = relative_time_label(entry.get("at"), current_now)
             if label:

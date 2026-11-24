@@ -1142,7 +1142,10 @@ class OneBotEventMixin(OneBotServerMixin):
             if entry.get("role") == "assistant":
                 speaker = "亚托莉"
             else:
-                speaker = str(entry.get("nickname") or "群友").strip() or "群友"
+                # 同样用 QQ 号身份锚点，保证接话门也能分清说话人。
+                speaker = _group_speaker_label(
+                    entry.get("nickname"), entry.get("actor_id")
+                )
             label = relative_time_label(entry.get("at"), current_now)
             prefix = f"[{label}] " if label else ""
             lines.append(f"{prefix}{speaker}: {text[:120]}")

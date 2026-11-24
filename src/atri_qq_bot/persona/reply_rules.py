@@ -659,6 +659,8 @@ def _normalize_reply(text: str) -> str:
     text = _strip_english_reasoning_runs(text)
     # 剥除从历史上下文抄来的相对时间标签（[N分钟前/小时前/天前]）。
     text = _strip_relative_time_tags(text)
+    # 剥除群聊说话人身份锚点（昵称#QQ号），这是内部标记，不能出现在回复里。
+    text = _strip_speaker_id_markers(text)
     text = text.strip()
     text = re.sub(r"^(亚托莉[:：]\s*)", "", text)
     text = re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+\n", "\n", text))
@@ -732,14 +734,89 @@ def _strip_leading_private_mention(text: str, nickname: str | None = None) -> st
     return text
 
 
+def _group_speaker_label(nickname: str | None, actor_id: int | str | None = None) -> str:
+    """群聊说话人标签：昵称后追加稳定的 QQ 号身份锚点（昵称#QQ号）。
+
+    QQ 号唯一且不随昵称变化，模型据此区分不同说话人；没有 actor_id 的旧消息
+    fail-safe 退化为纯昵称，不编造锚点。
+    """
+
+    name = str(nickname or "").strip()
+    if not name or re.fullmatch(r"\d{5,}", name):
+        name = "群友"
+    if actor_id is not None and str(actor_id).strip():
+        return f"{name}#{str(actor_id).strip()}"
+    return name
+
+
+_SPEAKER_ID_MARKER_RE = re.compile(r"\s*#\d{5,}")
+
+
+def _strip_speaker_id_markers(text: str) -> str:
+    """剥除内部身份锚点（#QQ号），保证 QQ 号不泄漏到回复。"""
+
+    if not text:
+        return text
+    return _SPEAKER_ID_MARKER_RE.sub("", text)
+
+
 def _format_user_content(
-    conversation_id: str, user_text: str, nickname: str | None = None
+    conversation_id: str,
+    user_text: str,
+    nickname: str | None = None,
+    actor_id: int | str | None = None,
 ) -> str:
     if conversation_id.startswith("group:"):
         user_text = _sanitize_group_mentions(user_text)
     if conversation_id.startswith("group:") and nickname:
-        return f"{nickname}：{user_text}"
+        label = _group_speaker_label(nickname, actor_id)
+        return f"{label}：{user_text}"
     return user_text
+
+
+def _current_speaker_boundary_prompt(
+    nickname: str | None,
+    user_text: str = "",
+    actor_id: int | str | None = None,
+) -> str:
+    """群聊里紧贴当前 user 消息注入的说话人边界提示。
+
+    多说话人相邻时，模型偶尔把其他群友的话安到当前说话人头上。统一原则是完全依赖
+    每条消息说话人标签里的 QQ 号锚点（昵称#QQ号）判断归属：#号相同的（哪怕昵称变了、
+    消息有很多条）都是同一个人说的，#号不同的（哪怕昵称相同）都是不同的人。
+    两个分支只在“本轮是否有新文字”上有区别：
+    - 有真实文字：最后一条 user 消息是当前说话人本轮发的；
+    - 无文字（戳一戳等，输入为占位符）：本轮没有他新说的话，历史同 #号的可承接。
+    """
+
+    name = str(nickname or "").strip() or "当前群友"
+    # 归属判断依赖说话人标签里的 QQ 号锚点，而不是会变/会重名的昵称。
+    ownership = (
+        "上方历史的说话人优先用“昵称#QQ号”身份锚点：#号相同的（哪怕昵称变了、"
+        "消息有很多条）都是他本人说的，都可以承接；#号不同的（哪怕昵称相同）属于"
+        "其他群友，不要安到他头上。个别没有 #号的旧消息只作参考，拿不准归属就不要引用。"
+        "请按 #号逐句区分，不能张冠李戴，也不要在回复里写 #号。"
+    )
+    if _is_textless_turn(user_text):
+        return (
+            f"当前说话人“{name}”本轮没有发送文字（这是戳一戳之类的无文字触发），"
+            "本轮没有他新说的话。" + ownership
+        )
+    return (
+        f"下面最后一条 user 消息是当前说话人“{name}”本轮发的。" + ownership
+    )
+
+
+_NO_TEXT_SENTINEL = "[用户未附加文字]"
+
+
+def _is_textless_turn(user_text: str) -> bool:
+    """当前回合是否没有真实文字（戳一戳/空输入，服务器会填占位符）。"""
+
+    text = str(user_text or "").strip()
+    if not text:
+        return True
+    return _NO_TEXT_SENTINEL in text
 
 
 def _shares_content_word(user_text: str, reply_text: str) -> bool:

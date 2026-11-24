@@ -309,6 +309,126 @@ def test_group_prompt_marks_same_sender_focus_as_mandatory(monkeypatch, tmp_path
     assert "其他群友消息只能作为背景" in focus_prompt
 
 
+def test_group_reply_injects_current_speaker_boundary(monkeypatch, tmp_path) -> None:
+    config = BotConfig(
+        bot_qq=BOT_QQ,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="smart",
+        openai_api_key="test-key",
+        openai_base_url="https://example.test/v1",
+        openai_model="test-model",
+        temperature=0.4,
+        max_tokens=350,
+        memory_path=tmp_path / "memory.json",
+        llm_tools_enabled=False,
+    )
+    engine = AtriReplyEngine(config)
+    captured: dict[str, object] = {}
+
+    async def fake_post(client, headers, payload):
+        captured.update(payload)
+        return {"choices": [{"message": {"content": "大乱斗我肯定赢。"}}]}
+
+    monkeypatch.setattr(engine, "_post_chat_completion", fake_post)
+
+    reply = asyncio.run(
+        engine._reply_with_api(
+            f"group:{GROUP_ID}",
+            "依旧机器人大乱斗",
+            "友川纪夫",
+            profile_id=f"group:{GROUP_ID}:user:10002",
+            allow_reply_voice=False,
+        )
+    )
+
+    messages = captured["messages"]
+    contents = [str(m.get("content") or "") for m in messages]
+    # 边界提示点名当前说话人，且紧贴最后一条 user 消息。
+    boundary_idx = next(
+        i for i, c in enumerate(contents) if "当前说话人“友川纪夫”" in c
+    )
+    assert boundary_idx == len(messages) - 2
+    assert messages[-1]["role"] == "user"
+    assert messages[-1]["content"] == "友川纪夫#10002：依旧机器人大乱斗"
+    assert reply == "大乱斗我肯定赢。"
+
+
+def test_group_poke_textless_turn_warns_history_belongs_to_others(
+    monkeypatch, tmp_path
+) -> None:
+    config = BotConfig(
+        bot_qq=BOT_QQ,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="smart",
+        openai_api_key="test-key",
+        openai_base_url="https://example.test/v1",
+        openai_model="test-model",
+        temperature=0.4,
+        max_tokens=350,
+        memory_path=tmp_path / "memory.json",
+        llm_tools_enabled=False,
+    )
+    engine = AtriReplyEngine(config)
+    captured: dict[str, object] = {}
+
+    async def fake_post(client, headers, payload):
+        captured.update(payload)
+        return {"choices": [{"message": {"content": "戳我干嘛啦，无聊。"}}]}
+
+    monkeypatch.setattr(engine, "_post_chat_completion", fake_post)
+
+    # 戳一戳无文字：服务器输入为占位符 + 回戳反馈。
+    poke_input = "[用户未附加文字]\n\n【系统动作反馈】你刚刚已经回戳了对方一下。"
+    reply = asyncio.run(
+        engine._reply_with_api(
+            f"group:{GROUP_ID}",
+            poke_input,
+            "潇潇",
+            profile_id=f"group:{GROUP_ID}:user:10003",
+            allow_reply_voice=False,
+        )
+    )
+
+    messages = captured["messages"]
+    contents = [str(m.get("content") or "") for m in messages]
+    boundary = next(c for c in contents if "当前说话人“潇潇”" in c)
+    # 必须告知模型潇潇本轮没发文字，并按 QQ 号锚点区分本人（可多条）/他人的历史。
+    assert "没有发送文字" in boundary
+    assert "消息有很多条" in boundary
+    assert "其他群友" in boundary
+    assert reply == "戳我干嘛啦，无聊。"
+
+
+def test_remember_anchors_in_memory_history_with_qq(monkeypatch, tmp_path) -> None:
+    config = BotConfig(
+        bot_qq=BOT_QQ,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="smart",
+        openai_api_key="test-key",
+        openai_base_url="https://example.test/v1",
+        openai_model="test-model",
+        temperature=0.4,
+        max_tokens=350,
+        memory_path=tmp_path / "memory.json",
+        llm_tools_enabled=False,
+    )
+    engine = AtriReplyEngine(config)
+    engine._remember(
+        f"group:{GROUP_ID}",
+        "依旧机器人大乱斗",
+        "大乱斗我赢",
+        "友川纪夫",
+        actor_id=10002,
+    )
+    history = engine._history[f"group:{GROUP_ID}"]
+    user_content = next(m["content"] for m in history if m["role"] == "user")
+    # 注入到 line 322 的内存历史必须带 QQ 锚点，不能再是无锚点的平行副本。
+    assert user_content == "友川纪夫#10002：依旧机器人大乱斗"
+
+
 def test_server_routes_previous_share_and_focus_to_same_reply(monkeypatch, tmp_path) -> None:
     config = BotConfig(
         bot_qq=BOT_QQ,
@@ -822,16 +942,20 @@ def test_suppressed_member_message_is_recorded_but_not_sent(
     monkeypatch.setattr(server.tools, "analyze", fake_analyze)
     monkeypatch.setattr(server, "send_reply", fake_send_reply)
 
+    # 先进入冷却（明确说“不聊了”）。
     end = _group_event(10001, _at_bot(), _text("不聊了"))
     end.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
     asyncio.run(server._handle_event(object(), end))
     sent.clear()
 
+    # 冷却期发一条普通消息：不 @、不引用。
     normal = _group_event(10001, _text("我刚和别人聊到周末计划"))
     normal.update({"self_id": BOT_QQ, "sender": {"card": "A"}})
     asyncio.run(server._handle_event(object(), normal))
 
+    # 不回复……
     assert sent == []
+    # ……但已写进成员维度历史，冷却结束后可被引用。
     member_id = f"group:{GROUP_ID}:user:10001"
     history = engine.memory.recent_history(member_id, limit=10)
     assert any(
@@ -1072,8 +1196,8 @@ def test_history_context_carries_relative_time(monkeypatch, tmp_path) -> None:
          "nickname": "小鱿鱼", "actor_id": "10001"},
     ]
     group_ctx = engine._recent_conversation_context(group_conv)
-    assert "[一天前] 小花: 一天前的话" in group_ctx
-    assert "小鱿鱼: 刚刚的话" in group_ctx
+    assert "[一天前] 小花#10002: 一天前的话" in group_ctx
+    assert "小鱿鱼#10001: 刚刚的话" in group_ctx
     assert "[一天前]" not in group_ctx.split("刚刚的话", 1)[1]
 
     group_msgs = engine._recent_conversation_messages(group_conv)
@@ -1081,10 +1205,12 @@ def test_history_context_carries_relative_time(monkeypatch, tmp_path) -> None:
     assert any(c.startswith("[一天前]") for c in contents)
     assert all(not c.startswith("[") for c in contents if "刚刚的话" in c)
 
-    # 接话门上下文同样带标签。
+    # 接话门上下文同样带标签与 QQ 锚点。
     gate_event = _group_event(10001, _text("触发"))
     gate_ctx = server._format_ambient_group_context(gate_event)
     assert "[一天前]" in gate_ctx
+    assert "小花#10002" in gate_ctx
+    assert "小鱿鱼#10001" in gate_ctx
 
     # 私聊：三小时前的用户消息也能识别新旧。
     private_conv = "private:10001"

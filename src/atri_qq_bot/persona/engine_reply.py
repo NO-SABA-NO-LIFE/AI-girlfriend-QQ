@@ -40,7 +40,9 @@ class EngineReplyMixin(PersonaEngineMixin):
         is_owner = _is_owner_id(actor_id, self.config.owner_qqs)
         command_reply = self._handle_affection_command(profile_id, clean_text, is_owner)
         if command_reply:
-            self._remember(conversation_id, clean_text, command_reply, nickname)
+            self._remember(
+                conversation_id, clean_text, command_reply, nickname, actor_id=actor_id
+            )
             return command_reply
 
         if not observed:
@@ -59,7 +61,9 @@ class EngineReplyMixin(PersonaEngineMixin):
 
         if serious_requested and _is_serious_only_message(clean_text):
             serious_reply = "收到，我切回正常中文。抽象梗先收着，后面先按当前话题认真说。"
-            self._remember(conversation_id, clean_text, serious_reply, nickname)
+            self._remember(
+                conversation_id, clean_text, serious_reply, nickname, actor_id=actor_id
+            )
             return serious_reply
 
         iteration_decision = judge_correction(clean_text)
@@ -88,7 +92,9 @@ class EngineReplyMixin(PersonaEngineMixin):
                 conversation_id,
                 "视觉材料未取得足够可靠的识别结果",
             )
-            self._remember_user_context(conversation_id, clean_text, nickname)
+            self._remember_user_context(
+                conversation_id, clean_text, nickname, actor_id=actor_id
+            )
             # 2026-11-07 改动：视觉失败不再静默。
             # 旧逻辑 `return ""` 会让用户侧完全收不到回应（用户反馈「看不到图片」，
             # 日志里只有 ERROR ... 已保持用户侧静默）。现在给一句降级话术：
@@ -340,7 +346,13 @@ class EngineReplyMixin(PersonaEngineMixin):
                     nickname=nickname,
                 )
                 if api_reply:
-                    self._remember(conversation_id, clean_text, api_reply, nickname)
+                    self._remember(
+                        conversation_id,
+                        clean_text,
+                        api_reply,
+                        nickname,
+                        actor_id=actor_id,
+                    )
                     return api_reply
                 raise RuntimeError("模型返回空消息")
             except Exception as exc:
@@ -350,7 +362,9 @@ class EngineReplyMixin(PersonaEngineMixin):
                 )
         else:
             self._register_reply_failure(conversation_id, "聊天模型当前未启用")
-        self._remember_user_context(conversation_id, clean_text, nickname)
+        self._remember_user_context(
+            conversation_id, clean_text, nickname, actor_id=actor_id
+        )
         return ""
 
     def _handle_affection_command(

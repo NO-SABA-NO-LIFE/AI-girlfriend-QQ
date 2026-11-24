@@ -332,8 +332,25 @@ class EngineToolsMixin(PersonaEngineMixin):
                     ),
                 }
             )
+        # 当前说话人的 QQ 号（从 profile_id 派生），作为身份锚点贯穿边界提示与当前回合。
+        current_actor_id = _user_id_from_profile_id(profile_id)
+        if conversation_id.startswith("group:") and nickname:
+            # 紧贴当前回合注入说话人边界，防止把其他群友的话张冠李戴。
+            messages.append(
+                {
+                    "role": "system",
+                    "content": _current_speaker_boundary_prompt(
+                        nickname, user_text, current_actor_id
+                    ),
+                }
+            )
         messages.append(
-            {"role": "user", "content": _format_user_content(conversation_id, user_text, nickname)}
+            {
+                "role": "user",
+                "content": _format_user_content(
+                    conversation_id, user_text, nickname, current_actor_id
+                ),
+            }
         )
 
         payload = {
