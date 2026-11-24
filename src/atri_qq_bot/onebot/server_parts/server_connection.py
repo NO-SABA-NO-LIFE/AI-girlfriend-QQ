@@ -50,6 +50,83 @@ def _record_hd2_last_intel(owner: Any, conversation_id: str, command: str) -> No
     store[str(conversation_id)] = (str(command), time.time())
 
 
+# “用户正在引用机器人自己刚发的那张情报图”的时间窗：这段时间内不再补发同一张图。
+_HD2_QUOTED_ECHO_SECONDS = 180.0
+
+
+def _mark_quoted_own_intel(owner: Any, conversation_id: str) -> None:
+    """记下本轮引用的是机器人自己的情报图（由引用元信息判定后调用）。
+
+    执行器据此在复用命中时不重复补发同一张图——用户正对着那张图说话，
+    再刷一遍就是刷屏。同样用模块函数，``SimpleNamespace`` 替身也安全。
+    """
+    store = getattr(owner, "_quoted_own_intel_at", None)
+    if not isinstance(store, dict):
+        store = {}
+        owner._quoted_own_intel_at = store
+    store[str(conversation_id)] = time.time()
+
+
+def _clear_quoted_own_intel(owner: Any, conversation_id: str) -> None:
+    """本轮引用与自家情报图无关时清掉标记，避免它残留到下一轮。"""
+    store = getattr(owner, "_quoted_own_intel_at", None)
+    if isinstance(store, dict):
+        store.pop(str(conversation_id), None)
+
+
+def _note_hd2_turn_text(owner: Any, conversation_id: str, text: str) -> None:
+    """记下本轮用户原话：执行器据此区分“要新的”和“只是对着图吐槽”。"""
+    store = getattr(owner, "_hd2_turn_text", None)
+    if not isinstance(store, dict):
+        store = {}
+        owner._hd2_turn_text = store
+    store[str(conversation_id)] = str(text or "")
+
+
+def _hd2_turn_text_of(owner: Any, conversation_id: str) -> str:
+    """取本轮用户原话；没有记录返回空串（按“没有明确诉求”处理）。"""
+    store = getattr(owner, "_hd2_turn_text", None)
+    if not isinstance(store, dict):
+        return ""
+    return str(store.get(str(conversation_id)) or "")
+
+
+def _record_hd2_msg_ids(owner: Any, conversation_id: str, message_ids: Any) -> None:
+    """记下这次情报图片实际发出的 message_id，供引用时精确比对。"""
+    ids = [str(item).strip() for item in (message_ids or []) if str(item or "").strip()]
+    if not ids:
+        return
+    store = getattr(owner, "_last_hd2_msg_ids", None)
+    if not isinstance(store, dict):
+        store = {}
+        owner._last_hd2_msg_ids = store
+    store[str(conversation_id)] = set(ids)
+
+
+def _hd2_msg_ids_of(owner: Any, conversation_id: str) -> set[str]:
+    """本会话最近一次情报图片的 message_id 集合；没有记录时返回空集。"""
+    store = getattr(owner, "_last_hd2_msg_ids", None)
+    if not isinstance(store, dict):
+        return set()
+    ids = store.get(str(conversation_id))
+    if isinstance(ids, (set, frozenset)):
+        return set(ids)
+    if isinstance(ids, (list, tuple)):
+        return {str(item) for item in ids}
+    return set()
+
+
+def _quoted_own_intel_active(owner: Any, conversation_id: str) -> bool:
+    """本轮是否正引用着机器人刚发的情报图（窗口 180 秒）。"""
+    store = getattr(owner, "_quoted_own_intel_at", None)
+    if not isinstance(store, dict):
+        return False
+    seen = store.get(str(conversation_id))
+    if not seen:
+        return False
+    return (time.time() - float(seen)) <= _HD2_QUOTED_ECHO_SECONDS
+
+
 def _hd2_intel_still_usable(messages: Any) -> bool:
     """复用前确认缓存的 HD2 结果还能发出去：图片文件仍在、列表非空。
 
@@ -251,6 +328,12 @@ class OneBotConnectionMixin(OneBotServerMixin):
         self._hd2_intel_cache: dict[tuple[str, str, str], tuple[float, list[Any]]] = {}
         # 最近一次 HD2 命令（供引用元信息标注“这可能是刚才的战线图”）。
         self._last_hd2_intel: dict[str, tuple[str, float]] = {}
+        # 本轮是否正引用着机器人自己刚发的 HD2 情报图：命中时复用不再补发同一张图。
+        self._quoted_own_intel_at: dict[str, float] = {}
+        # 本轮用户原话：用来区分“要新的/想再看”和“只是吐槽”。
+        self._hd2_turn_text: dict[str, str] = {}
+        # 最近一次情报图片发出后的 message_id：引用时用它精确确认是不是同一张。
+        self._last_hd2_msg_ids: dict[str, set[str]] = {}
 
     async def _hd2_group_list_provider(self) -> list[str]:
         """确认 QQ 在线后返回当前加入的群号字符串列表；不确定即抛错。"""
@@ -286,6 +369,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
         command: str,
         argument: str,
         freshness: str = "auto",
+        explicit: bool = True,
     ) -> str:
         """执行自然语言 HD2 工具：重建斜杠命令并复用 bridge 情报链路。
 
@@ -296,9 +380,22 @@ class OneBotConnectionMixin(OneBotServerMixin):
         复用那份结果重发（不再抓取/渲染），保证「再看一眼」一定发得出来；
         ``latest`` 时跳过复用重新出图，战线类命令还会要求数据侧实时刷新。
         """
-        from ...llm_tools.hd2_intent import build_hd2_slash
+        from ...llm_tools.hd2_intent import (
+            build_hd2_slash,
+            detect_hd2_redisplay_hint,
+            detect_hd2_refresh_hint,
+        )
 
         wants_latest = str(freshness or "auto").strip().lower() == "latest"
+        turn_text = _hd2_turn_text_of(self, conversation_id)
+        if (
+            not wants_latest
+            and not explicit
+            and detect_hd2_refresh_hint(turn_text)
+        ):
+            # 模型没给 freshness（等于没表态）时才用用户原话兜底：宁可多抓一次，
+            # 也不能拿几分钟前那张图糊弄“我要新的”。模型显式说了 auto 就听它的。
+            wants_latest = True
         store = getattr(self, "_hd2_intel_cache", None)
         if not isinstance(store, dict):
             store = {}
@@ -313,6 +410,16 @@ class OneBotConnectionMixin(OneBotServerMixin):
                 cached_at, cached_messages = cached
                 age = now - float(cached_at)
                 if age <= reuse_seconds and _hd2_intel_still_usable(cached_messages):
+                    if _quoted_own_intel_active(
+                        self, conversation_id
+                    ) and not detect_hd2_redisplay_hint(turn_text):
+                        # 用户引用着的就是这张图、又没说要再看：他眼前已经有它了，本轮不再补发。
+                        return (
+                            "用户引用的就是你自己刚发出的这份情报图，内容在他眼前。"
+                            "本轮不要重复发图，用一句自然的话回应即可（可以评论数据，"
+                            "需要时提醒他向上翻看）；只有他明确要求再看或刷新时，"
+                            "才用 freshness=\"latest\" 再调用一次。"
+                        )
                     # 复用同一份结果：图还是那张图，但用户明确想看时照样发得出来。
                     self._pending_hd2_nl[conversation_id] = cached_messages
                     _record_hd2_last_intel(self, conversation_id, command)

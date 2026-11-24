@@ -15,6 +15,9 @@ LOGGER = logging.getLogger("atri.onebot")
 # 群内重复内容去重窗口：该秒数内意思相同的消息只回复一次。
 GROUP_DEDUP_WINDOW_SECONDS = 120.0
 
+# 引用图片与“最近一次情报生成时间”的最大偏差：超出说明引用的是别的图。
+_HD2_QUOTED_MATCH_SECONDS = 180.0
+
 # 内部约定字段：合并“别人发的群图”时，把真实发送者昵称写进图片段的 data 里。
 # 命名以下划线开头，避免与 OneBot 原始字段冲突；toolbox 读取后转成归属提示。
 # 注意：toolbox_parts/request_collection.py 用同名字符串读取，修改需两处同步。
@@ -91,6 +94,45 @@ def _format_relative_age(at: float) -> str:
     if delta < 86400:
         return f"约 {int(delta // 3600)} 小时前"
     return f"约 {int(delta // 86400)} 天前"
+
+
+def _message_id_from_result(result: Any) -> str:
+    """从 OneBot 发送回执里取 message_id；缺失或异常一律返回空串。
+
+    只用于“这张图是不是我刚发的那张”的精确比对，取不到就退回纯元信息判断，
+    绝不能因为它影响发送本身。
+    """
+    if not isinstance(result, dict):
+        return ""
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return ""
+    raw = data.get("message_id")
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
+def _quoted_image_is_sticker(segments: Any) -> bool:
+    """引用里的图片是不是表情/表情包（而不是普通截图或情报图）。
+
+    QQ 的收藏表情通常以 ``image`` 段到达，但带 ``sub_type=1`` 或
+    ``summary="[动画表情]"``；这类图片永远不可能是战线图，不能触发复用拦截。
+    """
+    for segment in segments or []:
+        if not isinstance(segment, dict):
+            continue
+        if str(segment.get("type") or "").lower() != "image":
+            continue
+        data = segment.get("data") if isinstance(segment.get("data"), dict) else {}
+        try:
+            if int(data.get("sub_type") or 0) == 1:
+                return True
+        except (TypeError, ValueError):
+            pass
+        if "表情" in str(data.get("summary") or ""):
+            return True
+    return False
 
 
 def _quoted_media_kinds(segments: Any) -> str:
@@ -315,6 +357,7 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         quoted_text: str,
         quoted_segments: list[dict[str, Any]],
         conversation_id: str,
+        quoted_message_id: str = "",
     ) -> str:
         """拼一条给模型看的引用来源说明；没有引用内容时返回空串。
 
@@ -323,6 +366,10 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         """
 
         if not (str(quoted_text or "").strip() or quoted_segments):
+            # 没有引用内容就清掉“正在看自家情报图”的标记，避免它残留到下一轮。
+            from .server_connection import _clear_quoted_own_intel
+
+            _clear_quoted_own_intel(self, conversation_id)
             return ""
         config = getattr(self, "config", None)
         bot_qq = str(getattr(config, "bot_qq", "") or "")
@@ -343,17 +390,41 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         parts.append(media or "文字")
 
         intel_note = ""
-        if is_bot and "图片" in media:
+        if (
+            is_bot
+            and "图片" in media
+            and not _quoted_image_is_sticker(quoted_segments)
+        ):
+            from .server_connection import _hd2_msg_ids_of
+
             store = getattr(self, "_last_hd2_intel", None)
             entry = store.get(str(conversation_id)) if isinstance(store, dict) else None
             if entry:
                 command, noted_at = entry
-                age = time.time() - float(noted_at or 0.0)
-                if age <= 600:  # 10 分钟内：大概率就是刚发的那张情报图
+                noted = float(noted_at or 0.0)
+                age = time.time() - noted
+                # 优先按消息 ID 精确比对：她 3 分钟内连发两张图时也能分清。
+                # 没有记录到 ID（老数据、发送回执没带 id）才退回时间窗判断。
+                known_ids = _hd2_msg_ids_of(self, conversation_id)
+                if known_ids:
+                    same_image = str(quoted_message_id or "") in known_ids
+                else:
+                    at = float(sent_at or 0.0)
+                    same_image = (not at) or (
+                        abs(at - noted) <= _HD2_QUOTED_MATCH_SECONDS
+                    )
+                if age <= 600 and same_image:  # 10 分钟内：确实是她刚发的那张情报图
                     intel_note = (
                         f"，疑似刚用 /{command} 生成的情报图"
                         f"（{_format_relative_age(noted_at)}）"
                     )
+        # 命中“自家情报图”时打标记：这一轮执行器复用结果也不会再补发同一张图。
+        from .server_connection import _clear_quoted_own_intel, _mark_quoted_own_intel
+
+        if intel_note:
+            _mark_quoted_own_intel(self, conversation_id)
+        else:
+            _clear_quoted_own_intel(self, conversation_id)
         return "，".join(parts) + intel_note
 
     def _allow_poke_back(self, event: dict[str, Any]) -> bool:
@@ -643,7 +714,13 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         model_name: str = "",
         first_delay: bool = True,
         group_quote: bool = True,
+        collect_ids: list[str] | None = None,
     ) -> str:
+        """发送一组消息并返回已送达的文本。
+
+        ``collect_ids`` 非空时，把**图片气泡**的 message_id 追加进去，
+        供“用户引用的是不是这张图”做精确比对。
+        """
         outgoing = [OutgoingMessage("text", messages)] if isinstance(messages, str) else messages
         normalized_model_type = str(model_type or "").strip().lower()
         if normalized_model_type not in {"chat", "vision", "voice"}:
@@ -665,14 +742,24 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             and any(item.kind == "image" for item in outgoing)
         ):
             return await self._send_merged_reply(
-                websocket, event, outgoing, group_quote=group_quote
+                websocket,
+                event,
+                outgoing,
+                group_quote=group_quote,
+                collect_ids=collect_ids,
             )
         for index, message in enumerate(outgoing):
             try:
                 # 引用+@只加在第一个气泡，后续气泡不带前缀，避免重复刷屏。
-                await self._send_one_reply(
+                message_id = await self._send_one_reply(
                     websocket, event, message, group_quote=group_quote and index == 0
                 )
+                if (
+                    collect_ids is not None
+                    and message.kind == "image"
+                    and message_id
+                ):
+                    collect_ids.append(message_id)
                 self._record_delivery_event(event, message=message, model_type=normalized_model_type, model_name=model_name, status="success")
             except Exception as exc:
                 self._record_delivery_event(event, message=message, model_type=normalized_model_type, model_name=model_name, status="failed", error=str(exc))
@@ -888,7 +975,8 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         message: OutgoingMessage,
         *,
         group_quote: bool = True,
-    ) -> None:
+    ) -> str:
+        """发出一条消息，成功时返回 OneBot 的 message_id（取不到返回空串）。"""
         message_type = event.get("message_type")
         onebot_message = outgoing_to_onebot_message(message)
         if message.kind == "record":
@@ -905,7 +993,7 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                     self._log_voice_event(event, "delivery_failed", error=str(exc))
                     raise
                 self._log_voice_event(event, "delivered", message=message, result=result)
-                return
+                return _message_id_from_result(result)
             if message_type == "group":
                 group_message = self._with_group_reply_prefix(
                     event, onebot_message, group_quote=group_quote
@@ -922,7 +1010,7 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                     self._log_voice_event(event, "delivery_failed", error=str(exc))
                     raise
                 self._log_voice_event(event, "delivered", message=message, result=result)
-                return
+                return _message_id_from_result(result)
         if message_type == "private":
             result = await self.call_action_and_wait(
                 websocket,
@@ -931,7 +1019,7 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                 12.0,
             )
             self._require_message_delivery(result)
-            return
+            return _message_id_from_result(result)
 
         if message_type == "group":
             group_message = self._with_group_reply_prefix(
@@ -944,6 +1032,8 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                 12.0,
             )
             self._require_message_delivery(result)
+            return _message_id_from_result(result)
+        return ""
 
     async def _send_merged_reply(
         self,
@@ -952,6 +1042,7 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         outgoing: list[OutgoingMessage],
         *,
         group_quote: bool = True,
+        collect_ids: list[str] | None = None,
     ) -> str:
         """把多条 OutgoingMessage 的消息段 flatten 成一条 QQ 消息整体发送。"""
         segments: list[dict[str, Any]] = []
@@ -977,6 +1068,10 @@ class OneBotDeliveryMixin(OneBotServerMixin):
                 12.0,
             )
         self._require_message_delivery(result)
+        if collect_ids is not None and any(item.kind == "image" for item in outgoing):
+            message_id = _message_id_from_result(result)
+            if message_id:
+                collect_ids.append(message_id)
         # 返回值与逐条路径保持一致：拼接已送达的文本，供上层记录/归档。
         return "\n".join(
             item.content for item in outgoing if item.kind == "text" and item.content

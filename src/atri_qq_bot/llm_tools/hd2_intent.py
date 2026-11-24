@@ -112,6 +112,18 @@ def normalize_hd2_freshness(arguments: dict[str, object]) -> str:
     return value if value in HD2_FRESHNESS_VALUES else "auto"
 
 
+def has_explicit_hd2_freshness(arguments: dict[str, object]) -> bool:
+    """模型是否显式给了 freshness（哪怕给的是 auto）。
+
+    显式表态优先：模型自己判断“这一轮该复用”时，不再用关键词改它的主意；
+    只有模型根本没提这个字段，才由用户原话兜底。
+    """
+    if not isinstance(arguments, dict):
+        return False
+    raw = arguments.get("freshness")
+    return isinstance(raw, str) and bool(raw.strip())
+
+
 def build_hd2_slash(command: str, argument: str = "") -> str:
     """根据规范命令词与实体重建一条斜杠命令文本。
 
@@ -180,6 +192,65 @@ _HD2_KEYWORD_HINTS: tuple[tuple[str, str], ...] = (
 )
 
 _ASCII_TOKEN_RE = re.compile(r"^[a-z0-9_]+$")
+
+# 用户明确要“新的一张 / 最新数据”时，不能拿几分钟前那份复用结果糊弄。
+# 命中即按 latest 处理（多抓一次也认），模型没传 freshness 也不影响用户诉求。
+_HD2_REFRESH_HINTS: tuple[str, ...] = (
+    "刷新",
+    "最新",
+    "新的",
+    "新图",
+    "新的一张",
+    "重新查",
+    "重查",
+    "再查一次",
+    "实时",
+    "现在多少",
+    "现在怎么样",
+    "更新一下",
+    "更新下",
+    "换一张",
+    "换张",
+    "来张新",
+    "来一张新",
+    "重做一张",
+)
+
+# 用户明确要“再看一眼 / 再来一张”时，图必须发得出来（只是不必重新抓）。
+# 用于区分“对着图吐槽”和“想再看图”：后者不能因为引用而把图吞掉。
+_HD2_REDISPLAY_HINTS: tuple[str, ...] = (
+    "再看",
+    "再来一张",
+    "再发一张",
+    "再发一遍",
+    "再发一次",
+    "发一张",
+    "发张",
+    "看一眼",
+    "翻出来",
+    "调出来",
+    "重新发",
+)
+
+
+def _normalize_hd2_text(text: str) -> str:
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def detect_hd2_refresh_hint(text: str) -> bool:
+    """用户这句话是否明确要求“新的一张 / 最新数据”。"""
+    normalized = _normalize_hd2_text(text)
+    if not normalized:
+        return False
+    return any(hint in normalized for hint in _HD2_REFRESH_HINTS)
+
+
+def detect_hd2_redisplay_hint(text: str) -> bool:
+    """用户这句话是否明确要求“再看一眼 / 再来一张图”。"""
+    normalized = _normalize_hd2_text(text)
+    if not normalized:
+        return False
+    return any(hint in normalized for hint in _HD2_REDISPLAY_HINTS)
 
 
 def detect_hd2_command_hint(text: str) -> str | None:

@@ -880,6 +880,149 @@ def test_quoted_provenance_marks_bot_image_and_intel_hint() -> None:
     assert "/warfront" in text
 
 
+def test_quoted_provenance_marks_and_clears_own_intel_flag() -> None:
+    """引用自家情报图时打标记；引用别人/普通内容时清掉，避免残留到下一轮。"""
+    server = object.__new__(OneBotServer)
+    server.config = SimpleNamespace(bot_qq=100000001)
+    server._last_hd2_intel = {"private:1": ("warfront", time.time() - 60)}
+    server._quoted_own_intel_at = {}
+
+    OneBotServer._quoted_provenance(
+        server,
+        "亚托莉",
+        "100000001",
+        time.time() - 60,
+        "[图片]",
+        [{"type": "image", "data": {"file": "a.jpg"}}],
+        "private:1",
+    )
+    assert "private:1" in server._quoted_own_intel_at
+
+    OneBotServer._quoted_provenance(
+        server,
+        "某人",
+        "200002",
+        time.time(),
+        "随便聊聊",
+        [{"type": "text", "data": {"text": "随便聊聊"}}],
+        "private:1",
+    )
+    assert "private:1" not in server._quoted_own_intel_at
+
+
+def test_message_id_from_result_reads_or_ignores() -> None:
+    from atri_qq_bot.onebot.server_parts.server_delivery import _message_id_from_result
+
+    assert _message_id_from_result({"data": {"message_id": 42}}) == "42"
+    assert _message_id_from_result({"data": {"message_id": "abc"}}) == "abc"
+    assert _message_id_from_result({"data": {}}) == ""
+    assert _message_id_from_result({"status": "ok"}) == ""
+    assert _message_id_from_result(None) == ""
+
+
+def test_send_reply_collects_image_message_id() -> None:
+    server = object.__new__(OneBotServer)
+    server.config = SimpleNamespace(hd2_merge_messages=False, bot_qq=100000001)
+    server._record_delivery_event = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    async def fake_call(websocket, action, params, timeout):
+        assert action == "send_private_msg"
+        return {"status": "ok", "retcode": 0, "data": {"message_id": 9001}}
+
+    server.call_action_and_wait = fake_call  # type: ignore[method-assign]
+    ids: list[str] = []
+    asyncio.run(
+        server.send_reply(
+            None,
+            {"message_type": "private", "user_id": 10001},
+            [OutgoingMessage("image", "/tmp/warfront.png")],
+            first_delay=False,
+            group_quote=False,
+            collect_ids=ids,
+        )
+    )
+    assert ids == ["9001"]
+
+
+def test_quoted_provenance_prefers_message_id_match() -> None:
+    server = object.__new__(OneBotServer)
+    server.config = SimpleNamespace(bot_qq=100000001)
+    noted = time.time() - 60
+    server._last_hd2_intel = {"private:1": ("warfront", noted)}
+    server._last_hd2_msg_ids = {"private:1": {"9001"}}
+    server._quoted_own_intel_at = {}
+
+    # 消息 ID 对上：哪怕客户端时间和生成时间差很多，也是同一张图。
+    text = OneBotServer._quoted_provenance(
+        server,
+        "亚托莉",
+        "100000001",
+        noted + 1800,
+        "[图片]",
+        [{"type": "image", "data": {"file": "a.jpg"}}],
+        "private:1",
+        "9001",
+    )
+    assert "/warfront" in text
+    assert "private:1" in server._quoted_own_intel_at
+
+    # 消息 ID 对不上：同一时间窗内的另一张图，也不该算。
+    other = OneBotServer._quoted_provenance(
+        server,
+        "亚托莉",
+        "100000001",
+        noted + 5,
+        "[图片]",
+        [{"type": "image", "data": {"file": "b.jpg"}}],
+        "private:1",
+        "9002",
+    )
+    assert "/warfront" not in other
+    assert "private:1" not in server._quoted_own_intel_at
+
+
+def test_quoted_sticker_does_not_count_as_intel() -> None:
+    """引用她发的表情/表情包：即使刚发过战线图，也不算“引用情报图”。"""
+    server = object.__new__(OneBotServer)
+    server.config = SimpleNamespace(bot_qq=100000001)
+    server._last_hd2_intel = {"private:1": ("warfront", time.time() - 60)}
+    server._quoted_own_intel_at = {}
+
+    text = OneBotServer._quoted_provenance(
+        server,
+        "亚托莉",
+        "100000001",
+        time.time() - 60,
+        "[动画表情]",
+        [{"type": "image", "data": {"file": "a.gif", "sub_type": 1, "summary": "[动画表情]"}}],
+        "private:1",
+    )
+    assert "/warfront" not in text
+    assert "private:1" not in server._quoted_own_intel_at
+
+
+def test_quoted_old_image_is_not_the_intel_image() -> None:
+    """引用图片的发送时间和最近一次情报生成时间差太多：不是同一张，不算。"""
+    server = object.__new__(OneBotServer)
+    server.config = SimpleNamespace(bot_qq=100000001)
+    noted = time.time() - 60
+    server._last_hd2_intel = {"private:1": ("warfront", noted)}
+    server._quoted_own_intel_at = {}
+
+    # 这张图比战线图晚了 30 分钟才发出（另一张图），不该被当成同一张。
+    text = OneBotServer._quoted_provenance(
+        server,
+        "亚托莉",
+        "100000001",
+        noted + 1800,
+        "[图片]",
+        [{"type": "image", "data": {"file": "other.jpg"}}],
+        "private:1",
+    )
+    assert "/warfront" not in text
+    assert "private:1" not in server._quoted_own_intel_at
+
+
 def test_quoted_provenance_empty_without_quote() -> None:
     server = object.__new__(OneBotServer)
     server.config = SimpleNamespace(bot_qq=100000001)

@@ -590,6 +590,7 @@ class EngineToolsMixin(PersonaEngineMixin):
             # 碰 helldivers 组件；任何异常都转成工具回执，禁止模型编造情报。
             from ..llm_tools.hd2_intent import (
                 HD2IntentError,
+                has_explicit_hd2_freshness,
                 normalize_hd2_arguments,
                 normalize_hd2_freshness,
             )
@@ -600,7 +601,10 @@ class EngineToolsMixin(PersonaEngineMixin):
             try:
                 command, argument = normalize_hd2_arguments(arguments)
                 freshness = normalize_hd2_freshness(arguments)
-                return await executor(conversation_id, command, argument, freshness)
+                explicit = has_explicit_hd2_freshness(arguments)
+                return await executor(
+                    conversation_id, command, argument, freshness, explicit
+                )
             except HD2IntentError as exc:
                 return f"Helldivers 工具参数无效：{exc}。请修正后重新调用，不要编造情报。"
             except Exception as exc:  # noqa: BLE001

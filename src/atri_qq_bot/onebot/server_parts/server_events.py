@@ -10,6 +10,7 @@ from .server_support import OneBotServerMixin, _sync_server_globals
 # 显式导入而不是依赖 _sync_server_globals 的全局注入：注入只在**实例**属性访问时
 # 才把 server.py 的名字塞进本模块，直接以类方法调用（测试、脚本）时会 NameError。
 from .helpers import _conversation_id
+from .server_connection import _note_hd2_turn_text, _record_hd2_msg_ids
 from ..message_parser import (  # type: ignore[import-not-found]
     extract_reply_message_id,
     group_increase_text,
@@ -307,6 +308,8 @@ class OneBotEventMixin(OneBotServerMixin):
 
         should_send_reply = preliminary_reply
         conversation_id = _conversation_id(event)
+        # 记下本轮用户原话：HD2 执行器据此区分“要新的/想再看”和“只是对着图吐槽”。
+        _note_hd2_turn_text(self, conversation_id, plain_text)
         if is_message:
             self._remember_pending_group_visual(event)
         # 入群事件**刻意绕开下面三道限流**（用户明确要求"入群必回"）：
@@ -581,6 +584,7 @@ class OneBotEventMixin(OneBotServerMixin):
                 quoted_text,
                 quoted_segments,
                 conversation_id,
+                quoted_message_id,
             ),
         )
         if poke_action_done:
@@ -1323,13 +1327,17 @@ class OneBotEventMixin(OneBotServerMixin):
             return
         try:
             # 与斜杠守卫一致：不引用、不 @、不打拟人停顿，情报返图直接发出。
+            image_ids: list[str] = []
             await self.send_reply(
                 websocket,
                 event,
                 intel,
                 first_delay=False,
                 group_quote=False,
+                collect_ids=image_ids,
             )
+            # 记下实际发出的 message_id：下一轮用户引用这张图时能精确认出来。
+            _record_hd2_msg_ids(self, conversation_id, image_ids)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("[HD2] 自然语言情报发送失败：%s", exc)
 

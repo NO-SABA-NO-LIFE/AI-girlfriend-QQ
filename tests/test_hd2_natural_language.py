@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -25,6 +26,9 @@ from atri_qq_bot.llm_tools.hd2_intent import (
     HD2IntentError,
     build_hd2_slash,
     detect_hd2_command_hint,
+    detect_hd2_redisplay_hint,
+    detect_hd2_refresh_hint,
+    has_explicit_hd2_freshness,
     has_hd2_capability_contradiction,
     normalize_hd2_arguments,
     normalize_hd2_freshness,
@@ -199,15 +203,16 @@ def _engine() -> AtriReplyEngine:
 
 def test_engine_routes_query_to_injected_executor() -> None:
     engine = _engine()
-    seen: list[tuple[str, str, str, str]] = []
+    seen: list[tuple[str, str, str, str, bool]] = []
 
     async def executor(
         conversation_id: str,
         command: str,
         argument: str,
         freshness: str = "auto",
+        explicit: bool = True,
     ) -> str:
-        seen.append((conversation_id, command, argument, freshness))
+        seen.append((conversation_id, command, argument, freshness, explicit))
         return "情报已就绪。"
 
     engine.set_hd2_tool_executor(executor)
@@ -220,7 +225,19 @@ def test_engine_routes_query_to_injected_executor() -> None:
         )
     )
     assert result == "情报已就绪。"
-    assert seen == [("private:1", "planet", "富源", "auto")]
+    # 没传 freshness：标为“未表态”，由执行器按用户原话兜底。
+    assert seen == [("private:1", "planet", "富源", "auto", False)]
+
+    seen.clear()
+    asyncio.run(
+        engine._execute_context_tool(
+            "private:1",
+            "query_helldivers",
+            {"command": "warfront", "argument": "终结族", "freshness": "latest"},
+            engine.config,
+        )
+    )
+    assert seen == [("private:1", "warfront", "终结族", "latest", True)]
 
 
 def test_engine_reports_when_executor_missing() -> None:
@@ -522,6 +539,162 @@ def test_executor_reuses_recent_result_without_refetch(tmp_path) -> None:
     assert len(harness.handle_calls) == 1  # type: ignore[attr-defined]
     assert "已复用" in second
     assert harness._pending_hd2_nl == {"private:1": outgoing}
+
+
+def test_executor_skips_echo_when_user_quotes_own_intel(tmp_path) -> None:
+    """引用着机器人刚发的图时，复用命中也不该再补发同一张图。"""
+    image = tmp_path / "warfront.png"
+    image.write_bytes(b"png")
+    outgoing = [SimpleNamespace(kind="image", content=str(image))]
+    harness = _reuse_harness(outgoing)
+
+    first = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    assert "情报已就绪" in first
+
+    # 上一轮结束时事件流程已经把待发情报消费掉（_send_pending_hd2_nl 会 pop）。
+    harness._pending_hd2_nl.clear()
+
+    # 这一轮用户在引用那张图（server_delivery 已打标记）。
+    harness._quoted_own_intel_at = {"private:1": time.time()}
+    echoed = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    assert len(harness.handle_calls) == 1  # type: ignore[attr-defined]
+    assert "不要重复发图" in echoed
+    assert harness._pending_hd2_nl == {}
+
+    # 用户明确要刷新时依旧真抓真发。
+    refreshed = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "latest"
+        )
+    )
+    assert len(harness.handle_calls) == 2  # type: ignore[attr-defined]
+    assert "情报已就绪" in refreshed
+    assert harness._pending_hd2_nl == {"private:1": outgoing}
+
+
+def test_executor_echo_guard_expires_without_quote(tmp_path) -> None:
+    """引用标记过期（或已清掉）后，复用照常把同一份结果发出去。"""
+    image = tmp_path / "warfront.png"
+    image.write_bytes(b"png")
+    outgoing = [SimpleNamespace(kind="image", content=str(image))]
+    harness = _reuse_harness(outgoing)
+
+    asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    harness._quoted_own_intel_at = {"private:1": time.time() - 200}
+    second = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    assert len(harness.handle_calls) == 1  # type: ignore[attr-defined]
+    assert "已复用" in second
+    assert harness._pending_hd2_nl == {"private:1": outgoing}
+
+
+def test_executor_refresh_hint_beats_auto_reuse(tmp_path) -> None:
+    """引用着旧图却说“发张新的”：不能复用旧图，必须真抓一次。"""
+    image = tmp_path / "warfront.png"
+    image.write_bytes(b"png")
+    outgoing = [SimpleNamespace(kind="image", content=str(image))]
+    harness = _reuse_harness(outgoing)
+
+    asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    harness._pending_hd2_nl.clear()
+
+    harness._quoted_own_intel_at = {"private:1": time.time()}
+    harness._hd2_turn_text = {"private:1": "这张太旧了，发张新的"}
+    refreshed = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto", False
+        )
+    )
+    assert len(harness.handle_calls) == 2  # type: ignore[attr-defined]
+    assert harness.handle_calls[-1][2] == {"realtime": True}  # type: ignore[attr-defined]
+    assert "情报已就绪" in refreshed
+    assert harness._pending_hd2_nl == {"private:1": outgoing}
+
+
+def test_executor_respects_explicit_auto_from_model(tmp_path) -> None:
+    """模型显式说了 auto：不再用关键词改它的主意，照旧复用不发新图。"""
+    image = tmp_path / "warfront.png"
+    image.write_bytes(b"png")
+    outgoing = [SimpleNamespace(kind="image", content=str(image))]
+    harness = _reuse_harness(outgoing)
+
+    asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto", False
+        )
+    )
+    harness._pending_hd2_nl.clear()
+
+    harness._hd2_turn_text = {"private:1": "发张新的"}
+    reused = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto", True
+        )
+    )
+    assert len(harness.handle_calls) == 1  # type: ignore[attr-defined]
+    assert "已复用" in reused
+    assert harness._pending_hd2_nl == {"private:1": outgoing}
+
+
+def test_executor_redisplay_hint_delivers_reused_image(tmp_path) -> None:
+    """引用着图但明确说“再看一眼”：复用命中时图要发出来，不能被吞掉。"""
+    image = tmp_path / "warfront.png"
+    image.write_bytes(b"png")
+    outgoing = [SimpleNamespace(kind="image", content=str(image))]
+    harness = _reuse_harness(outgoing)
+
+    asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    harness._pending_hd2_nl.clear()
+
+    harness._quoted_own_intel_at = {"private:1": time.time()}
+    harness._hd2_turn_text = {"private:1": "就刚才那张再看一眼"}
+    again = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "终结族", "auto"
+        )
+    )
+    assert len(harness.handle_calls) == 1  # type: ignore[attr-defined]
+    assert "已复用" in again
+    assert harness._pending_hd2_nl == {"private:1": outgoing}
+
+
+def test_has_explicit_hd2_freshness() -> None:
+    assert not has_explicit_hd2_freshness({"command": "warfront", "argument": "终结族"})
+    assert not has_explicit_hd2_freshness({"freshness": "  "})
+    assert has_explicit_hd2_freshness({"freshness": "auto"})
+    assert has_explicit_hd2_freshness({"freshness": "latest"})
+
+
+def test_hd2_refresh_and_redisplay_hints() -> None:
+    assert detect_hd2_refresh_hint("发张新的")
+    assert detect_hd2_refresh_hint("刷新一下，要最新的")
+    assert not detect_hd2_refresh_hint("都打完了又不打了，只剩8500人")
+    assert detect_hd2_redisplay_hint("就刚才那张再看一眼")
+    assert detect_hd2_redisplay_hint("再发一张")
+    assert not detect_hd2_redisplay_hint("这数据真难看")
 
 
 def test_executor_latest_forces_refetch_with_realtime(tmp_path) -> None:
