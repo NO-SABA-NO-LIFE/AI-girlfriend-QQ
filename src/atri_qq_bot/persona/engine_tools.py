@@ -217,10 +217,17 @@ class EngineToolsMixin(PersonaEngineMixin):
                     )
         recent_private: list[dict[str, str]] = []
         if not conversation_id.startswith("group:"):
+            # 视觉轮不再不对称地只剔除 assistant：窗口内 user/assistant 成对保留以
+            # 维持连贯，窗口外的陈旧对话整体剔除，避免识图被旧情绪带偏。
             recent_private = self._recent_conversation_messages(
                 conversation_id,
                 current_user_text=user_text,
-                include_assistant=not visual_turn,
+                include_assistant=True,
+                within_seconds=(
+                    int(getattr(self.config, "visual_history_window_seconds", 1800))
+                    if visual_turn
+                    else None
+                ),
             )
             if recent_private:
                 messages.append(
@@ -266,7 +273,12 @@ class EngineToolsMixin(PersonaEngineMixin):
             recent_context = self._recent_conversation_messages(
                 conversation_id,
                 current_user_text=user_text,
-                include_assistant=not visual_turn,
+                include_assistant=True,
+                within_seconds=(
+                    int(getattr(self.config, "visual_history_window_seconds", 1800))
+                    if visual_turn
+                    else None
+                ),
             )
             if recent_context:
                 messages.append(

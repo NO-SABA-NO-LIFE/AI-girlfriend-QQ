@@ -77,6 +77,9 @@ class BotConfig:
     group_recent_visual_enabled: bool = True
     group_recent_visual_ttl_seconds: int = 300
     group_recent_visual_max: int = 3
+    # 视觉轮只把最近该窗口内的对话成对（user+assistant）带入，更早的旧话题整体
+    # 剔除，避免识图被数小时前的无关情绪带偏，同时保留连续识图追问所需上下文。
+    visual_history_window_seconds: int = 1800
     # 普通群聊里偶尔主动搭话：低概率 + 冷却，避免刷屏。
     group_ambient_reply_enabled: bool = True
     group_ambient_reply_chance: float = 0.10

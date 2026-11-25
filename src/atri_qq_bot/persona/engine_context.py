@@ -103,8 +103,10 @@ class EngineContextMixin(PersonaEngineMixin):
         current_user_text: str = "",
         limit: int = 12,
         include_assistant: bool = True,
+        within_seconds: float | None = None,
     ) -> list[dict[str, str]]:
         entries = self.memory.recent_history(conversation_id, limit=limit + 3)
+        current_now = time.time()
         skipped_current = False
         selected: list[dict[str, Any]] = []
         for entry in reversed(entries):
@@ -125,13 +127,22 @@ class EngineContextMixin(PersonaEngineMixin):
                 continue
             if role == "assistant" and not include_assistant:
                 continue
+            if within_seconds is not None:
+                # 视觉轮按时间窗成对剔除陈旧对话。reversed 从新到旧，时间戳单调
+                # 递减，一旦当前条目超出窗口，更早的条目必然也超出，可直接结束。
+                try:
+                    age_seconds = current_now - float(entry.get("at"))
+                except (TypeError, ValueError):
+                    age_seconds = None
+                # 时间戳缺失/无效时 fail-closed：无法确认是近期内容，按超窗处理。
+                if age_seconds is None or age_seconds > float(within_seconds):
+                    break
             selected.append(entry)
             if len(selected) >= limit:
                 break
 
         is_group = conversation_id.startswith("group:")
         messages: list[dict[str, str]] = []
-        current_now = time.time()
         for entry in reversed(selected):
             role = str(entry.get("role"))
             text = str(entry.get("text") or "").strip()

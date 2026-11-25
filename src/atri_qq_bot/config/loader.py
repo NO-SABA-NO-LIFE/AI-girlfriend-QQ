@@ -180,6 +180,9 @@ def _build_config(root: Path) -> BotConfig:
         group_recent_visual_enabled=_env_bool("GROUP_RECENT_VISUAL_ENABLED", True),
         group_recent_visual_ttl_seconds=_env_int("GROUP_RECENT_VISUAL_TTL_SECONDS", 300),
         group_recent_visual_max=_env_int("GROUP_RECENT_VISUAL_MAX", 3),
+        visual_history_window_seconds=max(
+            60, _env_int("VISUAL_HISTORY_WINDOW_SECONDS", 1800)
+        ),
         group_ambient_reply_enabled=_env_bool("GROUP_AMBIENT_REPLY_ENABLED", True),
         group_ambient_reply_chance=max(0.0, min(1.0, _env_float("GROUP_AMBIENT_REPLY_CHANCE", 0.10))),
         group_ambient_reply_cooldown_seconds=_env_int("GROUP_AMBIENT_REPLY_COOLDOWN_SECONDS", 120),
