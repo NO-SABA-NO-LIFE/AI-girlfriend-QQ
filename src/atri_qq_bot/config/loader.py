@@ -282,7 +282,7 @@ def _build_config(root: Path) -> BotConfig:
         ),
         toolbox_vision_timeout_seconds=max(
             20.0,
-            min(60.0, _env_float("TOOLBOX_VISION_TIMEOUT_SECONDS", 55.0)),
+            min(90.0, _env_float("TOOLBOX_VISION_TIMEOUT_SECONDS", 55.0)),
         ),
         toolbox_vision_unload_other_ollama_models=_env_bool(
             "TOOLBOX_VISION_UNLOAD_OTHER_OLLAMA_MODELS",

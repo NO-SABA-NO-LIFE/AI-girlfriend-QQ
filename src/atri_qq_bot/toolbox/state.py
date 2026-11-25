@@ -52,7 +52,7 @@ class ToolboxStateMixin(ToolboxMixin):
         self.vision_timeout_seconds = max(
             20.0,
             min(
-                60.0,
+                90.0,
                 float(getattr(config, "toolbox_vision_timeout_seconds", 55.0)),
             ),
         )
