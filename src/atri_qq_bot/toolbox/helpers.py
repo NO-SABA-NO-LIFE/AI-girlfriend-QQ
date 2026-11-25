@@ -137,6 +137,13 @@ def _exception_summary(exc: Exception) -> str:
 
 
 def _is_retryable_vision_resource_error(exc: Exception) -> bool:
+    import httpx
+
+    # 网关掐断连接会以各种 RemoteProtocolError 文案出现（disconnected、
+    # illegal request line、malformed 等），直接按类型识别，避免漏掉
+    # 字符串清单没覆盖到的消息。
+    if isinstance(exc, httpx.RemoteProtocolError):
+        return True
     summary = _exception_summary(exc).casefold()
     return any(
         marker in summary
@@ -149,10 +156,14 @@ def _is_retryable_vision_resource_error(exc: Exception) -> bool:
             "model runner has unexpectedly stopped",
             "http 404",
             "http 429",
+            "http 400",
+            "http 401",
+            "http 403",
             "http 500",
             "http 502",
             "http 503",
             "http 504",
+            "remoteprotocolerror",
             "timed out",
             "timeout",
             "connection reset",

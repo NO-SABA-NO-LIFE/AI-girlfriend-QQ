@@ -736,6 +736,19 @@ def test_vision_404_is_classified_as_retryable() -> None:
     )
     # 404（模型名失效/未上线）必须可重试，从而切到备用模型。
     assert _is_retryable_vision_resource_error(not_found) is True
+    # 400/401/403 同样允许切到备用模型：可能是该模型不支持图片输入或
+    # 网关侧鉴权/路由异常，换一个模型仍有成功机会。
+    for status in (400, 401, 403):
+        http_error = httpx.HTTPStatusError(
+            str(status), request=request,
+            response=httpx.Response(status, request=request),
+        )
+        assert _is_retryable_vision_resource_error(http_error) is True
+    # 网关掐断连接的 RemoteProtocolError 也必须可重试。
+    remote_error = httpx.RemoteProtocolError(
+        "Server disconnected without sending a response.", request=request
+    )
+    assert _is_retryable_vision_resource_error(remote_error) is True
     # 无关的普通错误仍不重试，避免把任意异常都当成可切换。
     assert _is_retryable_vision_resource_error(RuntimeError("other failure")) is False
 
