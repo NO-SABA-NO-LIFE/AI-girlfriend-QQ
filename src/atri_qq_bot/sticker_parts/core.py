@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+# Markers that negate a keyword within a short window before it, e.g.
+# "可别喊救命" must not count the "救命" evidence.
+NEGATION_MARKERS = ("不", "没", "别", "无", "莫")
+NEGATION_WINDOW = 3
+# Keywords shorter than two characters (punctuation, single digits/hanzi) are
+# weak evidence: they can support a strong match but never decide an emotion.
+STRONG_KEYWORD_MIN_LEN = 2
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -95,55 +104,58 @@ DEFAULT_EMOTION_KEYWORDS = {
     "pout": ("冷落", "忘了我", "终于想起我", "萝卜子", "哼哒"),
 }
 DEFAULT_EMOJIS = {
-    "happy": ("嘿嘿", "♪", "(*´▽｀*)", "今天也要亮起来"),
-    "comfort": ("摸摸头", "我在", "先靠过来一点"),
-    "sad": ("先别一个人扛", "别急，我陪你", "靠过来一点"),
-    "angry": ("哼，我站你这边", "不准欺负主人", "先别红温"),
-    "tired": ("早点休息", "困困信号收到", "不准硬撑"),
-    "proud": ("哼哼，高性能模式", "(｀・ω・´)", "任务完成"),
-    "confused": ("欸？", "让我重新对齐一下"),
-    "speechless": ("……高性能沉默", "有点无语", "我先看你一眼"),
-    "surprised": ("欸？！", "这也太突然了", "高性能震惊中"),
-    "awkward": ("有点难绷", "咳，先稳住", "救命但还行"),
-    "teasing": ("哼哼，逗你的", "我才没有故意气你", "略微调侃一下"),
-    "shy": ("有点犯规", "……我会记住的"),
-    "affection": ("抱一下", "贴贴可以，但不准得意太久", "我在你这边"),
-    "miss": ("我才没有一直等你", "突然想你了", "你终于想起我啦"),
-    "care": ("先喝口水", "不准硬撑", "照顾好自己"),
-    "thanks": ("哼，还算你会夸", "我收下啦", "高性能当然可靠"),
-    "sorry": ("原谅你一点点", "下次不准这样", "给你台阶啦"),
-    "encourage": ("先迈一步", "高性能陪跑中", "你可以做到"),
-    "thinking": ("让我想想", "先拆成两步", "我更偏务实一点"),
-    "celebrate": ("好耶，完成！", "任务完成 ♪", "今天值得小小庆祝"),
-    "food": ("先吃饭", "能量补给优先"),
-    "goodnight": ("晚安", "做个轻一点的梦"),
-    "pout": ("哼哒", "你终于想起我啦"),
-    "neutral": ("嗯嗯", "收到"),
+    # 除 pout 外一律不发文字短语；空元组让 _pick_emoji 返回 None。
+    "happy": (),
+    "comfort": (),
+    "sad": (),
+    "angry": (),
+    "tired": (),
+    "proud": (),
+    "confused": (),
+    "speechless": (),
+    "surprised": (),
+    "awkward": (),
+    "teasing": (),
+    "shy": (),
+    "affection": (),
+    "miss": (),
+    "care": (),
+    "thanks": (),
+    "sorry": (),
+    "encourage": (),
+    "thinking": (),
+    "celebrate": (),
+    "food": (),
+    "goodnight": (),
+    "pout": ("哼哒",),
+    "neutral": (),
 }
 DEFAULT_QQ_FACE_IDS = {
-    "happy": ("14", "21", "76", "144"),
-    "comfort": ("49", "63", "66"),
-    "tired": ("36", "37", "96"),
-    "proud": ("13", "76", "124"),
-    "confused": ("8", "32", "97"),
-    "speechless": ("8", "97", "32"),
-    "shy": ("9", "66", "178"),
-    "food": ("28", "124"),
-    "goodnight": ("75", "96"),
-    "pout": ("1", "13", "46"),
-    "sad": ("49", "63", "66"),
-    "angry": ("5", "11", "46"),
-    "surprised": ("0", "8", "97"),
-    "awkward": ("10", "8", "97"),
-    "teasing": ("21", "13", "76"),
-    "affection": ("66", "9", "178"),
-    "miss": ("9", "66", "49"),
-    "care": ("63", "49", "66"),
-    "thanks": ("76", "21", "14"),
-    "sorry": ("9", "49", "63"),
-    "encourage": ("76", "124", "21"),
-    "thinking": ("32", "8", "97"),
-    "celebrate": ("144", "76", "21"),
+    # 每个情绪只挂真正贴合该情绪的系统脸；一个脸可被多个近义情绪复用。
+    # 空元组表示该情绪不发系统脸，由 choose() 降级到文字短语。
+    "happy": ("13", "28", "21"),
+    "comfort": ("49",),
+    "tired": ("8",),
+    "proud": ("28", "13"),
+    "confused": ("32",),
+    "speechless": ("1", "97", "14"),
+    "shy": (),
+    "food": (),
+    "goodnight": ("75", "8"),
+    "pout": (),
+    "sad": ("5", "9"),
+    "angry": ("11",),
+    "surprised": ("0",),
+    "awkward": ("10",),
+    "teasing": ("178", "13"),
+    "affection": ("21",),
+    "miss": (),
+    "care": ("49",),
+    "thanks": ("76",),
+    "sorry": ("9",),
+    "encourage": ("76", "144"),
+    "thinking": ("32",),
+    "celebrate": ("144", "76", "13"),
 }
 
 
@@ -189,24 +201,53 @@ def _normalize_emotion(emotion: str) -> str:
         return normalized
     return normalized if normalized in KNOWN_EMOTIONS else "neutral"
 
+def _is_negated(text: str, start: int) -> bool:
+    prefix = text[max(0, start - NEGATION_WINDOW):start]
+    return any(marker in prefix for marker in NEGATION_MARKERS)
+
+
+def collect_emotion_evidence(
+    text: str,
+    emotion_keywords: dict[str, tuple[str, ...]],
+) -> dict[str, dict[str, int]]:
+    """Count strong/weak keyword hits per emotion in one piece of text.
+
+    Returns ``{emotion: {"strong": int, "weak": int}}``. Negated hits are
+    skipped and weak keywords are recorded separately so callers can refuse to
+    let them decide an emotion on their own.
+    """
+    evidence: dict[str, dict[str, int]] = {}
+    if not text:
+        return evidence
+
+    for emotion, keywords in emotion_keywords.items():
+        normalized = _normalize_emotion(emotion)
+        if normalized in {"neutral", "unsorted", "web"}:
+            continue
+        bucket = evidence.setdefault(normalized, {"strong": 0, "weak": 0})
+        for keyword in keywords:
+            keyword = str(keyword).strip()
+            if not keyword:
+                continue
+            for match in re.finditer(re.escape(keyword), text):
+                if _is_negated(text, match.start()):
+                    continue
+                kind = "strong" if len(keyword) >= STRONG_KEYWORD_MIN_LEN else "weak"
+                bucket[kind] += 1
+    return evidence
+
+
 def _score_emotion(
     text: str,
     emotion_keywords: dict[str, tuple[str, ...]],
     weight: int,
 ) -> dict[str, int]:
-    if not text:
-        return {}
-
-    scores: dict[str, int] = {}
-    for emotion, keywords in emotion_keywords.items():
-        normalized = _normalize_emotion(emotion)
-        if normalized in {"neutral", "unsorted", "web"}:
-            continue
-        for keyword in keywords:
-            keyword = str(keyword).strip()
-            if keyword and keyword in text:
-                scores[normalized] = scores.get(normalized, 0) + weight
-    return scores
+    """Backward-compatible weighted score (strong + weak hits)."""
+    evidence = collect_emotion_evidence(text, emotion_keywords)
+    return {
+        emotion: (hits["strong"] + hits["weak"]) * weight
+        for emotion, hits in evidence.items()
+    }
 
 def _looks_like_image(value: str) -> bool:
     return Path(value).suffix.lower() in IMAGE_EXTENSIONS

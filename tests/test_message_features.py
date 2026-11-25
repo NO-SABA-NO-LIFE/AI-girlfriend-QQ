@@ -349,14 +349,10 @@ def test_build_outgoing_messages_adds_qq_face_without_local_images(tmp_path) -> 
     messages = build_outgoing_messages("好耶，任务完成。", "今天成功了", manager, config, {})
 
     assert any(message.kind == "face" for message in messages)
-    assert any(
-        "嘿嘿" in message.content
-        or "♪" in message.content
-        or "亮起来" in message.content
-        or "▽" in message.content
-        for message in messages
-        if message.kind == "text"
-    )
+    # The face segment carries the expression: the text reply stays clean and
+    # no emoji phrase is appended to it.
+    text_messages = [message for message in messages if message.kind == "text"]
+    assert [message.content for message in text_messages] == ["好耶，任务完成。"]
 
 
 def test_build_outgoing_messages_does_not_use_online_default_images(tmp_path) -> None:
@@ -671,8 +667,9 @@ def test_sticker_source_does_not_read_chat_history_directory(tmp_path) -> None:
 
     choice = manager.choose("发个表情包", "", chance=1.0)
 
-    assert choice is not None
-    assert choice.file_url is None
+    # 唯一图片位于下划线开头的历史目录、被排除，且无脸/无文字兜底：
+    # 明确请求也只能静默，绝不读取聊天历史目录。
+    assert choice is None
 
 
 def test_memory_profile_adapts_to_short_chat_style(tmp_path) -> None:

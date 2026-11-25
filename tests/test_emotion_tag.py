@@ -67,9 +67,12 @@ def _manager(tmp_path) -> StickerManager:
     return StickerManager(tmp_path / "stickers")
 
 
-def test_choose_uses_emotion_override_over_user_keyword(tmp_path) -> None:
+def test_choose_suppresses_tag_contradicted_by_words(tmp_path) -> None:
     manager = _manager(tmp_path)
 
+    # The user text carries strong happy evidence while the reply has no pout
+    # evidence: the lazy pout tag is contradicted and the expression is
+    # suppressed instead of sending a mismatched face.
     choice = manager.choose(
         "哈哈你好笨",
         "哼，谁笨了",
@@ -78,8 +81,23 @@ def test_choose_uses_emotion_override_over_user_keyword(tmp_path) -> None:
         emotion_override="pout",
     )
 
+    assert choice is None
+
+
+def test_choose_accepts_evidence_backed_tag(tmp_path) -> None:
+    manager = _manager(tmp_path)
+
+    choice = manager.choose(
+        "哈哈你好笨",
+        "哼哒，谁笨了",
+        chance=1.0,
+        cooldown_seconds=0,
+        emotion_override="pout",
+    )
+
     assert choice is not None
-    # 用户消息含“哈哈”本会判 happy，但模型自报的 pout 必须胜出。
+    # The reply itself contains the pout keyword "哼哒": the tag is supported
+    # and wins over the user-side happy evidence.
     assert choice.emotion == "pout"
 
 

@@ -972,7 +972,19 @@ class OneBotEventMixin(OneBotServerMixin):
             else "chat"
         )
         delivery_model_name = self._delivery_model_name(delivery_model_type)
-        sent_sticker = any(message.kind in {"image", "sticker", "face"} for message in outgoing)
+        last_choice = getattr(self.stickers, "last_choice", None)
+        # Emoji-only choices produce plain text segments but still represent a
+        # sticker event, so they must engage the cooldown bookkeeping.
+        light_emoji_sent = bool(
+            last_choice
+            and last_choice.emoji_text
+            and not last_choice.face_id
+            and not last_choice.file_url
+        )
+        sent_sticker = (
+            any(message.kind in {"image", "sticker", "face"} for message in outgoing)
+            or light_emoji_sent
+        )
         if not voice_streamed:
             delivered_text = await self.send_reply(
                 websocket,

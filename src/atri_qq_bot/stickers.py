@@ -137,32 +137,90 @@ class StickerManager:
         # label. Injected by the server layer so this manager stays decoupled
         # from the vision client. None means text-only classification.
         self.emotion_classifier = emotion_classifier
+        # Most recent StickerChoice produced by choose() (None when the chance
+        # gate/cooldown suppressed it). The delivery layer uses it to tell an
+        # emoji-only fallback (which still needs cooldown bookkeeping) apart
+        # from a plain text turn.
+        self.last_choice: StickerChoice | None = None
         self._custom = self._load_custom_config()
 
-    def detect_emotion(self, user_text: str, reply_text: str = "") -> str:
-        matched = self._match_custom_trigger(user_text)
-        if matched:
-            return _normalize_emotion(matched[0])
-
+    def _keyword_table(self) -> dict[str, tuple[str, ...]]:
         emotion_keywords = dict(DEFAULT_EMOTION_KEYWORDS)
         custom_keywords = self._custom.get("emotion_keywords")
         if isinstance(custom_keywords, dict):
             for emotion, keywords in custom_keywords.items():
                 emotion = _normalize_emotion(str(emotion))
                 emotion_keywords[emotion] = tuple(map(str, _as_list(keywords)))
+        return emotion_keywords
 
-        user_emotion = _score_emotion(user_text, emotion_keywords, weight=3)
-        reply_emotion = _score_emotion(reply_text, emotion_keywords, weight=1)
-        scores = dict(reply_emotion)
-        for emotion, score in user_emotion.items():
-            scores[emotion] = scores.get(emotion, 0) + score
+    def _weighted_evidence(
+        self,
+        user_text: str,
+        reply_text: str,
+    ) -> dict[str, dict[str, float]]:
+        """Merge keyword evidence; user text keeps weight 3, reply text weight 1."""
+        keywords = self._keyword_table()
+        user_evidence = _sticker_core.collect_emotion_evidence(user_text, keywords)
+        reply_evidence = _sticker_core.collect_emotion_evidence(reply_text, keywords)
+        merged: dict[str, dict[str, float]] = {}
+        for source, multiplier in (
+            (user_evidence, 3),
+            (reply_evidence, 1),
+        ):
+            for emotion, hits in source.items():
+                bucket = merged.setdefault(
+                    emotion, {"strong": 0.0, "weak": 0.0}
+                )
+                bucket["strong"] += hits["strong"] * multiplier
+                bucket["weak"] += hits["weak"] * multiplier
+        return merged
 
-        if not scores:
+    def validate_emotion_tag(
+        self,
+        tag: str,
+        user_text: str,
+        reply_text: str,
+    ) -> str:
+        """Check a model-reported tag against the words actually spoken.
+
+        Returns the tag when strong keyword evidence supports it; returns
+        ``neutral`` when the tag is unsupported and other emotions have strong
+        contradicting evidence; when no emotion is evidenced anywhere, the tag
+        is trusted (the words may carry emotion beyond the keyword table).
+        """
+        evidence = self._weighted_evidence(user_text, reply_text)
+        own = evidence.get(tag)
+        if own and own["strong"] > 0:
+            return tag
+        contradicting = {
+            emotion: hits["strong"]
+            for emotion, hits in evidence.items()
+            if emotion != tag and hits["strong"] > 0
+        }
+        return "neutral" if contradicting else tag
+
+    def detect_emotion(self, user_text: str, reply_text: str = "") -> str:
+        matched = self._match_custom_trigger(user_text)
+        if matched:
+            return _normalize_emotion(matched[0])
+
+        evidence = self._weighted_evidence(user_text, reply_text)
+        # Weak, single-char/punctuation hits can never decide an emotion.
+        strong = {
+            emotion: hits["strong"]
+            for emotion, hits in evidence.items()
+            if hits["strong"] > 0
+        }
+        if not strong:
             return "neutral"
 
+        best = max(strong.values())
+        winners = [emotion for emotion, score in strong.items() if score == best]
+        if len(winners) == 1:
+            return winners[0]
         return max(
-            scores,
-            key=lambda emotion: (scores[emotion], EMOTION_PRIORITY.get(emotion, 0)),
+            winners,
+            key=lambda emotion: EMOTION_PRIORITY.get(emotion, 0),
         )
 
     def choose(
@@ -174,6 +232,7 @@ class StickerManager:
         cooldown_seconds: int = 0,
         emotion_override: str = "",
     ) -> StickerChoice | None:
+        self.last_choice = None
         triggered = False
         emotion = "neutral"
         forced_image: Path | str | None = None
@@ -195,7 +254,14 @@ class StickerManager:
                 _normalize_emotion(emotion_override) if emotion_override else ""
             )
             if override and override not in {"neutral", "unsorted"}:
-                emotion = override
+                # The tag must agree with the words: an unsupported tag
+                # contradicted by other evidence suppresses the expression.
+                validated = self.validate_emotion_tag(
+                    override, user_text, reply_text
+                )
+                if validated == "neutral":
+                    return None
+                emotion = validated
             else:
                 emotion = self.detect_emotion(user_text, reply_text)
 
@@ -217,7 +283,7 @@ class StickerManager:
         if image_path is None and explicit_request:
             image_path = self._pick_any_primary_image()
         if isinstance(image_path, Path):
-            return StickerChoice(
+            choice = StickerChoice(
                 emotion=emotion,
                 file_url=str(image_path.resolve()),
                 triggered=triggered,
@@ -225,21 +291,29 @@ class StickerManager:
                 # the user's QQ sticker library and must stay a normal image.
                 local=not self._is_online_default_file(image_path),
             )
+            self.last_choice = choice
+            return choice
         if isinstance(image_path, str):
-            return StickerChoice(emotion=emotion, file_url=image_path, triggered=triggered)
+            choice = StickerChoice(emotion=emotion, file_url=image_path, triggered=triggered)
+            self.last_choice = choice
+            return choice
 
         face_id = self._pick_face_id(emotion)
         if face_id:
-            return StickerChoice(
+            choice = StickerChoice(
                 emotion=emotion,
                 face_id=face_id,
                 emoji_text=self._pick_emoji(emotion),
                 triggered=triggered,
             )
+            self.last_choice = choice
+            return choice
 
         emoji = self._pick_emoji(emotion)
         if emoji:
-            return StickerChoice(emotion=emotion, emoji_text=emoji, triggered=triggered)
+            choice = StickerChoice(emotion=emotion, emoji_text=emoji, triggered=triggered)
+            self.last_choice = choice
+            return choice
         return None
 
     def _adjusted_chance(self, chance: float, profile: dict[str, Any] | None) -> float:

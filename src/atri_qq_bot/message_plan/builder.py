@@ -30,7 +30,10 @@ def build_outgoing_messages(
         config.sticker_cooldown_seconds,
         emotion_override=emotion_label,
     )
-    if sticker and sticker.emoji_text and text_parts:
+    # A face_id is delivered as a real QQ face segment, so the text stays clean
+    # and no emoji phrase is appended. Emoji-only choices (no face available)
+    # still attach the light phrase inline.
+    if sticker and sticker.emoji_text and text_parts and not sticker.face_id:
         text_parts[-1] = _append_light_emoji(text_parts[-1], sticker.emoji_text)
 
     messages = [OutgoingMessage("text", part) for part in text_parts if part]
@@ -47,8 +50,8 @@ def build_outgoing_messages(
             )
         else:
             messages.append(OutgoingMessage("image", sticker.file_url))
-    # 只有 face_id（QQ 系统小黄脸）时不单独追加 face 气泡：对应 emoji_text 已附着
-    # 在最后一条文字里，避免表情被拆成独立气泡。
+    elif sticker and sticker.face_id:
+        messages.append(OutgoingMessage("face", sticker.face_id))
 
     # 空文本代表上游模型失败或被安全策略拦截，必须保持静默。
     # 这里不能再补发“嗯，我在”之类的模板，否则会把失败伪装成正常回复。
