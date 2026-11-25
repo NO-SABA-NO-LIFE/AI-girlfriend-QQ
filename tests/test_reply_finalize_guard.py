@@ -126,6 +126,32 @@ def test_textless_turn_prompt_keeps_other_speakers_words_apart() -> None:
     assert "张冠李戴" in prompt
 
 
+def test_mentioned_turn_prompt_tracks_addressee_not_only_speaker() -> None:
+    # 被@回复：除了区分“谁在说话”，还要判断“对谁说”，防止把当前说话人对其他
+    # 群友说的无@话当成对自己说的（张冠李戴复发场景）。
+    prompt = reply_rules._current_speaker_boundary_prompt(
+        "一生愛して希尔薇", "@亚托莉 我讨厌你"
+    )
+    # 第一层：说话人锚点仍在。
+    assert "昵称#QQ号" in prompt
+    # 第二层：明确要判断对话对象。
+    assert "对谁说" in prompt
+    # 无@的话可能在回应其他群友。
+    assert "回应其他群友" in prompt
+    # 代词不要默认成机器人自己。
+    assert "不要默认成你自己" in prompt
+    # 拿不准就不引用。
+    assert "就不要引用" in prompt
+
+
+def test_textless_turn_prompt_also_tracks_addressee() -> None:
+    # 无文字分支共用 ownership，同样带 addressee 提醒。
+    poke_input = "[用户未附加文字]\n\n【系统动作反馈】你刚刚已经回戳了对方一下。"
+    prompt = reply_rules._current_speaker_boundary_prompt("潇潇", poke_input)
+    assert "对谁说" in prompt
+    assert "回应其他群友" in prompt
+
+
 def test_group_speaker_label_uses_qq_anchor() -> None:
     assert reply_rules._group_speaker_label("友川纪夫", 904994489) == "友川纪夫#904994489"
     # 没有 actor_id 的旧消息 fail-safe 退化为纯昵称。
