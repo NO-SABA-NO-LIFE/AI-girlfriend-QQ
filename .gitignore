@@ -44,3 +44,8 @@ tools/onebot-qzone/
 /bench_test.png
 /bench_pkg/
 docs/prompts/*.bak-*
+
+# Local benchmark scripts (kept on disk, not tracked)
+/bench_all_models.py
+/bench_vision_all.py
+/chat_latency.py
