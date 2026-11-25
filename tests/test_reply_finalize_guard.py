@@ -152,6 +152,29 @@ def test_textless_turn_prompt_also_tracks_addressee() -> None:
     assert "回应其他群友" in prompt
 
 
+def test_mentioned_turn_prompt_keeps_action_object_consistent() -> None:
+    # 被追问“配合谁/针对谁”时，必须回溯上下文和自己此前原话，与之前发言一致，
+    # 不能为嘴硬把动作对象挪给别人（配合对象被错误指认事故）。
+    prompt = reply_rules._current_speaker_boundary_prompt(
+        "内谁", "@亚托莉 配合谁一下"
+    )
+    assert "守住前后一致" in prompt
+    assert "你自己此前的原话" in prompt
+    # 嘴硬只能找台阶，不能改写已说出口的话或动作对象。
+    assert "不能改写已经说出口的话" in prompt
+    assert "动作对象" in prompt
+    # 记不清 fail-closed，不许现编。
+    assert "记不清就如实说记不清" in prompt
+
+
+def test_textless_turn_prompt_also_keeps_action_object_consistent() -> None:
+    # 无文字分支同样带上第三层一致性规则。
+    poke_input = "[用户未附加文字]\n\n【系统动作反馈】你刚刚已经回戳了对方一下。"
+    prompt = reply_rules._current_speaker_boundary_prompt("潇潇", poke_input)
+    assert "守住前后一致" in prompt
+    assert "动作对象" in prompt
+
+
 def test_group_speaker_label_uses_qq_anchor() -> None:
     assert reply_rules._group_speaker_label("友川纪夫", 904994489) == "友川纪夫#904994489"
     # 没有 actor_id 的旧消息 fail-safe 退化为纯昵称。
