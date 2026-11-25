@@ -250,6 +250,8 @@ class EngineContextMixin(PersonaEngineMixin):
             raise RuntimeError(f"模型最终回复未通过质量检查：{'；'.join(violations)}")
         if has_illegal_language_or_garbage(reply_text):
             raise RuntimeError("模型最终回复包含乱码或异常语言")
+        if has_prompt_leak(reply_text):
+            raise RuntimeError("模型最终回复泄漏系统提示词或内部规则")
         return reply_text
 
     def _fallback_reply(self, conversation_id: str, text: str) -> str:

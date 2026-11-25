@@ -236,6 +236,48 @@ FAILURE_TEMPLATE_PATTERNS = (
     "有一小段语音没有合成",
 )
 
+# 模型偶尔会把系统提示词的原文或改写当正文输出（自报角色设定、格式规则、
+# 内部情绪标记说明等）。这些元指令措辞在正常入戏聊天中不会出现，命中即判
+# 泄漏，交给重试链重新生成，避免把内部规则暴露给用户。词表统一小写，
+# 检测时大小写不敏感，避免 Markdown 等词的大小写变体漏网。
+PROMPT_LEAK_PATTERNS = (
+    "角色设定是",
+    "系统提示词",
+    "提示词原文",
+    "提示词内容",
+    "根据提示词",
+    "内部情绪标记",
+    "内部标记",
+    "内部信号",
+    "说话风格需",
+    "禁止 markdown",
+    "不要输出 markdown",
+    "无多余词语",
+    "另起一行输出",
+    "回复必须",
+    "你的任务是",
+    "你是亚托莉",
+    "给系统读",
+    "系统会在发出前",
+    "系统剥离",
+    "格式固定为",
+    "请使用简体中文",
+    "根据系统提示",
+)
+
+
+def has_prompt_leak(text: str) -> bool:
+    """判断回复是否泄漏系统提示词或内部规则。
+
+    空文本不算泄漏（由空内容检查兜底）；命中任一元指令措辞即返回 True，
+    调用方据此重试或 fail-closed，绝不把内部规则发给用户。
+    """
+    sample = str(text or "").strip()
+    if not sample:
+        return False
+    lowered = sample.lower()
+    return any(pattern in lowered for pattern in PROMPT_LEAK_PATTERNS)
+
 DISTRESS_KEYWORDS = (
     "难受",
     "难过",

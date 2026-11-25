@@ -1174,8 +1174,9 @@ class EngineToolsMixin(PersonaEngineMixin):
                 reply
                 and _has_substantive_content(reply)
                 and not has_illegal_language_or_garbage(reply)
+                and not has_prompt_leak(reply)
             ):
                 return reply
-        raise RuntimeError("模型连续 3 次返回空内容、乱码或异常语言")
+        raise RuntimeError("模型连续 3 次返回空内容、乱码、异常语言或提示词泄漏")
 
 

@@ -381,6 +381,9 @@ def _persona_violations(user_text: str, reply_text: str) -> list[str]:
     if any(pattern in reply for pattern in BANNED_ASSISTANT_PATTERNS):
         violations.append("出现 AI 助手/客服式表达")
 
+    if has_prompt_leak(reply):
+        violations.append("回复泄漏系统提示词或内部规则")
+
     if re.search(r"@\d{5,}", reply):
         violations.append("群聊输出 QQ 号艾特")
 
