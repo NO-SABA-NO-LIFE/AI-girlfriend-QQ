@@ -290,13 +290,16 @@ class ToolboxRequestMixin(ToolboxMixin):
     ) -> ToolAnalysisResult | None:
         if not allow_vision or not previous.visual_data:
             return None
+        full_text = _requests_full_text_transcription(question)
         prompt = _visual_prompt_for_kind(
             previous.visual_kind or "auto",
             question,
+            full_text=full_text,
         )
         return await self._analyze_image_bytes(
             previous.visual_data,
             previous.visual_source or "上一张图片",
             visual_kind=previous.visual_kind or "auto",
             vision_prompt=prompt,
+            full_text=full_text,
         )

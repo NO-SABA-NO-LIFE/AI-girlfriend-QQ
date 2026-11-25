@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from .support import ToolboxMixin
 
+# 全文模式下放宽 OCR 截断，让完整文字能进入视觉证据与对话上下文；
+# 普通模式仍沿用 1200/1600 的精简上限，不增加日常成本。
+_FULL_TEXT_CHAR_LIMIT = 4000
+
 
 class ToolboxVisionMixin(ToolboxMixin):
     async def analyze_image_upload(
@@ -21,11 +25,15 @@ class ToolboxVisionMixin(ToolboxMixin):
             raise ValueError("图片内容为空")
         if len(data) > int(getattr(self, "vision_max_bytes", 8_000_000)):
             raise ValueError("图片文件过大")
+        full_text = _requests_full_text_transcription(user_question)
         return await self._analyze_image_bytes(
             data,
             str(source or "api:image"),
             visual_kind="image",
-            vision_prompt=_visual_prompt_for_kind("image", user_question),
+            vision_prompt=_visual_prompt_for_kind(
+                "image", user_question, full_text=full_text
+            ),
+            full_text=full_text,
         )
 
     async def _analyze_image_ref(
@@ -38,12 +46,16 @@ class ToolboxVisionMixin(ToolboxMixin):
         material = await self._resolve_ref_material(image_ref, action_caller)
         if material:
             data, source, _ = material
+            full_text = _requests_full_text_transcription(user_question)
             return await self._analyze_image_bytes(
                 data,
                 source,
                 visual_kind=visual_kind,
                 image_ref=image_ref,
-                vision_prompt=_visual_prompt_for_kind(visual_kind, user_question),
+                vision_prompt=_visual_prompt_for_kind(
+                    visual_kind, user_question, full_text=full_text
+                ),
+                full_text=full_text,
             )
 
         if visual_kind == "sticker":
@@ -171,15 +183,18 @@ class ToolboxVisionMixin(ToolboxMixin):
         visual_kind: str = "auto",
         image_ref: _SegmentRef | None = None,
         vision_prompt: str | None = None,
+        full_text: bool = False,
     ) -> ToolAnalysisResult:
         info = _image_info(data)
         kind_hint = visual_kind if visual_kind in {"image", "sticker"} else _classify_visual_material(data, source, image_ref)
         prompt = vision_prompt or _visual_prompt_for_kind(kind_hint)
+        # 全文模式放宽 OCR 截断，普通模式保持精简上限。
+        ocr_char_limit = _FULL_TEXT_CHAR_LIMIT if full_text else 1200
         ocr_result = await self._extract_image_ocr(data)
         if ocr_result.text:
             prompt += (
                 "\n\n独立 OCR 结果（文字证据）：\n"
-                f"{_shorten(ocr_result.text, 1200)}\n"
+                f"{_shorten(ocr_result.text, ocr_char_limit)}\n"
                 f"OCR 平均置信度：{ocr_result.average_confidence:.3f}。"
                 "图中文字必须以这份独立 OCR 结果为优先证据；"
                 "可纠正明显断行，但不得改写、补字或凭空增加文字。"
@@ -189,7 +204,7 @@ class ToolboxVisionMixin(ToolboxMixin):
         if vision_text and ocr_result.text:
             vision_text = _replace_visual_visible_text(
                 vision_text,
-                _shorten(ocr_result.text, 1200),
+                _shorten(ocr_result.text, ocr_char_limit),
             )
         resolved_kind = kind_hint
         if resolved_kind == "auto":
@@ -198,8 +213,9 @@ class ToolboxVisionMixin(ToolboxMixin):
         findings = [_visual_meta_line(resolved_kind, data, info)]
         limitations = []
         if ocr_result.text:
+            findings_limit = _FULL_TEXT_CHAR_LIMIT if full_text else 1600
             findings.append(
-                f"独立 OCR 文字：{_shorten(ocr_result.text, 1600)}"
+                f"独立 OCR 文字：{_shorten(ocr_result.text, findings_limit)}"
             )
             findings.append(
                 "OCR 证据质量："
@@ -241,6 +257,7 @@ class ToolboxVisionMixin(ToolboxMixin):
                 else "unavailable"
             ),
             visual_ocr_confidence=ocr_result.average_confidence,
+            full_text_requested=full_text,
             knowledge_materials=[{"title": "图片 OCR 与视觉分析", "locator": source, "raw": data,
                 "filename": _basename_from_ref(source) or "image.bin",
                 "text": "\n\n".join(p for p in (ocr_result.text, vision_text) if p),

@@ -37,6 +37,9 @@ class ToolAnalysisResult:
     # 发送者昵称，prompt_context 据此提示归属，避免模型把别人的图当成当前用户发的。
     # 默认空串表示“当前用户本人发的图/无需标注”，42 处现有构造无需改动。
     sender_origin_name: str = ""
+    # 用户明确要求全文转写/翻译时置 True：提示对话模型基于完整 OCR 逐字输出，
+    # 而不是只概括一两句。默认 False，现有构造无需改动。
+    full_text_requested: bool = False
     # Archival evidence is deliberately excluded from prompt_context and repr.
     knowledge_materials: list[dict[str, Any]] = field(default_factory=list, repr=False, compare=False)
 
@@ -166,6 +169,14 @@ class ToolAnalysisResult:
                 f"{self.sender_origin_name}”发的，不是当前说话的人发的；"
                 "不要把图里的内容当成当前用户说的或做的，回答时注意区分发送者。"
             )
+        full_text_rule = ""
+        if self.full_text_requested:
+            full_text_rule = (
+                "\n全文转写要求：用户明确要完整识别/翻译图中文字，"
+                "请基于上方“独立 OCR 文字”逐字完整输出，不要概括、不要只挑一两句；"
+                "用户要求翻译就给出对应译文，否则转写原文，并保留原有换行顺序。"
+                "OCR 为空或识别不可信时，如实说明看不清，不得编造文字。"
+            )
         return (
             "你已获得用户发来的外部材料读取结果。不要说“我调用了工具”，不要输出技术流程；"
             "只把这些信息自然用于回答。"
@@ -181,6 +192,7 @@ class ToolAnalysisResult:
             f"{visibility_rule}"
             f"{visual_rule}"
             f"{origin_rule}"
+            f"{full_text_rule}"
             f"\n来源：{source_text}"
             f"\n可用信息：\n{finding_text}"
             f"\n限制：\n{limitation_text}"

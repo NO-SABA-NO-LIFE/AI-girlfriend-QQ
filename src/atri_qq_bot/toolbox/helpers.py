@@ -262,7 +262,35 @@ def _visual_meta_line(visual_kind: str, data: bytes, info: tuple[str, int, int] 
     return f"{label}：约 {len(data)} 字节，暂未识别出尺寸。"
 
 
-def _visual_prompt_for_kind(visual_kind: str, user_question: str = "") -> str:
+_FULL_TEXT_TRANSCRIPTION_RE = re.compile(
+    r"(?:"
+    # 翻译诉求
+    r"翻译|译成|译一下|翻一下|帮我翻|英译[中汉]|中译英|汉译英"
+    # 全文 / 逐字转写诉求
+    r"|全文|完整|全部|逐字|逐句|原文|原话|转写|识别"
+    # 让我读 / 念出来
+    r"|读一下|读出来|读一读|读给我|念一下|念出来"
+    # 图上写了什么
+    r"|写的什么|写了什么|写了啥|什么字|哪些字|上面写"
+    r")"
+)
+
+
+def _requests_full_text_transcription(user_question: str) -> bool:
+    """用户明确要求完整转写/翻译图中文字时返回 True。
+
+    默认 False（fail-closed）：只有命中“翻译/全文/逐字/读出来”等明确
+    指令才进入全文模式；普通发表情、晒图仍走精简的情绪理解，不被误触发。
+    """
+    return bool(_FULL_TEXT_TRANSCRIPTION_RE.search(str(user_question or "")))
+
+
+def _visual_prompt_for_kind(
+    visual_kind: str,
+    user_question: str = "",
+    *,
+    full_text: bool | None = None,
+) -> str:
     question = re.sub(
         r"\[(?:表情包/图片|动画表情|图片):.*?\]\]?",
         " ",
@@ -271,6 +299,20 @@ def _visual_prompt_for_kind(visual_kind: str, user_question: str = "") -> str:
     question = re.sub(r"@(?:群友|全体成员)", " ", question)
     question = re.sub(r"\s+", " ", question).strip()
     question = _shorten(question, 300) if question else "用户没有附加文字，请完整理解图片。"
+    if full_text is None:
+        full_text = _requests_full_text_transcription(question)
+    if full_text:
+        visible_text_rule = (
+            "visible_text：用户明确要求完整转写/翻译图中文字，"
+            "请按原文完整列出图中文字、不要概括或省略；"
+            "具体文字以独立 OCR 结果为准，没有就写“无明显文字”，看不清的字不要编。\n"
+        )
+    else:
+        visible_text_rule = (
+            "visible_text：不要全文照抄，完整文字已由独立 OCR 提供；"
+            "你只用一两句摘录与用户问题最相关的关键文字，控制在 60 字以内。"
+            "没有就写“无明显文字”，看不清的字不要编。\n"
+        )
     return (
         "【最关键的定位】用户发来的图片/表情不是让你分析或点评的“作品”，"
         "而是用户此刻情绪、状态、态度的表达，等同于一个语气、一句潜台词。"
@@ -285,7 +327,7 @@ def _visual_prompt_for_kind(visual_kind: str, user_question: str = "") -> str:
         "禁止评价这张图或表情本身怎么样。\n"
         "emotion：用户当前的情绪/状态，例如困惑懵逼、无语、开心、生气、害羞、无奈、得意。\n"
         "social_intent：用户借这张图在对话里想做什么，例如表示没听懂、缓和气氛、吐槽、撒娇、回应对方。\n"
-        "visible_text：不要全文照抄，完整文字已由独立 OCR 提供；你只用一两句摘录与用户问题最相关的关键文字，控制在 60 字以内。没有就写“无明显文字”，看不清的字不要编。\n"
+        f"{visible_text_rule}"
         "subjects、identity：仅当画面确实包含可识别的具体人物/作品时才填写，"
         "不确定写“未确认”；不要为了凑字段去罗列画面元素。"
         "一旦给出具体人物名或作品名，needs_web_verification 必须为 true，"
