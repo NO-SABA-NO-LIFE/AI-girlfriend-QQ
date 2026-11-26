@@ -35,6 +35,7 @@ from .renderers.dispatch_renderer import DispatchRenderer
 from .renderers.dss_renderer import DSSRenderer
 from .core.formatters import (
     WIKI_USAGE,
+    format_arsenal_fact,
     format_dss_message,
     format_global_events_message,
     format_map_caption,
@@ -149,6 +150,7 @@ class HelldiversService:
         rotation_steam: int = 900,
         enable_translation: bool = True,
         wiki_client: WikiClient | None = None,
+        wiki_zh_client: WikiClient | None = None,
         enable_wiki: bool = True,
         translate_wiki: bool = True,
         map_renderer: MapRenderer | None = None,
@@ -186,6 +188,7 @@ class HelldiversService:
         self.rotation_steam = max(60, int(rotation_steam))
         self.enable_translation = enable_translation
         self.wiki_client = wiki_client
+        self.wiki_zh_client = wiki_zh_client
         self.enable_wiki = enable_wiki
         self.translate_wiki = translate_wiki and enable_translation
         self.map_renderer = map_renderer
@@ -327,6 +330,11 @@ class HelldiversService:
                 await self.wiki_client.close()
             except Exception as e:
                 logger.warning(f"[HD2] wiki client close error: {e}")
+        if self.wiki_zh_client is not None:
+            try:
+                await self.wiki_zh_client.close()
+            except (TypeError, ValueError, OSError, AttributeError) as e:
+                logger.warning(f"[HD2] wiki zh client close error: {e}")
         if self.remote_image_cache is not None:
             try:
                 await self.remote_image_cache.close()
@@ -1188,6 +1196,107 @@ class HelldiversService:
             return "❌ 卡片渲染不可用（Pillow 未安装）。"
         return [p]
 
+    async def get_arsenal_fact_text(self, query: str) -> str:
+        """数据库事实文本（装备 + 敌人），供模型在工具回执中读取。
+
+        与 get_arsenal_image 相同的查找与条目选择逻辑（含同步等待、敌人
+        优先），但不渲染卡片，直接返回 format_arsenal_fact 的紧凑文本。
+        装备数据读本地；敌人部位护甲走 fetch_enemy_armor 缓存。
+        """
+        if self.arsenal_client is None:
+            return "❌ 数据库功能未启用。"
+        await self.arsenal_client.ensure_loaded()
+        # 敌人数据独立加载，失败不影响装备查询
+        try:
+            await self.arsenal_client.ensure_enemies()
+        except (TypeError, ValueError, OSError, AttributeError) as e:
+            logger.warning(f"[HD2] enemies load error: {e}")
+
+        results = self.arsenal_client.search(query)
+        if not results:
+            await self.arsenal_client.wait_for_supplement()
+            results = self.arsenal_client.search(query)
+        if not results:
+            if (
+                self.arsenal_client._dionatha_task is not None
+                and not self.arsenal_client._dionatha_task.done()
+            ):
+                return "⏳ 装备目录正在同步，请稍后重试查询。"
+            if not self.arsenal_client.available:
+                return "❌ 暂无可用装备或敌人缓存，上游请求失败，请稍后重试。"
+            return f"❌ 未找到与“{query}”匹配的装备或敌人。"
+
+        # 敌人条目优先（"泰坦" 同时命中护甲和敌人时选敌人）
+        item = results[0]
+        for candidate in results:
+            if candidate.get("productKind") == "enemy":
+                item = candidate
+                break
+
+        if item.get("productKind") == "enemy":
+            armor_parts: list[tuple[str, int]] = []
+            try:
+                armor_parts = await self.arsenal_client.fetch_enemy_armor(
+                    str(item.get("nameEn") or "")
+                )
+            except (TypeError, ValueError, OSError, AttributeError) as e:
+                logger.warning(f"[HD2] enemy armor load error: {e}")
+            return format_arsenal_fact(item, armor_parts=armor_parts)
+
+        aliases = self.arsenal_client.aliases_for(str(item.get("id") or ""))
+        return format_arsenal_fact(item, aliases=aliases)
+
+    async def _wiki_lookup(
+        self,
+        client: WikiClient,
+        query: str,
+        *,
+        full: bool,
+        translate: bool,
+        note: str = "",
+    ) -> tuple[str, str]:
+        """用指定 WikiClient 完成 direct→search→pick→列表的完整检索。
+
+        返回 (status, text)：
+        - "hit"：命中词条摘要（direct 或高置信自动选中）；
+        - "list"：有候选但置信不足，已渲染为编号列表；
+        - "empty"：该站完全无结果（text 为无结果提示）。
+        ``translate`` 控制是否把英文摘要二次机翻；中文站内容本身即中文，传 False。
+        """
+
+        async def _summary(page: dict[str, Any]) -> str:
+            title = str(page.get("title") or query)
+            extract = str(page.get("extract") or "")
+            if translate:
+                extract = await self._translate_wiki_extract(title, extract)
+            return format_wiki_summary(
+                title=title,
+                extract=extract,
+                url=str(page.get("url") or client.page_url(title)),
+                note=note,
+                full=full,
+            )
+
+        direct = await client.get_page_summary(query, full=full)
+        if direct and direct.get("extract"):
+            return "hit", await _summary(direct)
+
+        results = await client.search(query)
+        if not results:
+            return "empty", format_wiki_search_results(
+                query, [], search_url=client.search_url(query)
+            )
+
+        best = client.pick_best_title(query, results)
+        if best:
+            page = await client.get_page_summary(best, full=full)
+            if page and page.get("extract"):
+                return "hit", await _summary(page)
+
+        return "list", format_wiki_search_results(
+            query, results, search_url=client.search_url(query)
+        )
+
     async def get_wiki_message(self, query: str, *, full: bool = False) -> str:
         if not self.enable_wiki:
             return "❌ Wiki 查询已在配置中关闭（enable_wiki=false）。"
@@ -1198,7 +1307,19 @@ class HelldiversService:
         if not query:
             return WIKI_USAGE
 
-        # 中文查询先经官方词表翻译成英文（wiki 是英文站，直接发中文会命中无关页）
+        # 中文查询优先走中文 wiki：标题与正文均为中文，无需词表翻译或二次机翻。
+        # 仅当中文站完全无结果（或检索异常）时才回退英文站。
+        if contains_cjk(query) and self.wiki_zh_client is not None:
+            try:
+                status, text = await self._wiki_lookup(
+                    self.wiki_zh_client, query, full=full, translate=False
+                )
+                if status != "empty":
+                    return text
+            except (TypeError, ValueError, OSError, AttributeError) as e:
+                logger.warning(f"[HD2] zh wiki lookup error: {e}")
+
+        # 英文兜底流程：中文查询先经官方词表转英文，英文摘要再二次机翻。
         original_query = query
         translated_note = ""
         if contains_cjk(query):
@@ -1207,61 +1328,24 @@ class HelldiversService:
                 query = english.strip()
                 translated_note = f"（已按官方译名转换为：{query}）"
             elif not english:
-                # 词表没覆盖的中文词：搜索结果相关性不可信，直接提示用法
+                # 中文站无命中、词表也未覆盖：提示改用英文关键词
                 return (
                     f"❓ 未在官方译名词表中找到“{original_query}”。\n"
-                    "中文搜索依赖官方译名词表（战备/敌人/星球等 500+ 条），"
-                    "请换用英文关键词重试，例如：\n"
+                    "中文 wiki 未命中，且官方译名词表（战备/敌人/星球等 500+ 条）"
+                    "也没有该词，请换用英文关键词重试，例如：\n"
                     "· /wiki railgun\n"
                     "· /wiki Bile Titan"
                 )
 
         try:
-            # 直接标题命中（仅英文词面；CJK 查询已在上方翻译成英文）
-            direct = await self.wiki_client.get_page_summary(query, full=full)
-            if direct and direct.get("extract"):
-                extract = await self._translate_wiki_extract(
-                    str(direct.get("title") or query),
-                    str(direct.get("extract") or ""),
-                )
-                return format_wiki_summary(
-                    title=str(direct.get("title") or query),
-                    extract=extract,
-                    url=str(direct.get("url") or self.wiki_client.page_url(query)),
-                    note=translated_note,
-                    full=full,
-                )
-
-            results = await self.wiki_client.search(query)
-            if not results:
-                return format_wiki_search_results(
-                    query,
-                    [],
-                    search_url=self.wiki_client.search_url(query),
-                )
-
-            best = self.wiki_client.pick_best_title(query, results)
-            if best:
-                page = await self.wiki_client.get_page_summary(best, full=full)
-                if page:
-                    extract = await self._translate_wiki_extract(
-                        str(page.get("title") or best),
-                        str(page.get("extract") or ""),
-                    )
-                    return format_wiki_summary(
-                        title=str(page.get("title") or best),
-                        extract=extract,
-                        url=str(page.get("url") or self.wiki_client.page_url(best)),
-                        note=translated_note,
-                        full=full,
-                    )
-
-            # 多候选：列表展示
-            return format_wiki_search_results(
+            _, text = await self._wiki_lookup(
+                self.wiki_client,
                 query,
-                results,
-                search_url=self.wiki_client.search_url(query),
+                full=full,
+                translate=self.translate_wiki,
+                note=translated_note,
             )
+            return text
         except Exception as e:
             logger.exception(f"[HD2] wiki query error: {e}")
             return "❌ Wiki 查询失败，请稍后重试。"

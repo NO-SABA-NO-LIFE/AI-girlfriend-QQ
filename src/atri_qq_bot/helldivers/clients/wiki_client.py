@@ -38,9 +38,10 @@ class WikiCache:
     """Wiki 搜索/词条本地缓存（内存 + JSON）。"""
 
     def __init__(
-        self, data_dir: Path, *, page_ttl: int = 21600, search_ttl: int = 1800
+        self, data_dir: Path, *, page_ttl: int = 21600, search_ttl: int = 1800,
+        filename: str = "wiki_cache.json",
     ) -> None:
-        self.path = data_dir / "wiki_cache.json"
+        self.path = data_dir / filename
         self.page_ttl = max(60, int(page_ttl))
         self.search_ttl = max(60, int(search_ttl))
         self._data: dict[str, dict[str, Any]] = {}

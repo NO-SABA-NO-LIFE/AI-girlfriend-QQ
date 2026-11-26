@@ -168,6 +168,37 @@ def _hd2_intel_still_usable(messages: Any) -> bool:
         return False
     return True
 
+
+async def _hd2_arsenal_fact_block(
+    owner: Any, command: str, argument: str
+) -> str:
+    """hd2data 时返回本条目真实数据文本块；其他命令或失败时返回空串。
+
+    用模块函数而不是实例方法：执行器在单元测试里会被挂在 ``SimpleNamespace``
+    替身上，不能假定完整服务对象已经初始化。事实文本由 HelldiversService
+    本地生成（敌人部位走缓存），失败静默降级，绝不影响情报图发送。
+    """
+    if command != "hd2data" or not str(argument or "").strip():
+        return ""
+    helldivers = getattr(owner, "helldivers", None)
+    svc = getattr(helldivers, "service", None)
+    if svc is None:
+        return ""
+    try:
+        fact_text = await svc.get_arsenal_fact_text(argument)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("[HD2] arsenal fact text failed: %s", exc)
+        return ""
+    if not fact_text:
+        return ""
+    return (
+        "\n本条目真实数据如下（据此回答与追问，不要编造未列出的数值）。"
+        "判断适合打哪个阵营/战线时，用穿甲等级对照敌人护甲等级、"
+        "用伤害类型对照阵营特点（高穿甲对高护甲目标，范围/持续伤害对集群血肉目标），"
+        "结论必须能被这些数据支撑；措辞可以带你的语气，但数值和结论不许编：\n"
+        + fact_text
+    )
+
 # 账号切换时要整体替换的 server 属性。**每一项都必须换成新值或 None**，
 # 绝不能保留上一个账号的对象——那会把 A 账号的数据写进 B 账号的库。
 ACCOUNT_SCOPED_ATTRIBUTES = (
@@ -424,6 +455,8 @@ class OneBotConnectionMixin(OneBotServerMixin):
         # 回执里带上规范阵营名：模型看不到图片内容，得靠这句话才知道查的是哪条战线。
         label = hd2_entity_label(command, entity)
         label_note = f"（阵营：{label}）" if label else ""
+        # hd2data 把本条目真实数据文本化进回执，模型才能基于数值而非图片作答。
+        fact_block = await _hd2_arsenal_fact_block(self, command, argument)
         store = getattr(self, "_hd2_intel_cache", None)
         if not isinstance(store, dict):
             store = {}
@@ -467,8 +500,9 @@ class OneBotConnectionMixin(OneBotServerMixin):
                     )
                     return (
                         f"已复用{when}发过的同一份情报{label_note}，会随本轮回复一起发出（未重新抓取）。"
-                        "你只需用一句简短自然的话引导，不要复述卡片数据。"
+                        "你只需用一句简短自然的话引导。"
                         "若用户明确要求刷新到最新数据，请用 freshness=\"latest\" 再调用一次。"
+                        f"{fact_block}"
                     )
 
         slash_text = build_hd2_slash(command, argument)
@@ -499,8 +533,9 @@ class OneBotConnectionMixin(OneBotServerMixin):
         _record_hd2_last_intel(self, conversation_id, command, entity)
         return (
             f"Helldivers 情报已就绪{label_note}，会随本轮回复一起发出。"
-            "你只需用一句简短自然的话引导（可带情绪），不要复述卡片里的数据，"
+            "你只需用一句简短自然的话引导（可带情绪），"
             "不要罗列编号，也不要说自己做不到或正在查询。"
+            f"{fact_block}"
         )
 
     async def _hd2_push_sender(

@@ -96,6 +96,9 @@ _SCHEMA: dict[str, tuple[str, Any]] = {
     "wiki_full_extract_chars": ("HD2_WIKI_FULL_EXTRACT_CHARS", 3000),
     "wiki_prefer_hd2": ("HD2_WIKI_PREFER_HD2", True),
     "translate_wiki": ("HD2_TRANSLATE_WIKI", True),
+    # 中文 wiki（wiki.gg 的 /zh 子站）：中文查询优先命中，无结果再回退英文站
+    "wiki_zh_base": ("HD2_WIKI_ZH_BASE", "https://helldivers.wiki.gg/zh"),
+    "wiki_prefer_chinese": ("HD2_WIKI_PREFER_CHINESE", True),
     # —— 素材清单 ——
     "asset_manifest_path": ("HD2_ASSET_MANIFEST_PATH", ""),
     # —— 地图 ——

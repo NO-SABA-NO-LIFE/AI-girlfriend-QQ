@@ -182,6 +182,20 @@ def test_schema_enum_matches_canonical_commands() -> None:
     assert params["required"] == ["command"]
 
 
+def test_schema_description_guides_loadout_reasoning() -> None:
+    tool = next(
+        t
+        for t in available_tool_schemas(_base_config(), hd2_nl_allowed=True)
+        if t["function"]["name"] == "query_helldivers"
+    )
+    description = tool["function"]["description"]
+    # 配装/适用阵营问题：引导用 hd2data 查真实数据、可连续调用，而非凭记忆
+    assert "配装" in description
+    assert "hd2data" in description
+    assert "穿甲等级" in description
+    assert "不要凭记忆下结论" in description
+
+
 # ---------------------------------------------------------------------------
 # 3. 引擎上下文工具路由
 # ---------------------------------------------------------------------------
@@ -485,6 +499,106 @@ def test_server_executor_handles_bridge_exception() -> None:
     )
     assert harness._pending_hd2_nl == {}
     assert "获取失败" in result
+
+
+def _fact_harness(fact_text: str, messages: Any) -> SimpleNamespace:
+    async def handle(text: str, session_key: str) -> Any:
+        return messages
+
+    async def get_arsenal_fact_text(query: str) -> str:
+        get_arsenal_fact_text.called_with = query  # type: ignore[attr-defined]
+        return fact_text
+
+    service = SimpleNamespace(get_arsenal_fact_text=get_arsenal_fact_text)
+    return SimpleNamespace(
+        helldivers=SimpleNamespace(handle=handle, service=service),
+        _pending_hd2_nl={},
+    )
+
+
+def test_hd2data_receipt_includes_arsenal_fact_text() -> None:
+    outgoing = [SimpleNamespace(kind="image", content="/tmp/a.png")]
+    fact = "【装备事实】主武器 · 野狼\n伤害 75 · 穿甲 中型"
+    harness = _fact_harness(fact, outgoing)
+    result = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "hd2data", "野狼"
+        )
+    )
+    # service 以原始 argument 被调用
+    assert (
+        harness.helldivers.service.get_arsenal_fact_text.called_with  # type: ignore[attr-defined]
+        == "野狼"
+    )
+    assert "本条目真实数据如下" in result
+    assert fact in result
+    # 数据已文本化，不再要求模型"不要复述"
+    assert "不要复述卡片里的数据" not in result
+
+
+def test_hd2data_fact_block_guides_faction_reasoning() -> None:
+    outgoing = [SimpleNamespace(kind="image", content="/tmp/a.png")]
+    fact = "【装备事实】主武器 · 磁轨炮\n穿甲 重型"
+    harness = _fact_harness(fact, outgoing)
+    result = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "hd2data", "磁轨炮"
+        )
+    )
+    assert "本条目真实数据如下" in result
+    # 配装/阵营推理引导：穿甲对照护甲、伤害类型对照阵营特点
+    assert "穿甲等级对照敌人护甲等级" in result
+    assert "伤害类型对照阵营特点" in result
+    assert fact in result
+
+
+def test_non_hd2data_command_skips_fact_text() -> None:
+    outgoing = [SimpleNamespace(kind="image", content="/tmp/a.png")]
+    harness = _fact_harness("不该出现", outgoing)
+    result = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "planet", "富源"
+        )
+    )
+    assert "本条目真实数据如下" not in result
+    assert "不该出现" not in result
+
+
+def test_hd2data_without_service_degrades_gracefully() -> None:
+    # 旧替身没有 service 属性：fact 为空，情报回执仍正常
+    outgoing = [SimpleNamespace(kind="image", content="/tmp/a.png")]
+    harness = _server_harness(outgoing)
+    result = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "hd2data", "野狼"
+        )
+    )
+    assert "情报已就绪" in result
+    assert "本条目真实数据如下" not in result
+
+
+def test_hd2data_fact_failure_degrades_gracefully() -> None:
+    async def handle(text: str, session_key: str) -> Any:
+        return [SimpleNamespace(kind="image", content="/tmp/a.png")]
+
+    async def broken_fact(query: str) -> str:
+        raise RuntimeError("boom")
+
+    harness = SimpleNamespace(
+        helldivers=SimpleNamespace(
+            handle=handle,
+            service=SimpleNamespace(get_arsenal_fact_text=broken_fact),
+        ),
+        _pending_hd2_nl={},
+    )
+    result = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "hd2data", "野狼"
+        )
+    )
+    # fact 拉取失败不影响情报图，回执降级为普通引导
+    assert "情报已就绪" in result
+    assert "本条目真实数据如下" not in result
 
 
 # ---------------------------------------------------------------------------

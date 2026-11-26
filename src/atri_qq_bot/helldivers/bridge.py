@@ -333,6 +333,30 @@ class HelldiversBridge:
                 cache=wiki_cache,
             )
 
+        # 中文 wiki 客户端（独立缓存文件，避免与英文缓存键冲突）
+        wiki_zh_client: WikiClient | None = None
+        if enable_wiki and cfg.get("wiki_prefer_chinese", True):
+            wiki_zh_cache = WikiCache(
+                data_dir,
+                page_ttl=cfg.get("wiki_cache_ttl", 21600),
+                search_ttl=cfg.get("wiki_search_cache_ttl", 1800),
+                filename="wiki_zh_cache.json",
+            )
+            wiki_zh_client = WikiClient(
+                base_url=cfg.get("wiki_zh_base", "https://helldivers.wiki.gg/zh"),
+                api_path=cfg.get("wiki_api_path", "/api.php"),
+                user_agent=cfg.get("api_user_agent", USER_AGENT),
+                timeout=cfg.get("api_timeout", 30),
+                proxy_url=cfg.get("proxy_url", ""),
+                search_limit=cfg.get("wiki_search_limit", 5),
+                extract_chars=cfg.get("wiki_extract_chars", 900),
+                full_extract_chars=cfg.get("wiki_full_extract_chars", 3000),
+                prefer_hd2=cfg.get("wiki_prefer_hd2", True),
+                retry_max_attempts=cfg.get("retry_max_attempts", 3),
+                retry_base_delay=cfg.get("retry_base_delay", 2.0),
+                cache=wiki_zh_cache,
+            )
+
         configure_asset_manifest(cfg.get("asset_manifest_path", "") or None)
 
         map_renderer = MapRenderer(
@@ -381,6 +405,7 @@ class HelldiversBridge:
             rotation_steam=cfg.get("rotation_steam", 900),
             enable_translation=enable_translation,
             wiki_client=wiki_client,
+            wiki_zh_client=wiki_zh_client,
             enable_wiki=enable_wiki,
             translate_wiki=cfg.get("translate_wiki", True),
             map_renderer=map_renderer,

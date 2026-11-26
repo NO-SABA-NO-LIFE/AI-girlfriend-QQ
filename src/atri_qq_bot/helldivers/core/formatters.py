@@ -6,7 +6,6 @@ import re
 from typing import Any
 
 from .._logging import logger
-
 from .text_utils import (
     clean_game_text,
     dispatch_type_name,
@@ -667,3 +666,241 @@ def format_map_caption(active_campaigns: int, planets: int, updated: str = "") -
         lines.append(f"▎更新: {updated}")
     lines.append("-------------")
     return "\n".join(lines)
+
+
+def _fact_num(value: Any) -> str:
+    """事实文本里的数字格式化：整数浮点去掉 .0，其余原样。"""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _fact_field_parts(fields: dict[str, Any], field_zh: dict[str, str]) -> list[str]:
+    """把单个战斗组件的 fields 压成 '中文标签 值' 片段列表。"""
+    parts: list[str] = []
+    for key, zh in field_zh.items():
+        if key not in fields:
+            continue
+        value = fields[key]
+        if key == "armorPenetration" and isinstance(value, dict):
+            # 穿甲优先用中文标签，缺失时回退到等级数字
+            pen = value.get("labelZh") or f"等级{value.get('value', '?')}"
+            parts.append(f"穿甲 {pen}")
+        elif key == "statusEffects" and isinstance(value, list):
+            effects = [str(e).strip() for e in value if str(e).strip()]
+            if effects:
+                parts.append(f"{zh} {'/'.join(effects)}")
+        elif isinstance(value, (int, float)):
+            parts.append(f"{zh} {_fact_num(value)}")
+        elif value:
+            parts.append(f"{zh} {value}")
+    return parts
+
+
+def _fact_handling_parts(
+    handling: dict[str, Any], handling_zh: dict[str, str]
+) -> list[str]:
+    """把操控属性（弹匣/射速/射击模式等）压成片段列表，清洗脏数据。"""
+    parts: list[str] = []
+    for key, zh in handling_zh.items():
+        if key not in handling or handling[key] in (None, ""):
+            continue
+        value = handling[key]
+        if key == "fireRate":
+            v = "/".join(str(x) for x in value) if isinstance(value, list) else str(value)
+            parts.append(f"{zh} {v} RPM")
+        elif key == "firingModes":
+            # 过滤 'None'、清理 &nbsp; 实体并去重
+            modes: list[str] = []
+            raw_modes = value if isinstance(value, list) else [value]
+            for m in raw_modes:
+                cm = str(m).replace("&nbsp;", " ").strip()
+                if cm and cm.casefold() != "none" and cm not in modes:
+                    modes.append(cm)
+            if modes:
+                parts.append(f"{zh} {'/'.join(modes[:5])}")
+        elif key in ("reloadSeconds", "upgradedReloadSeconds"):
+            parts.append(f"{zh} {_fact_num(value)}s")
+        elif isinstance(value, list):
+            parts.append(f"{zh} {'/'.join(str(x) for x in value[:4])}")
+        else:
+            parts.append(f"{zh} {value}")
+    return parts
+
+
+def _fact_acquisition(acq: dict[str, Any], acq_zh: dict[str, str]) -> str:
+    """把获取方式压成单行说明。"""
+    kind = acq.get("kind")
+    label = acq_zh.get(str(kind), str(kind or ""))
+    if kind == "warbond":
+        text = label
+        if acq.get("page"):
+            text += f" 第{acq['page']}页"
+        if acq.get("itemMedals"):
+            text += f" · {acq['itemMedals']}勋章"
+        return text
+    if kind == "requisition":
+        text = label
+        if acq.get("levelRequired") is not None:
+            text += f" · 等级{acq['levelRequired']}"
+        if acq.get("requisitionPoints"):
+            text += f" · {acq['requisitionPoints']}申请点"
+        return text
+    return label
+
+
+def _format_equipment_fact(item: dict[str, Any], aliases: list[str]) -> str:
+    """装备分支：型号/战斗数值/操控/部署/获取。"""
+    from ..clients.arsenal_client import (
+        ACQUISITION_ZH,
+        COMPONENT_LABEL_ZH,
+        FIELD_ZH,
+        HANDLING_ZH,
+        PRODUCT_KIND_ZH,
+    )
+
+    kind = PRODUCT_KIND_ZH.get(
+        str(item.get("productKind")), str(item.get("productKind") or "装备")
+    )
+    name = str(item.get("nameZh") or item.get("nameEn") or "?")
+    lines = [f"【装备事实】{kind} · {name}"]
+
+    info: list[str] = []
+    if item.get("model"):
+        info.append(f"型号 {item['model']}")
+    if item.get("weaponType"):
+        info.append(f"类型 {item['weaponType']}")
+    if item.get("nameEn"):
+        info.append(f"英文名 {item['nameEn']}")
+    if info:
+        lines.append(" | ".join(info))
+
+    clean_aliases = [a for a in aliases if a]
+    if clean_aliases:
+        lines.append(f"玩家俗称: {'、'.join(clean_aliases[:5])}")
+
+    armor = item.get("armor")
+    if isinstance(armor, dict) and armor:
+        aparts: list[str] = []
+        if armor.get("rating") is not None:
+            aparts.append(f"护甲值 {armor['rating']}（{armor.get('class') or '?'}）")
+        if armor.get("speed") is not None:
+            aparts.append(f"移速 {armor['speed']}")
+        if armor.get("staminaRegen") is not None:
+            aparts.append(f"体力回复 {armor['staminaRegen']}")
+        if armor.get("passive"):
+            aparts.append(f"被动 {armor['passive']}")
+        if aparts:
+            lines.append("护甲: " + " · ".join(aparts))
+
+    combat = item.get("combat")
+    if isinstance(combat, dict):
+        components = [c for c in combat.get("components") or [] if isinstance(c, dict)]
+        primary_id = combat.get("primaryComponentId")
+        for comp in components:
+            label = COMPONENT_LABEL_ZH.get(
+                str(comp.get("label")),
+                str(comp.get("label") or comp.get("type") or "组件"),
+            )
+            suffix = "（主）" if comp.get("id") == primary_id and len(components) > 1 else ""
+            cparts = _fact_field_parts(comp.get("fields") or {}, FIELD_ZH)
+            if cparts:
+                lines.append(f"· {label}{suffix}: " + " · ".join(cparts))
+
+    handling = item.get("handling")
+    if isinstance(handling, dict):
+        hparts = _fact_handling_parts(handling, HANDLING_ZH)
+        if hparts:
+            lines.append("操控: " + " · ".join(hparts))
+
+    deploy = item.get("deployment")
+    if isinstance(deploy, dict):
+        dparts: list[str] = []
+        if deploy.get("cooldownSeconds") is not None:
+            dparts.append(f"冷却 {_fact_num(deploy['cooldownSeconds'])}s")
+        if deploy.get("callInSeconds") is not None:
+            dparts.append(f"呼叫 {_fact_num(deploy['callInSeconds'])}s")
+        if dparts:
+            lines.append("部署: " + " · ".join(dparts))
+        code = deploy.get("code")
+        if isinstance(code, list) and code:
+            arrows = {"up": "↑", "down": "↓", "left": "←", "right": "→"}
+            seq = "".join(arrows.get(str(step).lower(), "?") for step in code)
+            lines.append(f"输入码: {seq}")
+
+    acq = item.get("acquisition")
+    if isinstance(acq, dict) and acq:
+        atext = _fact_acquisition(acq, ACQUISITION_ZH)
+        if atext:
+            lines.append(f"获取: {atext}")
+
+    return "\n".join(lines)
+
+
+def _format_enemy_fact(
+    item: dict[str, Any], armor_parts: list[tuple[str, int]]
+) -> str:
+    """敌人分支：阵营/护甲类型/生命值/部位护甲/攻击方式。"""
+    from ..clients.arsenal_client import (
+        _ENEMY_CLASS_ZH,
+        _PART_NAME_ZH,
+        armor_tier_label,
+        parse_damage,
+        parse_health,
+    )
+
+    name = str(item.get("nameZh") or item.get("nameEn") or "?")
+    lines = [f"【敌人事实】{name}"]
+
+    info: list[str] = []
+    if item.get("nameEn"):
+        info.append(f"英文名 {item['nameEn']}")
+    if item.get("factionZh") or item.get("faction"):
+        info.append(f"阵营 {item.get('factionZh') or item.get('faction')}")
+    enemy_class = str(item.get("enemyClass") or "").strip()
+    if enemy_class:
+        info.append(f"护甲类型 {_ENEMY_CLASS_ZH.get(enemy_class, enemy_class)}")
+    if item.get("size"):
+        info.append(f"体型 {item['size']}")
+    if info:
+        lines.append(" | ".join(info))
+
+    for value, label in parse_health(str(item.get("healthRaw") or ""))[:5]:
+        # 部位名走中文映射，未覆盖时保留原文
+        lbl = _PART_NAME_ZH.get(label, label) if label else ""
+        lines.append(f"· 生命 {value}" + (f"（{lbl}）" if lbl else ""))
+
+    for part_name, av in armor_parts[:8]:
+        zh = _PART_NAME_ZH.get(part_name, part_name)
+        lines.append(f"· 部位 {zh}: {armor_tier_label(av)}")
+
+    for desc, dtype in parse_damage(str(item.get("damageRaw") or ""))[:5]:
+        suffix = f"（{dtype}）" if dtype else ""
+        lines.append(f"· 攻击 {desc}{suffix}")
+
+    return "\n".join(lines)
+
+
+def format_arsenal_fact(
+    item: dict[str, Any],
+    *,
+    aliases: list[str] | None = None,
+    armor_parts: list[tuple[str, int]] | None = None,
+) -> str:
+    """把单条装备/敌人 item 压成紧凑中文事实文本，供模型在工具回执中读取。
+
+    纯函数、无 IO、无网络，对缺失字段容错。productKind 为 "enemy" 时走
+    敌人分支（阵营/血量/部位护甲/攻击），其余装备走战斗/操控/部署分支。
+    """
+    if not isinstance(item, dict):
+        return "❌ 装备事实为空。"
+    try:
+        if item.get("productKind") == "enemy":
+            return _format_enemy_fact(item, list(armor_parts or []))
+        return _format_equipment_fact(item, list(aliases or []))
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError):
+        # 仅捕获数据结构问题，避免盲目吞掉其它异常（不触发 BLE001）
+        logger.exception("[HD2] arsenal fact format failed")
+        return "❌ 装备事实格式化失败。"
