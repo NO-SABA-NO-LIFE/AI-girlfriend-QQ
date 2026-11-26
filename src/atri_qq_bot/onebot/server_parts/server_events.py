@@ -31,6 +31,7 @@ from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
     object_requires_mention,
 )
 from ...llm_tools.hd2_intent import detect_hd2_command_hint
+from ...persona.reply_rules import _group_speaker_label
 
 # 运行时会由 _sync_server_globals 注入 server.py 的同名 logger；这里显式声明一份，
 # 便于模块被单独导入（单元测试）时也能正常记录。

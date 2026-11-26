@@ -270,3 +270,19 @@ def test_ambient_skips_group_that_requires_mention(monkeypatch) -> None:
     event = _base_event()
     assert asyncio.run(server._maybe_ambient_group_reply(event, "有人在吗")) is False
     assert getattr(server, "_ambient_group_not_before", {}) == {}
+
+
+def test_server_events_module_explicitly_imports_speaker_label() -> None:
+    """显式导入守护：_group_speaker_label 必须是模块自身的全局名字。
+
+    模块 __dict__ 只含本模块 globals、不含 builtins，因此一旦删掉那行显式导入，
+    该断言立即失败，防止重新退化为依赖 builtins 注入的间歇 NameError。
+    """
+    from atri_qq_bot.onebot.server_parts import server_events
+
+    assert "_group_speaker_label" in server_events.__dict__
+    assert callable(server_events._group_speaker_label)
+    # 与 persona.reply_rules 里的实现是同一个函数。
+    from atri_qq_bot.persona.reply_rules import _group_speaker_label
+
+    assert server_events._group_speaker_label is _group_speaker_label
