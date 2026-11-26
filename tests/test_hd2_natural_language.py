@@ -194,7 +194,10 @@ def test_schema_description_guides_loadout_reasoning() -> None:
     assert "配装" in description
     assert "internal" in description
     assert "穿甲等级" in description
-    assert "不要自己造译名" in description
+    # 名称纪律：禁止自造描述名，给出雷霆/电喷反例，并覆盖追问场景
+    assert "名称纪律" in description
+    assert "雷霆" in description
+    assert "电弧散弹枪" in description
 
 
 # ---------------------------------------------------------------------------
