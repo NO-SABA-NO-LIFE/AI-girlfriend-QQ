@@ -37,6 +37,7 @@ from atri_qq_bot.llm_tools.hd2_intent import (
 )
 from atri_qq_bot.llm_tools.schema import available_tool_schemas
 from atri_qq_bot.onebot.server_parts.server_connection import OneBotConnectionMixin
+from atri_qq_bot.onebot.server import OneBotServer
 from atri_qq_bot.persona import AtriReplyEngine
 
 
@@ -189,11 +190,11 @@ def test_schema_description_guides_loadout_reasoning() -> None:
         if t["function"]["name"] == "query_helldivers"
     )
     description = tool["function"]["description"]
-    # 配装/适用阵营问题：引导用 hd2data 查真实数据、可连续调用，而非凭记忆
+    # 配装/适用阵营问题：引导用 internal 静默查证真实数据、可连续调用，而非凭记忆
     assert "配装" in description
-    assert "hd2data" in description
+    assert "internal" in description
     assert "穿甲等级" in description
-    assert "不要凭记忆下结论" in description
+    assert "不要自己造译名" in description
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +220,7 @@ def _engine() -> AtriReplyEngine:
 
 def test_engine_routes_query_to_injected_executor() -> None:
     engine = _engine()
-    seen: list[tuple[str, str, str, str, bool]] = []
+    seen: list[tuple[str, str, str, str, bool, bool]] = []
 
     async def executor(
         conversation_id: str,
@@ -227,8 +228,11 @@ def test_engine_routes_query_to_injected_executor() -> None:
         argument: str,
         freshness: str = "auto",
         explicit: bool = True,
+        internal: bool = False,
     ) -> str:
-        seen.append((conversation_id, command, argument, freshness, explicit))
+        seen.append(
+            (conversation_id, command, argument, freshness, explicit, internal)
+        )
         return "情报已就绪。"
 
     engine.set_hd2_tool_executor(executor)
@@ -241,8 +245,8 @@ def test_engine_routes_query_to_injected_executor() -> None:
         )
     )
     assert result == "情报已就绪。"
-    # 没传 freshness：标为“未表态”，由执行器按用户原话兜底。
-    assert seen == [("private:1", "planet", "富源", "auto", False)]
+    # 没传 freshness：标为“未表态”，由执行器按用户原话兜底；internal 默认 false。
+    assert seen == [("private:1", "planet", "富源", "auto", False, False)]
 
     seen.clear()
     asyncio.run(
@@ -253,7 +257,7 @@ def test_engine_routes_query_to_injected_executor() -> None:
             engine.config,
         )
     )
-    assert seen == [("private:1", "warfront", "终结族", "latest", True)]
+    assert seen == [("private:1", "warfront", "终结族", "latest", True, False)]
 
 
 def test_engine_reports_when_executor_missing() -> None:
@@ -1022,3 +1026,89 @@ def test_schema_exposes_freshness_parameter() -> None:
     params = by_name["query_helldivers"]["function"]["parameters"]["properties"]
     assert params["freshness"]["enum"] == ["auto", "latest"]
     assert "freshness" not in by_name["query_helldivers"]["function"]["parameters"]["required"]
+
+
+def test_internal_true_returns_fact_without_sending_image() -> None:
+    fact = "【装备事实】主武器 · 高燃“破裂者”\n伤害 180 · 穿甲 轻型 · 玩家俗称: 火喷"
+    harness = _fact_harness(
+        fact, [SimpleNamespace(kind="image", content="/tmp/a.png")]
+    )
+    result = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "hd2data", "火喷", "auto", True, True
+        )
+    )
+    # 静默查证以原始关键词调用事实文本
+    assert (
+        harness.helldivers.service.get_arsenal_fact_text.called_with  # type: ignore[attr-defined]
+        == "火喷"
+    )
+    # 不渲染、不发图：待发队列保持为空
+    assert harness._pending_hd2_nl == {}
+    assert fact in result
+    assert "不会给用户发" in result
+
+
+def test_internal_true_missing_entry_blocks_recommendation() -> None:
+    harness = _fact_harness(
+        "❌ 未找到与“粘性炸弹”匹配的装备或敌人。", None
+    )
+    result = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "hd2data", "粘性炸弹", "auto", True, True
+        )
+    )
+    assert harness._pending_hd2_nl == {}
+    assert "不要把它写进推荐" in result
+
+
+def test_internal_true_rejects_non_hd2data_command() -> None:
+    harness = _fact_harness("不应被使用", None)
+    result = asyncio.run(
+        OneBotConnectionMixin._hd2_nl_executor(
+            harness, "private:1", "warfront", "东线", "auto", True, True
+        )
+    )
+    assert harness._pending_hd2_nl == {}
+    assert "仅支持 hd2data" in result
+
+
+def test_schema_exposes_internal_parameter() -> None:
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key="test-key",
+        openai_base_url="https://example.com/v1",
+        openai_model="test-model",
+        temperature=0.6,
+        max_tokens=350,
+        chat_stream_enabled=False,
+    )
+    schemas = available_tool_schemas(config, hd2_nl_allowed=True)
+    by_name = {item["function"]["name"]: item for item in schemas}
+    query = by_name["query_helldivers"]["function"]
+    assert query["parameters"]["properties"]["internal"]["type"] == "boolean"
+    assert "internal" not in query["parameters"]["required"]
+
+
+def test_full_server_construction_keeps_hd2_methods(tmp_path: Any) -> None:
+    # 回归守护：模块级辅助函数不得打断类定义，否则 __init__ 会因找不到
+    # _hd2_push_sender 在启动期崩溃，服务无法监听 8765（NapCat 报 ECONNREFUSED）。
+    config = BotConfig(
+        bot_qq=100000001,
+        host="127.0.0.1",
+        port=8765,
+        reply_mode="mention",
+        openai_api_key="test-key",
+        openai_base_url="https://example.com/v1",
+        openai_model="test-model",
+        temperature=0.6,
+        max_tokens=350,
+        memory_path=tmp_path / "memory.json",
+        voice_tts_enabled=False,
+    )
+    server = OneBotServer(config, AtriReplyEngine(config))
+    assert callable(server._hd2_push_sender)
+    assert callable(server._hd2_nl_executor)

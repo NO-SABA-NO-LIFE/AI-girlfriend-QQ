@@ -605,6 +605,7 @@ class EngineToolsMixin(PersonaEngineMixin):
                 has_explicit_hd2_freshness,
                 normalize_hd2_arguments,
                 normalize_hd2_freshness,
+                normalize_hd2_internal,
             )
 
             executor = self._hd2_tool_executor
@@ -614,8 +615,9 @@ class EngineToolsMixin(PersonaEngineMixin):
                 command, argument = normalize_hd2_arguments(arguments)
                 freshness = normalize_hd2_freshness(arguments)
                 explicit = has_explicit_hd2_freshness(arguments)
+                internal = normalize_hd2_internal(arguments)
                 return await executor(
-                    conversation_id, command, argument, freshness, explicit
+                    conversation_id, command, argument, freshness, explicit, internal
                 )
             except HD2IntentError as exc:
                 return f"Helldivers 工具参数无效：{exc}。请修正后重新调用，不要编造情报。"

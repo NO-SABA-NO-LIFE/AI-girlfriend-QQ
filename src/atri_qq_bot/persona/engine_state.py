@@ -4,8 +4,9 @@ from collections.abc import Awaitable, Callable
 
 from .engine_support import PersonaEngineMixin, _sync_core_globals
 
-# 执行器入参为 (会话标识, 规范命令词, 实体)，返回给模型的工具回执文本。
-HD2ToolExecutor = Callable[[str, str, str], Awaitable[str]]
+# 执行器入参为 (会话标识, 规范命令词, 实体, 新鲜度, 是否显式新鲜度, 静默内部查证)，
+# 返回给模型的工具回执文本。
+HD2ToolExecutor = Callable[[str, str, str, str, bool, bool], Awaitable[str]]
 
 
 class EngineStateMixin(PersonaEngineMixin):

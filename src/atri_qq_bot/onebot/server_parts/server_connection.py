@@ -272,6 +272,41 @@ def _build_sticker_emotion_classifier(config: Any):
     return _classify
 
 
+async def _hd2_internal_fact(
+    owner: Any, command: str, argument: str
+) -> str:
+    """静默内部查证：只返回文本事实，不渲染情报图、不写待发队列。
+
+    用模块函数而非实例方法：单元测试用 SimpleNamespace 作 self 替身。
+    配装/对比时模型用它连续核验真实条目；查不到的条目给出明确回执，
+    防止模型把不存在的装备写进推荐。
+    """
+    if command != "hd2data":
+        return (
+            "internal=true 仅支持 hd2data 的文本事实查证；"
+            "该情报命令请用 internal=false 正常调用。"
+        )
+    helldivers = getattr(owner, "helldivers", None)
+    svc = getattr(helldivers, "service", None)
+    if svc is None:
+        return "数据库当前不可用，不要凭记忆推荐装备。"
+    try:
+        fact_text = await svc.get_arsenal_fact_text(argument)
+    except (TypeError, ValueError, OSError, AttributeError) as exc:
+        LOGGER.warning("[HD2] internal fact text failed: %s", exc)
+        return "该条目查证失败，请换一个条目再查，不要编造装备。"
+    if not fact_text or fact_text[0] in ("❌", "⏳"):
+        return (
+            f"未查到与“{argument}”匹配的可用条目（{fact_text}）。"
+            "不要把它写进推荐，换一个确实存在的条目再查。"
+        )
+    return (
+        "静默查证文本事实如下，本轮不会给用户发任何图，可继续查下一个条目；"
+        "只能基于这些真实条目推荐，名称用其中的官方名/玩家俗称：\n"
+        + fact_text
+    )
+
+
 class OneBotConnectionMixin(OneBotServerMixin):
     def __init__(
         self,
@@ -423,6 +458,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
         argument: str,
         freshness: str = "auto",
         explicit: bool = True,
+        internal: bool = False,
     ) -> str:
         """执行自然语言 HD2 工具：重建斜杠命令并复用 bridge 情报链路。
 
@@ -432,7 +468,12 @@ class OneBotConnectionMixin(OneBotServerMixin):
         ``freshness=auto`` 时，本会话几分钟内刚产出过同命令同实体的结果就直接
         复用那份结果重发（不再抓取/渲染），保证「再看一眼」一定发得出来；
         ``latest`` 时跳过复用重新出图，战线类命令还会要求数据侧实时刷新。
+
+        ``internal=True`` 时进入静默内部查证：只返回文本事实，不渲染情报图、
+        不写待发队列，专供配装/对比时连续核验真实条目。
         """
+        if internal:
+            return await _hd2_internal_fact(self, command, argument)
         from ...llm_tools.hd2_intent import (
             build_hd2_slash,
             detect_hd2_redisplay_hint,

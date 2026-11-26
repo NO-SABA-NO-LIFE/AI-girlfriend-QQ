@@ -115,6 +115,17 @@ def normalize_hd2_freshness(arguments: dict[str, object]) -> str:
     return value if value in HD2_FRESHNESS_VALUES else "auto"
 
 
+def normalize_hd2_internal(arguments: dict[str, object]) -> bool:
+    """读取静默内部查证开关，缺省或非法值一律回退 ``False``。
+
+    与 freshness 同理：internal 不是命令实体，缺失或类型不对都不能让情报
+    查询失败，只在模型显式传 true 时才走不发图的文本事实路径。
+    """
+    if not isinstance(arguments, dict):
+        return False
+    return arguments.get("internal") is True
+
+
 def normalize_hd2_entity(command: str, argument: str) -> str:
     """把同一实体的不同写法归一到同一个键（缓存复用与“是不是同一张图”都靠它）。
 
