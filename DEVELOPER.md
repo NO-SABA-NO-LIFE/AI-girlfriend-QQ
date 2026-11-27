@@ -6,6 +6,8 @@
 
 源码根目录由 `atri_runtime.resource_root()` 定位。默认用户数据与 `.env` 位于项目目录，可用 `ATRI_QBOT_USER_DIR` 指定独立的数据根目录；提示词和工具仍从源码目录读取。Windows 辅助启动器主要面向项目目录内的 `.venv` 部署。
 
+安装 wheel 时从发行包读取提示词和 Helldivers 素材，默认把配置及数据保存到 `~/.atri-qq-bot`。要复用现有部署的配置和数据，请在启动前把 `ATRI_QBOT_USER_DIR` 指向原来的数据根目录。
+
 ## 模块分工
 
 | 位置 | 职责 |

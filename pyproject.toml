@@ -44,3 +44,10 @@ include = ["atri_qq_bot*", "atri_webui*", "atri_shared*", "atri_voice_service*"]
 [tool.setuptools]
 py-modules = ["atri_runtime"]
 
+[tool.setuptools.package-data]
+atri_qq_bot = ["helldivers/assets/**/*"]
+
+[tool.setuptools.data-files]
+"share/atri-qq-bot/docs/prompts" = ["docs/prompts/*.md"]
+"share/atri-qq-bot/tools/launch/qq_legacy" = ["tools/launch/qq_legacy/hidden_launcher.py"]
+

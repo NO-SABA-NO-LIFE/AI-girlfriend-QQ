@@ -25,6 +25,8 @@
 sudo bash deploy/cloud/install-ubuntu.sh
 ```
 
+从另一份检出覆盖升级时，安装器保留部署目录中的 `.env`、`data/`、`logs/` 和虚拟环境。发行版附带的语音词典只补齐缺失文件。
+
 然后编辑：
 
 ```bash

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 APP_DIR="${APP_DIR:-/opt/atri-qq-bot}"
 
 echo "[atri] Installing Atri QQ bot to ${APP_DIR}"
@@ -15,12 +15,18 @@ apt-get update
 apt-get install -y python3 python3-venv python3-pip rsync
 
 mkdir -p "${APP_DIR}"
-rsync -a --delete \
-  --exclude ".venv" \
-  --exclude "__pycache__" \
-  --exclude ".pytest_cache" \
-  --exclude "*.log" \
-  "${PROJECT_DIR}/" "${APP_DIR}/"
+APP_DIR="$(cd "${APP_DIR}" && pwd -P)"
+if [[ "${PROJECT_DIR}" != "${APP_DIR}" ]]; then
+  # 部署目录也可能是当前数据根目录，更新发行文件时保留本机配置和历史。
+  rsync -a --checksum \
+    --exclude "/.env" --exclude "/.git/" --exclude "/data/" --exclude "/logs/" \
+    --exclude ".venv" --exclude "__pycache__" --exclude ".pytest_cache" --exclude "*.log" \
+    "${PROJECT_DIR}/" "${APP_DIR}/"
+  rsync -a --ignore-existing \
+    --include "/README.md" --include "/voice/" \
+    --include "/voice/asr-hotwords.json" --include "/voice/tts-pronunciations.json" \
+    --exclude "*" "${PROJECT_DIR}/data/" "${APP_DIR}/data/"
+fi
 
 cd "${APP_DIR}"
 python3 -m venv .venv
@@ -28,7 +34,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 
 if [[ ! -f ".env" ]]; then
-  cp deploy/cloud/cloud.env.example .env
+  (umask 077; cp --no-clobber deploy/cloud/cloud.env.example .env)
   echo "[atri] Created ${APP_DIR}/.env. Edit OWNER_QQ and model settings before first use."
 fi
 
