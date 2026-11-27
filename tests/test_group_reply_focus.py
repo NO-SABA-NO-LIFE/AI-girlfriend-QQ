@@ -1,5 +1,7 @@
 import asyncio
+import json
 import time
+from pathlib import Path
 
 from atri_qq_bot.config import BotConfig
 from atri_qq_bot.group_reply_focus import (
@@ -582,6 +584,45 @@ def _fallback_server(tmp_path, reply_mode: str = "mention"):
     server._reply_event_log = tmp_path / "reply-events.jsonl"
     server._voice_event_log = tmp_path / "voice-events.log"
     return engine, server
+
+
+def test_onebot_records_ordinary_group_message_with_one_replace(monkeypatch, tmp_path):
+    engine, server = _fallback_server(tmp_path)
+    monkeypatch.setattr(engine.memory._memory_worker, "enabled", False)
+    path = engine.memory.path
+    replacements = []
+    replace = Path.replace
+
+    def count_replace(source, target):
+        result = replace(source, target)
+        if result == path:
+            replacements.append(result)
+        return result
+
+    monkeypatch.setattr(Path, "replace", count_replace)
+    event = _group_event(10001, _text("我到家了"))
+    asyncio.run(server._handle_event(object(), event))
+
+    assert replacements == [path]
+    conversations = json.loads(path.read_bytes())["conversations"]
+    group = conversations[f"group:{GROUP_ID}"]
+    member = conversations[f"group:{GROUP_ID}:user:10001"]
+    assert group["target"] == {"message_type": "group", "group_id": GROUP_ID}
+    assert member["target"] == {
+        "message_type": "group", "group_id": GROUP_ID, "user_id": 10001,
+    }
+    assert group["history"][-1]["text"] == member["history"][-1]["text"] == "我到家了"
+
+    replacements.clear()
+    command = _group_event(10002, _text("/affection"))
+    asyncio.run(server._handle_event(object(), command))
+    assert replacements == [path]
+    conversations = json.loads(path.read_bytes())["conversations"]
+    assert conversations[f"group:{GROUP_ID}"]["message_count"] == 1
+    assert conversations[f"group:{GROUP_ID}:user:10002"] == {
+        "target": {"message_type": "group", "group_id": GROUP_ID, "user_id": 10002},
+    }
+    assert "private:10002" not in conversations
 
 
 def test_poke_command_timeout_sends_poke_done_fallback(monkeypatch, tmp_path) -> None:

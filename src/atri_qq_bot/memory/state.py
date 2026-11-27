@@ -22,6 +22,7 @@ class MemoryStateMixin(MemoryMixin):
         with self._memory_state_lock:
             self._data = self._load_initial()
         self._session_l3: dict[str, list[dict[str, Any]]] = {}
+        self._group_message_extractions: list[MemoryExtractionRequest] | None = None
         self._save_retry_after = 0.0
         self._save_failure_count = 0
         # 检索器是可选的旁路；即使 SQLite 文件损坏，原 JSON 记忆仍能正常工作。
@@ -58,7 +59,8 @@ class MemoryStateMixin(MemoryMixin):
 
     @_locked_mutation
     def _conversation(self, conversation_id: str, save: bool = True) -> dict[str, Any]:
-        self._reload_if_changed()
+        if self._group_message_extractions is None:
+            self._reload_if_changed()
         conversations = self._data.setdefault("conversations", {})
         if conversation_id not in conversations:
             conversations[conversation_id] = {}
@@ -143,6 +145,9 @@ class MemoryStateMixin(MemoryMixin):
         有限退避。临时文件只有在完整写入后才替换正式文件，因此不会留下半截
         users.json；内存恢复后下一次保存会自动恢复。
         """
+        if self._group_message_extractions is not None:
+            # 群消息入口持有同一把锁，会在目标和观察全部更新后保存一次。
+            return False
         if self._reload_failed:
             # 重读已存在文件失败时，内存数据可能是降级空状态或滞后版本，
             # 直接拒绝写入，确保主文件不被覆盖；待重读成功后自动恢复保存。

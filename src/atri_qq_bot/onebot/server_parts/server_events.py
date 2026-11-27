@@ -436,10 +436,6 @@ class OneBotEventMixin(OneBotServerMixin):
             )
 
         if is_message:
-            self.reply_engine.remember_target(conversation_id, event)
-            if profile_id != conversation_id:
-                self.reply_engine.remember_target(profile_id, event)
-
             if event.get("message_type") == "group":
                 self.reply_engine.observe_group_incoming(
                     event.get("group_id"),
@@ -451,8 +447,12 @@ class OneBotEventMixin(OneBotServerMixin):
                     ),
                     addressed_to_bot=addressed_to_bot,
                     is_owner=is_owner,
+                    remember_targets=True,
                 )
             else:
+                self.reply_engine.remember_target(conversation_id, event)
+                if profile_id != conversation_id:
+                    self.reply_engine.remember_target(profile_id, event)
                 self.reply_engine.observe_incoming(
                     conversation_id,
                     plain_text,

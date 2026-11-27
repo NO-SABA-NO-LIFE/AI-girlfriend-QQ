@@ -124,18 +124,32 @@ class EngineStateMixin(PersonaEngineMixin):
         runtime_context: bool = False,
         addressed_to_bot: bool = False,
         is_owner: bool = False,
+        *,
+        remember_targets: bool = False,
     ) -> tuple[str, str]:
-        if _is_affection_command(user_text):
+        is_affection_command = _is_affection_command(user_text)
+        if remember_targets:
+            conversation_id, profile_id = self.memory.record_group_incoming(
+                group_id,
+                user_id,
+                user_text,
+                nickname=nickname,
+                observe=not is_affection_command,
+                addressed_to_bot=addressed_to_bot,
+                is_owner=is_owner,
+            )
+        elif is_affection_command:
             return f"group:{group_id}", f"group:{group_id}:user:{user_id}"
-        conversation_id, profile_id = self.memory.observe_group_message(
-            group_id,
-            user_id,
-            user_text,
-            nickname=nickname,
-            addressed_to_bot=addressed_to_bot,
-            is_owner=is_owner,
-        )
-        if runtime_context:
+        else:
+            conversation_id, profile_id = self.memory.observe_group_message(
+                group_id,
+                user_id,
+                user_text,
+                nickname=nickname,
+                addressed_to_bot=addressed_to_bot,
+                is_owner=is_owner,
+            )
+        if runtime_context and not is_affection_command:
             self._remember_user_context(
                 conversation_id, user_text, nickname, actor_id=user_id
             )

@@ -6,9 +6,132 @@ import pathlib
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
+import pytest
+
 import atri_qq_bot.memory as memory_module
 from atri_qq_bot.memory import UserMemoryStore
 from atri_webui.memory_admin import MemoryAdmin
+
+
+def test_group_incoming_commits_once_with_legacy_memory_content(tmp_path, monkeypatch):
+    path = tmp_path / "users.json"
+    store = UserMemoryStore(path)
+    legacy_path = tmp_path / "legacy.json"
+    legacy = UserMemoryStore(legacy_path)
+    event = {"message_type": "group", "group_id": 20001, "user_id": 30001}
+    replacements = []
+    replace = pathlib.Path.replace
+
+    def count_replace(source, target):
+        result = replace(source, target)
+        if target == path:
+            replacements.append(result)
+        return result
+
+    monkeypatch.setattr(pathlib.Path, "replace", count_replace)
+    for addressed, now in ((False, 1000), (True, 1010)):
+        text = "我叫小明，喜欢咖啡，明天有考试"
+        legacy.remember_target("group:20001", event)
+        legacy.remember_target("group:20001:user:30001", event)
+        legacy.observe_group_message(20001, 30001, text, "小明", now, addressed)
+
+        replacements.clear()
+        assert store.record_group_incoming(
+            20001, 30001, text, "小明", now=now, addressed_to_bot=addressed
+        ) == ("group:20001", "group:20001:user:30001")
+        assert replacements == [path]
+        assert json.loads(path.read_text()) == json.loads(legacy_path.read_text())
+
+    assert UserMemoryStore(path).recent_history("group:20001") == store.recent_history(
+        "group:20001"
+    )
+
+
+def test_group_incoming_rolls_back_after_interrupted_observation(tmp_path, monkeypatch):
+    path = tmp_path / "users.json"
+    store = UserMemoryStore(path)
+    store.record_group_incoming(20001, 30001, "原消息", now=1000)
+    before = path.read_bytes()
+    requests = []
+    monkeypatch.setattr(store._memory_worker, "enabled", True)
+    monkeypatch.setattr(store._memory_worker, "submit", requests.append)
+
+    def abort(*args, **kwargs):
+        raise ValueError("interrupted before updating the person profile")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "remember_person_profile_from_group", abort)
+        with pytest.raises(ValueError, match="interrupted"):
+            store.record_group_incoming(20001, 40001, "未完成的消息", now=1010)
+
+    assert requests == []
+    assert path.read_bytes() == before
+    store.record_group_incoming(20001, 30001, "下一条消息", now=1020)
+
+    data = json.loads(path.read_bytes())["conversations"]
+    group = data["group:20001"]
+    assert [entry["text"] for entry in group["history"]] == ["原消息", "下一条消息"]
+    assert [entry["text"] for entry in group["structured_memory"]["l3"]] == [
+        "原消息", "下一条消息",
+    ]
+    assert "group:20001:user:40001" not in data
+    assert [request.conversation_id for request in requests] == [
+        "group:20001", "group:20001:user:30001", "private:30001",
+    ]
+
+
+def test_group_incoming_keeps_external_replacement(tmp_path, monkeypatch):
+    path = tmp_path / "users.json"
+    store = UserMemoryStore(path)
+    store.record_group_incoming(20001, 30001, "原消息", now=1000)
+    edited = json.loads(path.read_bytes())
+    edited["conversations"]["private:30001"]["affection_score"] = 87
+    staged_file = tmp_path / "edited.json"
+    staged_file.write_text(json.dumps(edited), encoding="utf-8")
+    observe_group = store.observe_group_message
+    requests = []
+    monkeypatch.setattr(store._memory_worker, "enabled", True)
+    monkeypatch.setattr(store._memory_worker, "submit", requests.append)
+
+    def external_edit(*args, **kwargs):
+        staged_file.replace(path)
+        return observe_group(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "observe_group_message", external_edit)
+        store.record_group_incoming(20001, 30001, "遇到外部修改的消息", now=1010)
+
+    assert json.loads(path.read_bytes()) == edited
+    assert requests == []
+    store.record_group_incoming(20001, 30001, "接在编辑后面的消息", now=1020)
+    data = json.loads(path.read_bytes())["conversations"]
+    assert data["private:30001"]["affection_score"] == 87
+    assert [entry["text"] for entry in data["group:20001"]["structured_memory"]["l3"]] == [
+        "原消息", "接在编辑后面的消息",
+    ]
+
+
+def test_group_incoming_keeps_complete_update_for_save_retry(tmp_path, monkeypatch):
+    path = tmp_path / "users.json"
+    store = UserMemoryStore(path)
+
+    def fail_write(*args, **kwargs):
+        raise OSError("temporary write failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_module.json, "dump", fail_write)
+        store.record_group_incoming(20001, 30001, "暂时无法写入的消息", now=1000)
+
+    assert not path.exists()
+    assert store._save_failure_count == 1
+    store._save_retry_after = 0.0
+    store.record_group_incoming(20001, 30001, "恢复写入的消息", now=1010)
+    data = json.loads(path.read_bytes())["conversations"]
+    assert data["group:20001"]["message_count"] == 2
+    assert data["group:20001:user:30001"]["message_count"] == 2
+    assert [entry["text"] for entry in data["private:30001"]["structured_memory"]["l3"]] == [
+        "暂时无法写入的消息", "恢复写入的消息",
+    ]
 
 
 def test_webui_relationship_edit_and_incoming_message_both_persist(tmp_path, monkeypatch):

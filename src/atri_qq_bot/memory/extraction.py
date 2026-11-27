@@ -49,8 +49,19 @@ class MemoryExtractionMixin(MemoryMixin):
             source_context=source_context,
             scope_kind=scope_kind,
         )
+        pending = self._group_message_extractions
+        if pending is None:
+            self._submit_memory_extraction(request)
+        else:
+            pending.append(request)
+
+    def _submit_memory_extraction(self, request: MemoryExtractionRequest) -> None:
         if self._memory_worker.submit(request):
-            LOGGER.debug("记忆提取任务已入队 conversation=%s scope=%s", conversation_id, scope_kind)
+            LOGGER.debug(
+                "记忆提取任务已入队 conversation=%s scope=%s",
+                request.conversation_id,
+                request.scope_kind,
+            )
 
     @_locked_mutation
     def _apply_extraction_result(self, result: MemoryExtractionResult) -> None:

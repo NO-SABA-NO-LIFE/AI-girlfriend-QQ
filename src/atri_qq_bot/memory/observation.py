@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 from . import _locked_mutation
 from .support import MemoryMixin
 
@@ -156,6 +158,78 @@ class MemoryObservationMixin(MemoryMixin):
                 target["user_id"] = event.get("user_id")
             item["target"] = target
         self._save()
+
+    @_locked_mutation
+    def record_group_incoming(
+        self,
+        group_id: int | str,
+        user_id: int | str,
+        text: str,
+        nickname: str | None = None,
+        *,
+        now: float | None = None,
+        observe: bool = True,
+        addressed_to_bot: bool = False,
+        is_owner: bool = False,
+    ) -> tuple[str, str]:
+        """将同一条群消息的目标和观察合在一次 JSON 保存中。"""
+        group = f"group:{group_id}"
+        member = f"{group}:user:{user_id}"
+        affected = (group, member, f"private:{user_id}") if observe else (group, member)
+        event = {"message_type": "group", "group_id": group_id, "user_id": user_id}
+
+        # 固定本次消息使用的文件版本。其间的外部替换由最终 _save 校验。
+        self._reload_if_changed()
+        conversations = self._data["conversations"]
+        originals = {key: conversations[key] for key in affected if key in conversations}
+        session_l3 = self._session_l3
+        original_l3 = {key: session_l3[key] for key in affected if key in session_l3}
+        try:
+            staged = deepcopy(originals)
+        except MemoryError:
+            LOGGER.warning("暂存群聊记忆时内存不足，跳过本次记忆更新")
+            return group, member
+
+        # L3 的更新会替换字典里的列表，因此保留原列表即可恢复。
+        extractions: list[MemoryExtractionRequest] = []
+        accepted = False
+        try:
+            conversations.update(staged)
+            self._group_message_extractions = extractions
+            try:
+                self.remember_target(group, event)
+                self.remember_target(member, event)
+                if observe:
+                    self.observe_group_message(
+                        group_id,
+                        user_id,
+                        text,
+                        nickname=nickname,
+                        now=now,
+                        addressed_to_bot=addressed_to_bot,
+                        is_owner=is_owner,
+                    )
+            finally:
+                self._group_message_extractions = None
+            # 普通写盘失败保留完整的内存更新供后续保存。文件已被外部更新
+            # 或重读失败时，撤销本次更新及提取请求，等待后续重读成功。
+            accepted = self._save() or (
+                not self._reload_failed
+                and self._current_file_state() == self._loaded_file_state
+            )
+        finally:
+            if not accepted:
+                for key in affected:
+                    if key not in originals:
+                        conversations.pop(key, None)
+                    if key not in original_l3:
+                        session_l3.pop(key, None)
+                conversations.update(originals)
+                session_l3.update(original_l3)
+        if accepted:
+            for request in extractions:
+                self._submit_memory_extraction(request)
+        return group, member
 
     @_locked_mutation
     def observe_group_message(
