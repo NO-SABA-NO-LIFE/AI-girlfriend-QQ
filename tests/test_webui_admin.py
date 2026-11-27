@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from atri_qq_bot.config import BotConfig
 from atri_qq_bot.runtime.control import runtime_status
 from atri_webui import config_admin
+from atri_webui import memory_admin as memory_admin_module
 from atri_webui.memory_admin import MemoryAdmin, memory_admin_for_config
 from atri_webui import model_profiles as model_profiles_module
 from atri_webui import server as webui_server
@@ -400,6 +402,78 @@ def test_memory_admin_person_summary_merges_private_and_group_member(
     values = json.dumps(detail["content"]["structured_memory"], ensure_ascii=False)
     assert "8月12日" in values
     assert "咖啡" in values
+
+
+def test_memory_summary_groups_once_and_invalidates_after_same_size_replace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    memory_path = tmp_path / "users.json"
+    conversations = {
+        "private:10001": {
+            "target": {"user_id": 10001},
+            "last_user_at": 1000,
+            "message_count": 1,
+            "history": [{"role": "user", "nickname": "私聊甲"}],
+        },
+        # 没有 target 的旧会话仍按键识别；活跃的群昵称不能覆盖私聊昵称。
+        "group:20001:user:10001": {
+            "last_user_at": 1200,
+            "message_count": 2,
+            "history": [{"role": "user", "nickname": "群昵称"}],
+        },
+        # target 优先于键中用户号。活动时间并列时保留原会话键排序。
+        "group:20000:user:99999": {
+            "target": {"user_id": 10001, "group_id": 20000},
+            "last_user_at": 1200,
+            "message_count": 3,
+        },
+        "group:20001:user:10002": {"last_user_at": 1200, "message_count": 4},
+        "group:20001": {"last_user_at": 1200, "message_count": 9},
+    }
+    original_text = json.dumps({"conversations": conversations}, ensure_ascii=False)
+    memory_path.write_text(original_text, encoding="utf-8")
+    admin = MemoryAdmin(memory_path, tmp_path / "backups")
+    visited = []
+    person_user_id = memory_admin_module.person_user_id
+
+    def count_user_lookup(key, item):
+        visited.append(key)
+        return person_user_id(key, item)
+
+    monkeypatch.setattr(memory_admin_module, "person_user_id", count_user_lookup)
+    summary = admin.summary()
+    assert visited == list(conversations)
+    assert [item["id"] for item in summary["items"][:-1]] == [
+        f"person:{user_id}" for user_id in {"10001", "10002"}
+    ]
+    person = next(item for item in summary["items"] if item["id"] == "person:10001")
+    assert person["display_name"] == "私聊甲（QQ 10001 / 统一人物档案）"
+    assert person["messages"] == 6
+    assert person["related_count"] == 3
+    assert person["searchable"].endswith(
+        "private:10001 group:20000:user:99999 group:20001:user:10001"
+    )
+    assert summary["items"][-1]["id"] == "group:20001"
+
+    visited.clear()
+    person["display_name"] = "本地修改"
+    cached = admin.summary()
+    assert visited == []
+    assert next(item for item in cached["items"] if item["id"] == "person:10001")[
+        "display_name"
+    ] == "私聊甲（QQ 10001 / 统一人物档案）"
+
+    previous = memory_path.stat()
+    new_file = tmp_path / "edited.json"
+    new_file.write_text(original_text.replace("私聊甲", "私聊乙"), encoding="utf-8")
+    os.utime(new_file, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+    new_file.replace(memory_path)
+    assert memory_path.stat().st_size == previous.st_size
+    latest = admin.summary()
+    assert visited == list(conversations)
+    assert next(item for item in latest["items"] if item["id"] == "person:10001")[
+        "display_name"
+    ] == "私聊乙（QQ 10001 / 统一人物档案）"
 
 
 def test_memory_admin_backs_up_before_atomic_save(tmp_path: Path) -> None:

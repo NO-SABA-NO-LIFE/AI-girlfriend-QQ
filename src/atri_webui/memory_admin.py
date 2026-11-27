@@ -45,9 +45,26 @@ class MemoryAdmin:
 
             data = self.load()
             conversations = self.conversations(data)
-            items = []
-            for user_id in person_user_ids(conversations):
-                items.append(person_summary_item(conversations, user_id))
+            related_by_user: dict[str, list[str]] = {}
+            user_ids: set[str] = set()
+            for key, item in conversations.items():
+                if not isinstance(item, dict):
+                    continue
+                user_id = person_user_id(key, item)
+                if user_id:
+                    user_ids.add(user_id)
+                    related_by_user.setdefault(user_id, []).append(key)
+            # 保留原有集合遍历顺序，等时间的人物卡片仍由稳定排序保持原顺序。
+            items = [
+                person_summary_item(
+                    conversations,
+                    user_id,
+                    related=_sort_person_related_keys(
+                        conversations, user_id, related_by_user[user_id]
+                    ),
+                )
+                for user_id in user_ids
+            ]
             for key, item in sorted(
                 conversations.items(),
                 key=lambda pair: _safe_float((pair[1] or {}).get("last_user_at") if isinstance(pair[1], dict) else 0),
@@ -370,13 +387,16 @@ def memory_summary_item(
     }
 
 
-def person_summary_item(conversations: dict[str, Any], user_id: str) -> dict[str, Any]:
-    item = person_content(conversations, user_id)
-    related = person_related_keys(conversations, user_id)
+def person_summary_item(
+    conversations: dict[str, Any], user_id: str, *, related: list[str] | None = None
+) -> dict[str, Any]:
+    if related is None:
+        related = person_related_keys(conversations, user_id)
+    item = person_content(conversations, user_id, related=related)
     summary = memory_summary_item(
         f"person:{user_id}",
         item,
-        display_name=person_display_name(conversations, user_id),
+        display_name=person_display_name(conversations, user_id, related=related),
         related_count=len(related),
     )
     summary["searchable"] = f"{summary.get('searchable', '')} {' '.join(related)}"
@@ -423,21 +443,6 @@ def storage_memory_id(memory_id: str) -> str:
     return memory_id
 
 
-def person_user_ids(conversations: dict[str, Any]) -> list[str]:
-    ids = {
-        user_id
-        for key, item in conversations.items()
-        if isinstance(item, dict)
-        for user_id in [person_user_id(key, item)]
-        if user_id
-    }
-    return sorted(
-        ids,
-        key=lambda user_id: _safe_float(person_content(conversations, user_id).get("last_user_at")),
-        reverse=True,
-    )
-
-
 def person_user_id(conversation_id: str, item: dict[str, Any]) -> str:
     if memory_kind(conversation_id) not in {"private", "member", "person"}:
         return ""
@@ -457,6 +462,12 @@ def person_related_keys(conversations: dict[str, Any], user_id: str) -> list[str
         for key, item in conversations.items()
         if isinstance(item, dict) and person_user_id(key, item) == str(user_id)
     ]
+    return _sort_person_related_keys(conversations, user_id, related)
+
+
+def _sort_person_related_keys(
+    conversations: dict[str, Any], user_id: str, related: list[str]
+) -> list[str]:
     return sorted(
         related,
         key=lambda key: (
@@ -471,8 +482,11 @@ def person_related_keys(conversations: dict[str, Any], user_id: str) -> list[str
     )
 
 
-def person_content(conversations: dict[str, Any], user_id: str) -> dict[str, Any]:
-    related = person_related_keys(conversations, user_id)
+def person_content(
+    conversations: dict[str, Any], user_id: str, *, related: list[str] | None = None
+) -> dict[str, Any]:
+    if related is None:
+        related = person_related_keys(conversations, user_id)
     private_id = f"private:{user_id}"
     base = conversations.get(private_id) if isinstance(conversations.get(private_id), dict) else {}
     merged = dict(base)
@@ -514,8 +528,12 @@ def person_group_infos(conversations: dict[str, Any], user_id: str) -> list[dict
     return infos
 
 
-def person_display_name(conversations: dict[str, Any], user_id: str) -> str:
-    for key in person_related_keys(conversations, user_id):
+def person_display_name(
+    conversations: dict[str, Any], user_id: str, *, related: list[str] | None = None
+) -> str:
+    if related is None:
+        related = person_related_keys(conversations, user_id)
+    for key in related:
         item = conversations.get(key)
         if not isinstance(item, dict):
             continue
