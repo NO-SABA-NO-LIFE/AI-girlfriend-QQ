@@ -711,9 +711,20 @@ class AtriWebUIHandler(
     webui_state: WebUIState
 
 
-def run_coro(coro: Any) -> Any:
+def run_coro(coro: Any, *, timeout: float = 90.0) -> Any:
     future = asyncio.run_coroutine_threadsafe(coro, _main_loop())
-    return future.result(timeout=90)
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        # The result future timed out but the apply coroutine can still be
+        # running on the main loop. Request cancellation and wait for it to
+        # settle before propagating, so a rollback reload cannot race the
+        # still-running apply and leave the runtime briefly on the new config
+        # after the 400 response has already been sent.
+        future.cancel()
+        with contextlib.suppress(Exception):
+            future.result(timeout=timeout)
+        raise
 
 
 _LOOP: asyncio.AbstractEventLoop | None = None

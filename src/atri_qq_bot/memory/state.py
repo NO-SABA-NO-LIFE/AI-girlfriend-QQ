@@ -108,18 +108,21 @@ class MemoryStateMixin(MemoryMixin):
     def _read_file(self) -> dict[str, Any] | None:
         """读取并校验现有记忆文件；任何读取、解析或结构错误都返回 None。
 
-        返回 None 表示调用方必须 fail-closed，不得据此覆盖现有数据。
+        返回 None 表示调用方必须 fail-closed，不得据此覆盖现有数据。覆盖
+        非法 UTF-8（UnicodeDecodeError）、JSON 损坏、version 非整数等情况。
         """
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            if not isinstance(data, dict):
+                return None
+            if not isinstance(data.get("conversations", {}), dict):
+                return None
+            # int() 对非数字字符串抛 ValueError；纳入同一 try 统一走降级。
+            data["version"] = max(int(data.get("version", 1) or 1), MEMORY_VERSION)
+            data.setdefault("conversations", {})
+        except (OSError, ValueError, TypeError):
+            # JSONDecodeError 与 UnicodeDecodeError 都是 ValueError 子类。
             return None
-        if not isinstance(data, dict):
-            return None
-        if not isinstance(data.get("conversations", {}), dict):
-            return None
-        data["version"] = max(int(data.get("version", 1) or 1), MEMORY_VERSION)
-        data.setdefault("conversations", {})
         return data
 
     def _save(self) -> bool:

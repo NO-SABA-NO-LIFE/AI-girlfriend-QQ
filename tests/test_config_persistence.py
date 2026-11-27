@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 import subprocess
 import sys
+import threading
+import time
 from types import SimpleNamespace
 from unittest import mock
 
@@ -213,3 +216,82 @@ def test_successful_save_applies_and_returns_ok(tmp_path, monkeypatch) -> None:
     assert handler.error is None
     assert handler.sent and handler.sent["ok"] is True
     assert "REPLY_MODE=all" in env_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("initial", "expected"),
+    [
+        (None, 0o600),
+        (0o600, 0o600),
+        (0o640, 0o640),
+    ],
+)
+def test_write_env_preserves_file_mode(tmp_path, initial, expected) -> None:
+    env_path = tmp_path / ".env"
+    if initial is not None:
+        env_path.write_text("REPLY_MODE=mention\n", encoding="utf-8")
+        os.chmod(env_path, initial)
+    config_admin.write_env({"REPLY_MODE": "all"}, target_path=env_path)
+    assert stat.S_IMODE(env_path.stat().st_mode) == expected
+
+
+def test_isolated_validation_uses_a_unique_candidate_file(
+    isolated_env, monkeypatch
+) -> None:
+    used_paths: list = []
+    real_run = subprocess.run
+
+    def capture_run(args, **kwargs):
+        used_paths.append(args[-1])
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(config_admin.subprocess, "run", capture_run)
+    config_admin.validate_env_isolated({"REPLY_MODE": "all"})
+    config_admin.validate_env_isolated({"REPLY_MODE": "mention"})
+
+    # Each transaction validates its own distinct file; no shared candidate.
+    assert len(used_paths) == 2
+    assert used_paths[0] != used_paths[1]
+
+
+def test_all_writers_reference_one_shared_lock() -> None:
+    assert webui_server.CONFIG_UPDATE_LOCK is config_admin.CONFIG_UPDATE_LOCK
+
+
+def test_config_lock_blocks_while_held() -> None:
+    lock = config_admin.CONFIG_UPDATE_LOCK
+    result: dict = {}
+    with lock:
+        thread = threading.Thread(
+            target=lambda: result.__setitem__("got", lock.acquire(timeout=0.2))
+        )
+        thread.start()
+        thread.join()
+    assert result["got"] is False
+
+
+def test_run_coro_cancels_timed_out_coroutine() -> None:
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    webui_server.bind_loop(loop)
+    cancelled = {"v": False}
+
+    async def slow():
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled["v"] = True
+            raise
+
+    try:
+        with pytest.raises(TimeoutError):
+            webui_server.run_coro(slow(), timeout=0.1)
+        deadline = time.monotonic() + 2.0
+        while not cancelled["v"] and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert cancelled["v"] is True
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        loop.close()

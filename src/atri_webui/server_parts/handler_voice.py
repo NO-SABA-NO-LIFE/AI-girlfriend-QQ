@@ -39,8 +39,10 @@ class HandlerVoiceMixin(WebUIHandlerMixin):
         try:
             config_changes = payload.get("config")
             if isinstance(config_changes, dict):
-                update_env(config_changes)
-                config = run_coro(self.webui_state.reload_config())
+                # 与其他配置写事务共用同一把锁，避免与模型切换/配置保存交错。
+                with CONFIG_UPDATE_LOCK:
+                    update_env(config_changes)
+                    config = run_coro(self.webui_state.reload_config())
             else:
                 config = self.webui_state.config
             profile_payload = payload.get("profile")

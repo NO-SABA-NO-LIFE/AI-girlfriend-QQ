@@ -12,16 +12,13 @@ class HandlerConfigMixin(WebUIHandlerMixin):
         payload = self._read_json()
         if not isinstance(payload, dict):
             return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
-        # 预校验在独立子进程进行：主进程环境与磁盘均不受影响，dotenv 引号也由
-        # 真实加载器解码。校验失败直接返回，绝不写盘。
-        try:
-            validate_env_isolated(payload)
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-
-        # 整个写事务持锁：快照、写盘、热重载与失败回滚串行，避免并发请求用
-        # 旧快照覆盖另一次成功保存。
+        # 整个事务（含子进程预校验、写盘、热重载、回滚）持同一把锁，串行化
+        # 所有会修改 .env 的入口，避免回滚撤销另一个已成功的模型切换。
         with CONFIG_UPDATE_LOCK:
+            try:
+                validate_env_isolated(payload)
+            except Exception as exc:
+                return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
             # 记录受影响键的原值/存在状态与上一份有效 .env，供失败回滚。
             env_snapshot = snapshot_process_env(merge_env(payload).keys())
             previous_bytes = ENV_PATH.read_bytes() if ENV_PATH.exists() else None
@@ -434,19 +431,22 @@ class HandlerConfigMixin(WebUIHandlerMixin):
     def _handle_model_profile_activate(self) -> None:
         payload = self._read_json()
         profile_id = str((payload or {}).get("id") or "").strip()
-        try:
-            profile = activate_model_profile(profile_id)
-            config = run_coro(self.webui_state.reload_config())
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json(
-            {
-                "ok": True,
-                "profile": public_model_profile(profile),
-                "config": config_payload(config),
-                "status": self._status(),
-            }
-        )
+        # 与配置保存共用同一把锁：模型切换会写 .env 并 reload，必须和其他
+        # 写事务互斥，否则一次失败回滚会把已成功的模型切换也撤销。
+        with CONFIG_UPDATE_LOCK:
+            try:
+                profile = activate_model_profile(profile_id)
+                config = run_coro(self.webui_state.reload_config())
+            except Exception as exc:
+                return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            self._send_json(
+                {
+                    "ok": True,
+                    "profile": public_model_profile(profile),
+                    "config": config_payload(config),
+                    "status": self._status(),
+                }
+            )
 
     def _handle_test_chat(self) -> None:
         payload = self._read_json()

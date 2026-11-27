@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import contextlib
 import os
+import stat
 import subprocess
 import sys
 import threading
+import uuid
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -12,11 +14,12 @@ from atri_qq_bot.config import BotConfig
 from atri_qq_bot.runtime import ENV_PATH
 
 
-# Serializes the whole "snapshot -> validate -> write -> reload -> rollback"
-# transaction across WebUI worker threads. An RLock because the rollback of a
-# failed request runs inside the same critical section. The file restore and
-# the normal save share this lock, so a failing request can never overwrite a
-# successful save with an older snapshot.
+# Serializes every configuration-mutating transaction (validate -> snapshot ->
+# write -> reload -> rollback) across WebUI worker threads. All WebUI entry
+# points that touch .env (config save, model profile switch, voice save, voice
+# port) take this lock, so a failed request cannot undo another request's
+# successful model switch or overwrite it with an older snapshot. An RLock
+# because a request's own rollback runs inside the same critical section.
 CONFIG_UPDATE_LOCK = threading.RLock()
 
 
@@ -150,13 +153,15 @@ def validate_env_isolated(
     real loader. The temp file is permission-restricted and always removed.
     """
     candidate = merge_env(changes)
-    temp_path = ENV_PATH.with_name(f".{ENV_PATH.name}.candidate.tmp")
+    # Unique per transaction: concurrent requests must never read or overwrite
+    # each other's candidate file, otherwise a valid request could be rejected
+    # against another request's invalid values (or an invalid one pass against
+    # a deleted file). The atomic writer creates this file with mode 0600.
+    temp_path = ENV_PATH.with_name(
+        f".{ENV_PATH.name}.candidate.{uuid.uuid4().hex}.tmp"
+    )
     try:
-        with contextlib.suppress(OSError):
-            temp_path.unlink()
         write_env(candidate, target_path=temp_path)
-        with contextlib.suppress(OSError):
-            os.chmod(temp_path, 0o600)
         result = subprocess.run(
             [
                 sys.executable,
@@ -222,15 +227,28 @@ def write_env(
 
 
 def _atomic_write_bytes(target: Path, data: bytes) -> None:
-    """Replace ``target`` atomically via a same-directory temp file.
+    """Replace ``target`` atomically while preserving its permission bits.
 
-    Writing next to the target keeps the rename on the same filesystem, so the
-    official file is never observed half-written and a crash leaves either the
-    old or the new version, never a corrupt mix.
+    The temp file is created with mode 0600 because it may hold API keys; if
+    the target already exists, its permission bits are copied onto the temp
+    file before the rename, while a brand-new file stays 0600. This avoids the
+    default umask (commonly 022) widening a 0600 .env to 0644 on replace.
     """
-    tmp = target.with_name(f".{target.name}.tmp.{os.getpid()}.{threading.get_ident()}")
+    if target.exists():
+        target_mode = stat.S_IMODE(target.stat().st_mode)
+    else:
+        target_mode = 0o600
+    tmp = target.with_name(
+        f".{target.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}"
+    )
     try:
-        tmp.write_bytes(data)
+        # O_EXCL with 0600: the secret-bearing file is restricted from creation.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.chmod(tmp, target_mode)
         os.replace(tmp, target)
     finally:
         with contextlib.suppress(OSError):

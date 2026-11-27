@@ -415,9 +415,10 @@ def save_voice_service_settings(port: object) -> dict[str, Any]:
             raise ValueError("请先停止当前语音服务，再修改端口")
         if _port_open(port):
             raise ValueError(f"端口 {port} 已被占用，请换一个端口")
-    from .config_admin import update_env
+    from .config_admin import CONFIG_UPDATE_LOCK, update_env
 
-    update_env({"VOICE_SERVICE_URL": f"http://127.0.0.1:{port}"})
+    with CONFIG_UPDATE_LOCK:
+        update_env({"VOICE_SERVICE_URL": f"http://127.0.0.1:{port}"})
     return {"ok": True, "data": voice_service_settings(),
             "message": "语音端口已保存，下次启动生效；其他项目请使用新的接口地址。"}
 

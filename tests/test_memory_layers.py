@@ -175,3 +175,27 @@ def test_reload_recovers_without_file_change_after_boot_failure(
     assert "private:10001" in saved["conversations"]
     assert "private:10002" in saved["conversations"]
     assert original_bytes != memory_path.read_bytes()
+
+
+def test_invalid_utf8_degrades_without_overwriting(tmp_path) -> None:
+    memory_path = tmp_path / "users.json"
+    memory_path.write_bytes(b'{"version": 1, "conversations": {}, \xff\xfe bad}')
+    original_bytes = memory_path.read_bytes()
+
+    # 非法 UTF-8（UnicodeDecodeError）与其他读取失败走同一条降级路径。
+    store = UserMemoryStore(memory_path)
+    assert store._reload_failed is True
+    assert memory_path.read_bytes() == original_bytes
+
+
+def test_non_integer_version_degrades_without_overwriting(tmp_path) -> None:
+    memory_path = tmp_path / "users.json"
+    memory_path.write_text(
+        '{"version": "not-a-number", "conversations": {}}', encoding="utf-8"
+    )
+    original_bytes = memory_path.read_bytes()
+
+    # version 无法转成整数时同样降级，初始化不中断、主文件不被覆盖。
+    store = UserMemoryStore(memory_path)
+    assert store._reload_failed is True
+    assert memory_path.read_bytes() == original_bytes
