@@ -13,7 +13,10 @@ class MemoryStateMixin(MemoryMixin):
         # 内容在部分 Windows 文件系统的同一时间粒度内可能被误判成未变化；加入
         # 文件标识与 ctime 后，消息进程能可靠接住 WebUI 的最新人工编辑。
         self._loaded_file_state: tuple[int, int, int, int] | None = None
-        self._data = self._load()
+        # fail-closed 标记：重读已存在文件失败时置 True，期间保留上次可用数据并
+        # 拒绝写盘，防止用空记忆覆盖主文件；下次重读成功后自动清除。
+        self._reload_failed = False
+        self._data = self._load_initial()
         self._loaded_file_state = self._current_file_state()
         self._session_l3: dict[str, list[dict[str, Any]]] = {}
         self._save_retry_after = 0.0
@@ -69,20 +72,52 @@ class MemoryStateMixin(MemoryMixin):
 
     def _reload_if_changed(self) -> None:
         current_state = self._current_file_state()
-        if current_state == self._loaded_file_state:
+        # 非降级状态且文件未变化：无需处理。降级状态下即使状态相同也要重试，
+        # 因为文件可能已被修复，需要主动复查。
+        if not self._reload_failed and current_state == self._loaded_file_state:
             return
-        self._data = self._load()
+        # 已加载的文件被删除：保留内存数据并进入降级，等待文件恢复，
+        # 绝不用空状态替换当前数据。
+        if not self.path.exists():
+            self._reload_failed = True
+            return
+        data = self._read_file()
+        if data is None:
+            # 读取或解析失败：保留上次成功加载的数据，不更新 _loaded_file_state，
+            # 以便下一次访问继续重试；主文件保持原样。
+            self._reload_failed = True
+            return
+        self._data = data
         self._loaded_file_state = self._current_file_state()
+        self._reload_failed = False
 
-    def _load(self) -> dict[str, Any]:
+    def _load_initial(self) -> dict[str, Any]:
+        """启动加载：文件不存在属正常首次初始化，返回空记忆。
+
+        文件已存在却读取失败时，保留主文件并以空记忆降级运行（标记禁止保存），
+        等待下一次成功重读，而不是把空状态写回覆盖原有 users.json。
+        """
         if not self.path.exists():
             return {"version": MEMORY_VERSION, "conversations": {}}
+        data = self._read_file()
+        if data is None:
+            self._reload_failed = True
+            return {"version": MEMORY_VERSION, "conversations": {}}
+        return data
+
+    def _read_file(self) -> dict[str, Any] | None:
+        """读取并校验现有记忆文件；任何读取、解析或结构错误都返回 None。
+
+        返回 None 表示调用方必须 fail-closed，不得据此覆盖现有数据。
+        """
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return {"version": MEMORY_VERSION, "conversations": {}}
+            return None
         if not isinstance(data, dict):
-            return {"version": MEMORY_VERSION, "conversations": {}}
+            return None
+        if not isinstance(data.get("conversations", {}), dict):
+            return None
         data["version"] = max(int(data.get("version", 1) or 1), MEMORY_VERSION)
         data.setdefault("conversations", {})
         return data
@@ -98,6 +133,13 @@ class MemoryStateMixin(MemoryMixin):
         有限退避。临时文件只有在完整写入后才替换正式文件，因此不会留下半截
         users.json；内存恢复后下一次保存会自动恢复。
         """
+        if self._reload_failed:
+            # 重读已存在文件失败时，内存数据可能是降级空状态或滞后版本，
+            # 直接拒绝写入，确保主文件不被覆盖；待重读成功后自动恢复保存。
+            LOGGER.warning(
+                "记忆处于重读降级状态，本次跳过写入以保护主文件，待重读成功后恢复"
+            )
+            return False
         now = time.monotonic()
         if now < self._save_retry_after:
             return False

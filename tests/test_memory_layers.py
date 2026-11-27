@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import pathlib
 
 import atri_qq_bot.memory as memory_module
 from atri_qq_bot.memory import UserMemoryStore
@@ -62,3 +64,82 @@ def test_memory_save_failure_does_not_break_message_path(tmp_path, monkeypatch) 
     store.observe_user("private:10001", "记忆应该继续保存", now=1001)
     saved = json.loads(memory_path.read_text(encoding="utf-8"))
     assert saved["conversations"]["private:10001"]["message_count"] == 2
+
+
+def _bump_mtime(path) -> None:
+    """强制文件 mtime 变化，让下一次访问触发重读。"""
+    os.utime(
+        path,
+        ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 5_000_000),
+    )
+
+
+def test_reload_read_failure_keeps_existing_file_and_skips_save(
+    tmp_path, monkeypatch
+) -> None:
+    memory_path = tmp_path / "users.json"
+    store = UserMemoryStore(memory_path)
+    store.observe_user("private:10001", "这是会话A的内容", now=1000)
+    original_bytes = memory_path.read_bytes()
+
+    def fail_read(self, *args, **kwargs):
+        raise OSError("transient read failure")
+
+    _bump_mtime(memory_path)
+    monkeypatch.setattr(pathlib.Path, "read_text", fail_read)
+    store.observe_user("private:10002", "这是会话B的内容", now=1001)
+
+    # 读取失败后进入降级，主文件一个字节都不能被改动。
+    assert store._reload_failed is True
+    monkeypatch.undo()
+    assert memory_path.read_bytes() == original_bytes
+    saved = json.loads(memory_path.read_text(encoding="utf-8"))
+    assert list(saved["conversations"]) == ["private:10001"]
+
+
+def test_reload_recovers_after_transient_failure(tmp_path, monkeypatch) -> None:
+    memory_path = tmp_path / "users.json"
+    store = UserMemoryStore(memory_path)
+    store.observe_user("private:10001", "这是会话A的内容", now=1000)
+
+    def fail_read(self, *args, **kwargs):
+        raise OSError("transient read failure")
+
+    _bump_mtime(memory_path)
+    monkeypatch.setattr(pathlib.Path, "read_text", fail_read)
+    store.observe_user("private:10002", "故障期间的会话B", now=1001)
+    assert store._reload_failed is True
+
+    # 读取恢复正常；下一次访问成功重读并恢复保存。
+    monkeypatch.undo()
+    _bump_mtime(memory_path)
+    store.observe_user("private:10003", "恢复后的会话C", now=1002)
+
+    assert store._reload_failed is False
+    saved = json.loads(memory_path.read_text(encoding="utf-8"))
+    assert "private:10001" in saved["conversations"]
+    assert "private:10003" in saved["conversations"]
+
+
+def test_corrupt_existing_file_at_startup_does_not_overwrite(tmp_path) -> None:
+    memory_path = tmp_path / "users.json"
+    memory_path.write_text("{not valid json", encoding="utf-8")
+    original_bytes = memory_path.read_bytes()
+
+    # 启动时已有文件却解析失败：降级运行，但绝不覆盖主文件。
+    store = UserMemoryStore(memory_path)
+    assert store._reload_failed is True
+    store.observe_user("private:10001", "降级期间的新消息", now=1000)
+    assert memory_path.read_bytes() == original_bytes
+
+    # 修复文件后，下一次访问成功重读并恢复正常保存。
+    memory_path.write_text(
+        json.dumps(
+            {"version": 1, "conversations": {"private:10009": {"message_count": 1}}}
+        ),
+        encoding="utf-8",
+    )
+    store.observe_user("private:10001", "恢复后的新消息", now=1001)
+    assert store._reload_failed is False
+    saved = json.loads(memory_path.read_text(encoding="utf-8"))
+    assert "private:10009" in saved["conversations"]
