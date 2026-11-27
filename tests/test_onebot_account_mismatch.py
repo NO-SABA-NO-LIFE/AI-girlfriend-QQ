@@ -92,7 +92,8 @@ def test_account_mismatch_warning_names_both_accounts_and_rate_limits() -> None:
     try:
         stub = SimpleNamespace(
             config=SimpleNamespace(bot_qq=900001003),
-            _account_mismatch_notice_at=0.0,
+            # 与生产 __init__ 一致：-inf 保证进程刚启动（monotonic < 限频窗口）时首条也必打。
+            _account_mismatch_notice_at=float("-inf"),
         )
         server_connection.OneBotConnectionMixin._warn_account_mismatch(stub, 900000002)
         # 第二次调用应被限频吞掉，避免刷屏。
@@ -113,7 +114,7 @@ def test_foreign_account_event_warning_is_rate_limited() -> None:
     try:
         stub = SimpleNamespace(
             config=SimpleNamespace(bot_qq=900001003),
-            _foreign_account_event_notice_at=0.0,
+            _foreign_account_event_notice_at=float("-inf"),
         )
         server_connection.OneBotConnectionMixin._warn_foreign_account_event(stub, 900000002)
         server_connection.OneBotConnectionMixin._warn_foreign_account_event(stub, 900000002)

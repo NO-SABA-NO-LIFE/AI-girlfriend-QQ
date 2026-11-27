@@ -345,11 +345,14 @@ class OneBotConnectionMixin(OneBotServerMixin):
         self._active_websockets: set[Any] = set()
         self._pending_actions: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._onebot_probe_failures = 0
-        self._last_napcat_manual_login_notice_at = 0.0
+        # 限频初值用 -inf 而不是 0.0：进程可能在系统开机后 10 分钟内启动，
+        # 此时 time.monotonic() 仍小于限频窗口，0.0 会让首条关键告警被静默吞掉，
+        # 恰好复现"登录号不一致导致消息全部丢弃却无日志"这类事故。
+        self._last_napcat_manual_login_notice_at = float("-inf")
         # NapCat 实际登录号与 BOT_QQ 不一致时，事件会被整体忽略；这种"完全没反应"
         # 必须能在日志里看到原因，所以两条告警各自限频。
-        self._account_mismatch_notice_at = 0.0
-        self._foreign_account_event_notice_at = 0.0
+        self._account_mismatch_notice_at = float("-inf")
+        self._foreign_account_event_notice_at = float("-inf")
         self._message_tasks: set[asyncio.Task[Any]] = set()
         self._conversation_queues: dict[str, asyncio.Queue[tuple[Any, dict[str, Any]]]] = {}
         self._conversation_workers: dict[str, asyncio.Task[Any]] = {}
