@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from atri_qq_bot.config import BotConfig
 from atri_qq_bot.runtime import ENV_PATH
@@ -101,7 +101,13 @@ def config_payload(config: BotConfig) -> dict[str, Any]:
     return result
 
 
-def update_env(changes: dict[str, Any]) -> None:
+def merge_env(changes: Mapping[str, Any]) -> dict[str, str]:
+    """Compute the merged env for whitelisted changes without touching disk.
+
+    Pure function: callers can validate the resulting configuration *before*
+    persisting it, so an invalid value can never be written into .env
+    (fail-closed).
+    """
     current = read_env()
     allowed = set(CONFIG_FIELDS)
     for key, value in changes.items():
@@ -112,7 +118,12 @@ def update_env(changes: dict[str, Any]) -> None:
         ):
             continue
         current[key] = normalize_env_value(value)
-    write_env(current)
+    return current
+
+
+def update_env(changes: Mapping[str, Any]) -> None:
+    """Persist whitelisted configuration changes after they are validated."""
+    write_env(merge_env(changes))
 
 
 def read_env() -> dict[str, str]:

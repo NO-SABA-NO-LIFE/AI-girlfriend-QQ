@@ -39,9 +39,9 @@ from .onebot import run_server
 from .runtime import configure_project_logging, napcat_webui_access
 
 
-def main() -> None:
+def main() -> int:
     if not _acquire_bot_mutex():
-        return
+        return 1
     # 启动顺序很重要：配置和日志必须先准备好，OneBot 才能把后续事件
     # 写入正确的日志文件；NapCat 作为反向 WebSocket 客户端随后自动接入。
     # 启动顺序：先加载 .env，再启动 OneBot/WebUI；NapCat 是反向 WS 客户端，
@@ -52,7 +52,8 @@ def main() -> None:
         config = load_config()
     except (OSError, TypeError, ValueError) as exc:
         logger.exception("配置加载失败，ATRI 未启动：%s", exc)
-        return
+        # 非零退出，让 systemd / 启动器能识别启动失败并触发重启或告警。
+        return 1
     access = napcat_webui_access()
     if access.get("configured"):
         # 桌宠后台启动时不写控制台，避免 Windows 为输出创建黑色窗口。
@@ -68,7 +69,8 @@ def main() -> None:
         asyncio.run(run_server(config))
     except KeyboardInterrupt:
         logger.info("收到停止信号，ATRI 已退出")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -13,6 +13,11 @@ class HandlerConfigMixin(WebUIHandlerMixin):
         if not isinstance(payload, dict):
             return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
         try:
+            # fail-closed：先在内存合并候选配置并完整校验，确认合法后才写盘，
+            # 杜绝“接口报错但错误值已写入 .env”。load_config 的 overrides 仅临时
+            # 改动 os.environ 并在 finally 还原，不会触碰磁盘。
+            candidate = merge_env(payload)
+            load_config(overrides=candidate)
             update_env(payload)
             config = run_coro(self.webui_state.reload_config())
         except Exception as exc:

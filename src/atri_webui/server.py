@@ -66,7 +66,7 @@ from atri_qq_bot.runtime.reply_strategy import (
     save_reply_strategy,
     update_object_rule,
 )
-from .config_admin import config_payload, update_env
+from .config_admin import config_payload, merge_env, update_env
 from . import account_view
 from atri_qq_bot.accounts import (
     qq_from_account_id,
