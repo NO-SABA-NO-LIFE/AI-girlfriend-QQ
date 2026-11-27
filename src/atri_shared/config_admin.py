@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import contextlib
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -126,6 +130,44 @@ def update_env(changes: Mapping[str, Any]) -> None:
     write_env(merge_env(changes))
 
 
+def validate_env_isolated(
+    changes: Mapping[str, Any], *, timeout: float = 30.0
+) -> None:
+    """Validate candidate config in a separate process without side effects.
+
+    The candidate is serialized to a same-directory temp file and checked by an
+    isolated interpreter, so the WebUI process os.environ is never touched (a
+    load_dotenv override cannot leak back) and dotenv quoting is decoded by the
+    real loader. The temp file is permission-restricted and always removed.
+    """
+    candidate = merge_env(changes)
+    temp_path = ENV_PATH.with_name(f".{ENV_PATH.name}.candidate.tmp")
+    try:
+        with contextlib.suppress(OSError):
+            temp_path.unlink()
+        write_env(candidate, target_path=temp_path)
+        with contextlib.suppress(OSError):
+            os.chmod(temp_path, 0o600)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "atri_qq_bot.config.validate_file",
+                str(temp_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise ValueError(detail or "invalid configuration")
+    finally:
+        with contextlib.suppress(OSError):
+            temp_path.unlink()
+
+
 def read_env() -> dict[str, str]:
     result: dict[str, str] = {}
     if not ENV_PATH.exists():
@@ -139,10 +181,16 @@ def read_env() -> dict[str, str]:
     return result
 
 
-def write_env(values: dict[str, str], *, extra_keys: tuple[str, ...] = ()) -> None:
+def write_env(
+    values: Mapping[str, str],
+    *,
+    extra_keys: tuple[str, ...] = (),
+    target_path: Path | None = None,
+) -> None:
+    target = ENV_PATH if target_path is None else target_path
     existing_lines: list[str] = []
-    if ENV_PATH.exists():
-        existing_lines = ENV_PATH.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    if target.exists():
+        existing_lines = target.read_text(encoding="utf-8-sig", errors="replace").splitlines()
 
     seen: set[str] = set()
     new_lines: list[str] = []
@@ -161,7 +209,7 @@ def write_env(values: dict[str, str], *, extra_keys: tuple[str, ...] = ()) -> No
     for key in (*CONFIG_FIELDS, *extra_keys):
         if key in values and key not in seen:
             new_lines.append(f"{key}={values[key]}")
-    ENV_PATH.write_text("\n".join(new_lines).rstrip() + "\n", encoding="utf-8")
+    target.write_text("\n".join(new_lines).rstrip() + "\n", encoding="utf-8")
 
 
 def normalize_env_value(value: Any) -> str:

@@ -12,17 +12,39 @@ class HandlerConfigMixin(WebUIHandlerMixin):
         payload = self._read_json()
         if not isinstance(payload, dict):
             return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
+        # 预校验在独立子进程进行：主进程环境与磁盘均不受影响，dotenv 引号也由
+        # 真实加载器解码。校验失败直接返回，绝不写盘。
         try:
-            # fail-closed：先在内存合并候选配置并完整校验，确认合法后才写盘，
-            # 杜绝“接口报错但错误值已写入 .env”。load_config 的 overrides 仅临时
-            # 改动 os.environ 并在 finally 还原，不会触碰磁盘。
-            candidate = merge_env(payload)
-            load_config(overrides=candidate)
+            validate_env_isolated(payload)
+        except Exception as exc:
+            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+
+        # 保存上一份有效 .env，以便热重载在后段组件失败时回滚。
+        previous_bytes = ENV_PATH.read_bytes() if ENV_PATH.exists() else None
+        try:
             update_env(payload)
             config = run_coro(self.webui_state.reload_config())
         except Exception as exc:
+            self._rollback_config(previous_bytes)
             return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
         self._send_json({"ok": True, "config": config_payload(config)})
+
+    def _rollback_config(self, previous_bytes: bytes | None) -> None:
+        """Restore the previous .env and rebuild runtime components after a failure."""
+        try:
+            if previous_bytes is None:
+                if ENV_PATH.exists():
+                    ENV_PATH.unlink()
+            else:
+                ENV_PATH.write_bytes(previous_bytes)
+            # 基于回滚后的 .env 重建运行组件；旧配置已知可用，即使二次失败也不
+            # 再抛出，至少保证下次重启沿用上一份有效配置。
+            try:
+                run_coro(self.webui_state.reload_config())
+            except Exception:
+                LOGGER.exception("回滚后重建运行配置失败，将在下次重启时恢复")
+        except Exception:
+            LOGGER.exception("回滚 .env 失败，需要人工检查配置文件")
 
     def _handle_modality_access(self) -> None:
         """返回白名单配置及已归档成员/群聊，供高级面板勾选。"""
