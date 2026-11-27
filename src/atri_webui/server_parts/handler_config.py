@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from atri_qq_bot.config import BotConfig
+
+from ..config_admin import CONFIG_FIELDS, read_env
 from .handler_support import WebUIHandlerMixin, _sync_webui_globals
 from .handler_account import effective_bot_qq_for, view_memory_admin_for
 
@@ -22,34 +25,33 @@ class HandlerConfigMixin(WebUIHandlerMixin):
                 update_env(payload)
             except Exception as exc:
                 return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-            try:
-                config = run_coro(
-                    self.webui_state.reload_config(), wait_for_cleanup=True
-                )
-            except Exception as exc:
-                try:
-                    self._rollback_config(previous_bytes, env_snapshot)
-                except Exception:
-                    LOGGER.exception("配置保存失败，回滚未完成")
-                    return self._send_error(
-                        HTTPStatus.INTERNAL_SERVER_ERROR,
-                        "配置保存失败，回滚未完成，请检查服务日志",
-                    )
-                return self._send_error(
-                    HTTPStatus.BAD_REQUEST, str(exc) or "配置热重载失败"
-                )
-            self._send_json({"ok": True, "config": config_payload(config)})
+            config = self._reload_or_rollback(previous_bytes, env_snapshot)
+            if config is not None:
+                self._send_json({"ok": True, "config": config_payload(config)})
 
-    def _rollback_config(
+    def _reload_or_rollback(
         self,
         previous_bytes: bytes | None,
         env_snapshot: dict[str, str | None],
-    ) -> None:
-        """Restore .env, process env and runtime components after a failure."""
-        restore_env_file(previous_bytes)
-        restore_process_env(env_snapshot)
-        # 恢复任务必须在事务锁释放前结束，避免与下一次保存交错。
-        run_coro(self.webui_state.reload_config(), timeout=None)
+    ) -> BotConfig | None:
+        """Reload after a write, or restore the old configuration and report the error."""
+        try:
+            return run_coro(self.webui_state.reload_config(), wait_for_cleanup=True)
+        except Exception as exc:
+            try:
+                restore_env_file(previous_bytes)
+                restore_process_env(env_snapshot)
+                # 恢复任务必须在事务锁释放前结束，避免与下一次保存交错。
+                run_coro(self.webui_state.reload_config(), timeout=None)
+            except Exception:
+                LOGGER.exception("配置保存失败，回滚未完成")
+                self._send_error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "配置保存失败，回滚未完成，请检查服务日志",
+                )
+            else:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc) or "配置热重载失败")
+            return None
 
     def _handle_modality_access(self) -> None:
         """返回白名单配置及已归档成员/群聊，供高级面板勾选。"""
@@ -433,17 +435,23 @@ class HandlerConfigMixin(WebUIHandlerMixin):
 
     def _handle_model_profile_activate(self) -> None:
         payload = self._read_json()
-        profile_id = str((payload or {}).get("id") or "").strip()
+        if not isinstance(payload, dict):
+            return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
+        profile_id = str(payload.get("id") or "").strip()
         # 与配置保存共用同一把锁：模型切换会写 .env 并 reload，必须和其他
         # 写事务互斥，否则一次失败回滚会把已成功的模型切换也撤销。
         with CONFIG_UPDATE_LOCK:
             try:
+                previous_bytes = ENV_PATH.read_bytes() if ENV_PATH.exists() else None
+                # 模型启用可能新增 .env 中原本不存在的键，快照也要记录其存在状态。
+                affected_keys = read_env().keys() | CONFIG_FIELDS.keys()
+                env_snapshot = snapshot_process_env(affected_keys)
                 profile = activate_model_profile(profile_id)
-                config = run_coro(
-                    self.webui_state.reload_config(), wait_for_cleanup=True
-                )
             except Exception as exc:
                 return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            config = self._reload_or_rollback(previous_bytes, env_snapshot)
+            if config is None:
+                return
             self._send_json(
                 {
                     "ok": True,

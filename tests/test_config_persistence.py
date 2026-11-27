@@ -13,6 +13,7 @@ from unittest import mock
 import pytest
 
 import atri_shared.config_admin as config_admin
+import atri_shared.model_profiles as model_profiles
 import atri_qq_bot.__main__ as main_module
 import atri_qq_bot.config.loader as loader
 import atri_webui.server as webui_server
@@ -80,12 +81,112 @@ class _ConfigHandler(HandlerConfigMixin):
     def _refuse_when_read_only(self, action: str) -> bool:
         return False
 
+    def _status(self) -> dict:
+        return {}
+
 
 def _point_env(monkeypatch, env_path) -> None:
     # Point both the shared module and the server module (whose globals are
     # copied into the handler mixin by _sync_webui_globals) at the temp .env.
     monkeypatch.setattr(config_admin, "ENV_PATH", env_path)
     monkeypatch.setattr(webui_server, "ENV_PATH", env_path)
+
+
+@pytest.fixture
+def model_switch(tmp_path, monkeypatch):
+    env_path = tmp_path / ".env"
+    _point_env(monkeypatch, env_path)
+    monkeypatch.setattr(loader, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        webui_server, "run_coro", lambda coro, **_: asyncio.run(coro)
+    )
+    monkeypatch.setenv("REPLY_MODE", "mention")
+    monkeypatch.setenv("OPENAI_MODEL", "old-model")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:1/v1")
+    monkeypatch.setenv("TEMPERATURE", "0.4")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("FREQUENCY_PENALTY", raising=False)
+    monkeypatch.delenv("MAX_TOKENS", raising=False)
+    profile = {
+        "id": "new",
+        "model_type": "chat",
+        "api_key": "test-key",
+        "base_url": "http://127.0.0.1:2/v1",
+        "model": "new-model",
+        "temperature": 0.7,
+        "frequency_penalty": 0.2,
+        "max_tokens": 100,
+    }
+    monkeypatch.setattr(model_profiles, "load_model_profiles", lambda: [profile])
+    return _ConfigHandler({"id": "new"}), env_path
+
+
+@pytest.mark.parametrize("has_env", [True, False])
+def test_model_switch_rolls_back_on_late_reload_failure(model_switch, has_env) -> None:
+    handler, env_path = model_switch
+    previous = b"# old config\nREPLY_MODE=mention\nTEMPERATURE=0.4\n"
+    if has_env:
+        env_path.write_bytes(previous)
+    launch_env = dict(os.environ)
+    state = SimpleNamespace(config=loader.load_config())
+    previous_config = state.config
+    env_before = dict(os.environ)
+    applied = []
+
+    async def reload_config():
+        state.config = loader.load_config()
+        applied.append(state.config.openai_model)
+        if len(applied) == 1:
+            assert os.environ["OPENAI_API_KEY"] == "test-key"
+            raise RuntimeError("late reload failure")
+        return state.config
+
+    state.reload_config = reload_config
+    handler.webui_state = state
+    handler._handle_model_profile_activate()
+
+    assert handler.error == (400, "late reload failure")
+    assert handler.sent is None
+    assert applied == ["new-model", "old-model"]
+    assert state.config == previous_config
+    assert dict(os.environ) == env_before
+    if has_env:
+        assert env_path.read_bytes() == previous
+    else:
+        assert not env_path.exists()
+    new_process = subprocess.check_output(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from atri_qq_bot.config import load_config; "
+            "config = load_config(sys.argv[1]); print(config.openai_model, config.temperature)",
+            str(env_path),
+        ],
+        env=launch_env,
+        text=True,
+        timeout=10,
+    )
+    assert new_process.strip() == "old-model 0.4"
+
+
+def test_model_switch_applies_profile_on_success(model_switch) -> None:
+    handler, env_path = model_switch
+    state = SimpleNamespace(config=loader.load_config())
+
+    async def reload_config():
+        state.config = loader.load_config()
+        return state.config
+
+    state.reload_config = reload_config
+    handler.webui_state = state
+    handler._handle_model_profile_activate()
+
+    assert handler.error is None
+    assert handler.sent and handler.sent["ok"] is True
+    assert handler.sent["profile"]["model"] == "new-model"
+    assert "api_key" not in handler.sent["profile"]
+    assert state.config.openai_model == "new-model"
+    assert "OPENAI_MODEL=new-model\n" in env_path.read_text(encoding="utf-8")
 
 
 def test_rollback_restores_file_env_runtime_and_new_process(tmp_path, monkeypatch) -> None:
