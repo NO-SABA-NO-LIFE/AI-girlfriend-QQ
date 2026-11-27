@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from atri_qq_bot.onebot.server import OneBotServer
+from atri_qq_bot.onebot.server import OneBotServer, cached_origin_name
 from atri_qq_bot.toolbox_parts.request_collection import (
     SENDER_NAME_META_KEY,
     _collect_request,

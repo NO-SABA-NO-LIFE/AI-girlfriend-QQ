@@ -16,7 +16,7 @@ def _sync_webui_globals(instance: Any) -> None:
         return
     for cls in type(instance).__mro__:
         module = sys.modules.get(cls.__module__)
-        if module is None or module is sys.modules[__name__]:
+        if cls is object or module is None or module is sys.modules[__name__]:
             continue
         namespace = vars(module)
         for name, value in vars(server_module).items():

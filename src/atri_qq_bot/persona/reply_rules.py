@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..lore.triggers import _explicit_lore_context
+
 import re
 
 from typing import Any

@@ -16,7 +16,7 @@ def _sync_store_globals(instance: Any) -> None:
         return
     for cls in type(instance).__mro__:
         module = sys.modules.get(cls.__module__)
-        if module is None or module is sys.modules[__name__]:
+        if cls is object or module is None or module is sys.modules[__name__]:
             continue
         for name, value in vars(package).items():
             if name != "InsightsStore" and not name.startswith("__"):

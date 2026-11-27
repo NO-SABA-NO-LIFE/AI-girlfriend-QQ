@@ -21,7 +21,7 @@ def _sync_toolbox_globals(instance: Any) -> None:
         _copy_package_globals(package, helper)
     for cls in type(instance).__mro__:
         module = sys.modules.get(cls.__module__)
-        if module is None or module is sys.modules[__name__]:
+        if cls is object or module is None or module is sys.modules[__name__]:
             continue
         _copy_package_globals(package, module)
 

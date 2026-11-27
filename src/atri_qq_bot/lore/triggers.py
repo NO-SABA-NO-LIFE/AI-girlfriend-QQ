@@ -73,3 +73,7 @@ def has_lore_trigger(text: str) -> bool:
     if any(word in text for word in strong_triggers):
         return True
     return explicit_lore and any(word in text for word in LORE_TRIGGER_WORDS)
+
+def _explicit_lore_context(text: str) -> bool:
+    lowered = text.lower()
+    return any(word in text for word in ("原作", "剧情", "设定", "梗", "名场面")) or "atri" in lowered

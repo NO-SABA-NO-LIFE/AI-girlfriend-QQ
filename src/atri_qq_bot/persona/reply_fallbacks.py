@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..lore.triggers import _explicit_lore_context
+
 from typing import Any
 
 from . import core as _core
@@ -559,8 +561,3 @@ def _shorten_long_reply(text: str, limit: int = 140) -> str:
             break
         result += sentence
     return result.strip() or text[:limit].strip()
-
-
-def _explicit_lore_context(text: str) -> bool:
-    lowered = text.lower()
-    return any(word in text for word in ("原作", "剧情", "设定", "梗", "名场面")) or "atri" in lowered

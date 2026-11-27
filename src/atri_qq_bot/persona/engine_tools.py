@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..lore.triggers import _explicit_lore_context
+
 from .engine_support import PersonaEngineMixin
 from .stream_helpers import (
     apply_sse_event,
