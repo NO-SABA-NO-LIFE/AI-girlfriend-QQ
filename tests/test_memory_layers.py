@@ -111,6 +111,54 @@ def test_group_incoming_keeps_external_replacement(tmp_path, monkeypatch):
     ]
 
 
+def test_group_incoming_keeps_context_in_memory_until_corrupt_file_is_repaired(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "users.json"
+    damaged = b'{"conversations":'
+    path.write_bytes(damaged)
+    store = UserMemoryStore(path)
+    requests = []
+    monkeypatch.setattr(store._memory_worker, "enabled", True)
+    monkeypatch.setattr(store._memory_worker, "submit", requests.append)
+
+    store.record_group_incoming(20001, 30001, "临时消息一", now=1000)
+    store.record_group_incoming(20001, 30001, "临时消息二", now=1010)
+    group = "group:20001"
+    assert [entry["text"] for entry in store.recent_history(group)] == [
+        "临时消息一",
+        "临时消息二",
+    ]
+    assert [entry["text"] for entry in store._session_l3[group]] == [
+        "临时消息一",
+        "临时消息二",
+    ]
+    assert path.read_bytes() == damaged
+    assert requests == []
+
+    restored_path = tmp_path / "restored.json"
+    backup = UserMemoryStore(restored_path)
+    backup.record_group_incoming(20001, 30001, "备份中的消息", now=900)
+    restored_path.replace(path)
+    store.record_group_incoming(20001, 30001, "恢复后的消息", now=1020)
+
+    conversations = json.loads(path.read_bytes())["conversations"]
+    for key in (group, "group:20001:user:30001", "private:30001"):
+        assert [entry["text"] for entry in conversations[key]["structured_memory"]["l3"]] == [
+            "备份中的消息",
+            "恢复后的消息",
+        ]
+    assert [entry["text"] for entry in conversations[group]["history"]] == [
+        "备份中的消息",
+        "恢复后的消息",
+    ]
+    assert [request.conversation_id for request in requests] == [
+        group,
+        "group:20001:user:30001",
+        "private:30001",
+    ]
+
+
 def test_group_incoming_keeps_complete_update_for_save_retry(tmp_path, monkeypatch):
     path = tmp_path / "users.json"
     store = UserMemoryStore(path)

@@ -180,6 +180,10 @@ class MemoryObservationMixin(MemoryMixin):
 
         # 固定本次消息使用的文件版本。其间的外部替换由最终 _save 校验。
         self._reload_if_changed()
+        started_degraded = self._reload_failed
+        starting_file_state = (
+            self._current_file_state() if started_degraded else self._loaded_file_state
+        )
         conversations = self._data["conversations"]
         originals = {key: conversations[key] for key in affected if key in conversations}
         session_l3 = self._session_l3
@@ -211,11 +215,11 @@ class MemoryObservationMixin(MemoryMixin):
                     )
             finally:
                 self._group_message_extractions = None
-            # 普通写盘失败保留完整的内存更新供后续保存。文件已被外部更新
-            # 或重读失败时，撤销本次更新及提取请求，等待后续重读成功。
+            # 普通写盘失败保留完整的内存更新供后续保存。文件在批次开始时
+            # 已不可读且未发生变更时，也允许消息留在内存中供本轮对话使用。
             accepted = self._save() or (
-                not self._reload_failed
-                and self._current_file_state() == self._loaded_file_state
+                self._reload_failed == started_degraded
+                and self._current_file_state() == starting_file_state
             )
         finally:
             if not accepted:
@@ -226,7 +230,12 @@ class MemoryObservationMixin(MemoryMixin):
                         session_l3.pop(key, None)
                 conversations.update(originals)
                 session_l3.update(original_l3)
-        if accepted:
+        if accepted and started_degraded:
+            # 记录需要在文件修复后丢弃的 L3，降级期间的请求也不进入后台队列。
+            self._degraded_group_l3.update(
+                key for key in affected if session_l3.get(key) is not original_l3.get(key)
+            )
+        elif accepted:
             for request in extractions:
                 self._submit_memory_extraction(request)
         return group, member
