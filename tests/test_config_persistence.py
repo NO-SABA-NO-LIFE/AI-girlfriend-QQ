@@ -113,7 +113,7 @@ def test_rollback_restores_file_env_runtime_and_new_process(tmp_path, monkeypatc
 
     state.reload_config = fake_reload
     monkeypatch.setattr(
-        webui_server, "run_coro", lambda coro: asyncio.run(coro)
+        webui_server, "run_coro", lambda coro, **_: asyncio.run(coro)
     )
 
     handler = _ConfigHandler({"STICKER_CHANCE": "0.9"})
@@ -161,7 +161,7 @@ def test_config_transaction_holds_the_shared_lock(tmp_path, monkeypatch) -> None
 
     state.reload_config = fake_reload
     monkeypatch.setattr(
-        webui_server, "run_coro", lambda coro: asyncio.run(coro)
+        webui_server, "run_coro", lambda coro, **_: asyncio.run(coro)
     )
 
     handler = _ConfigHandler({"REPLY_MODE": "all"})
@@ -191,6 +191,31 @@ def test_write_env_leaves_no_temp_file(isolated_env) -> None:
     assert not [p for p in isolated_env.parent.iterdir() if ".tmp." in p.name]
 
 
+def test_partial_write_does_not_replace_env(isolated_env) -> None:
+    resource = pytest.importorskip("resource")
+    if not hasattr(resource, "RLIMIT_FSIZE"):
+        pytest.skip("file size limits are unavailable")
+    original_bytes = isolated_env.read_bytes()
+    # A subprocess confines the real kernel file size limit to this write.
+    code = """
+import resource
+import sys
+from pathlib import Path
+from atri_shared.config_admin import write_env
+
+resource.setrlimit(resource.RLIMIT_FSIZE, (16, 16))
+try:
+    write_env({"OPENAI_MODEL": "test-model"}, target_path=Path(sys.argv[1]))
+except OSError:
+    pass
+else:
+    raise AssertionError("partial write did not fail")
+"""
+    subprocess.run([sys.executable, "-c", code, str(isolated_env)], check=True, timeout=10)
+    assert isolated_env.read_bytes() == original_bytes
+    assert list(isolated_env.parent.iterdir()) == [isolated_env]
+
+
 def test_successful_save_applies_and_returns_ok(tmp_path, monkeypatch) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text("REPLY_MODE=mention\nTEMPERATURE=0.4\n", encoding="utf-8")
@@ -206,7 +231,7 @@ def test_successful_save_applies_and_returns_ok(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         webui_server,
         "run_coro",
-        lambda coro: asyncio.run(coro),
+        lambda coro, **_: asyncio.run(coro),
     )
 
     handler = _ConfigHandler({"REPLY_MODE": "all"})
@@ -270,11 +295,11 @@ def test_config_lock_blocks_while_held() -> None:
     assert result["got"] is False
 
 
-def test_run_coro_cancels_timed_out_coroutine() -> None:
+def test_run_coro_cancels_timed_out_coroutine(monkeypatch) -> None:
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
-    webui_server.bind_loop(loop)
+    monkeypatch.setattr(webui_server, "_LOOP", loop)
     cancelled = {"v": False}
 
     async def slow():
@@ -291,6 +316,63 @@ def test_run_coro_cancels_timed_out_coroutine() -> None:
         while not cancelled["v"] and time.monotonic() < deadline:
             time.sleep(0.02)
         assert cancelled["v"] is True
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        loop.close()
+
+
+@pytest.mark.parametrize("suppress_cancellation", [False, True])
+def test_timeout_waits_for_cleanup_then_restores_config(
+    isolated_env, monkeypatch, suppress_cancellation
+) -> None:
+    isolated_env.write_text("REPLY_MODE=mention\nTEMPERATURE=0.4\n", encoding="utf-8")
+    original_bytes = isolated_env.read_bytes()
+    _point_env(monkeypatch, isolated_env)
+    monkeypatch.setenv("TEMPERATURE", "0.4")
+    loop = asyncio.new_event_loop()
+    monkeypatch.setattr(webui_server, "_LOOP", loop)
+    real_run_coro = webui_server.run_coro
+
+    def run_with_shorter_timeout(coro, *, timeout=0.05, **kwargs):
+        return real_run_coro(coro, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(webui_server, "run_coro", run_with_shorter_timeout)
+    reload_lock = asyncio.Lock()
+    state = SimpleNamespace(config=loader.load_config(isolated_env))
+    cleanup_finished = threading.Event()
+
+    async def reload_config():
+        async with reload_lock:
+            candidate = loader.load_config(isolated_env)
+            if candidate.temperature == 0.7:
+                state.config = candidate
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    await asyncio.sleep(0.15)
+                    cleanup_finished.set()
+                    if not suppress_cancellation:
+                        raise
+            else:
+                assert cleanup_finished.is_set()
+                await asyncio.sleep(0.1)
+                state.config = candidate
+            return candidate
+
+    state.reload_config = reload_config
+    handler = _ConfigHandler({"TEMPERATURE": 0.7})
+    handler.webui_state = state
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        handler._handle_config_update()
+        assert handler.error is not None and handler.error[0] == 400
+        assert handler.sent is None
+        assert cleanup_finished.is_set()
+        assert isolated_env.read_bytes() == original_bytes
+        assert os.environ["TEMPERATURE"] == "0.4"
+        assert state.config.temperature == pytest.approx(0.4)
     finally:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=2)

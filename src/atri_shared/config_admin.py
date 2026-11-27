@@ -244,10 +244,10 @@ def _atomic_write_bytes(target: Path, data: bytes) -> None:
     try:
         # O_EXCL with 0600: the secret-bearing file is restricted from creation.
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
+        # The buffered stream finishes partial writes or raises on write/close.
+        # Only publish the file after the complete stream was closed successfully.
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
         os.chmod(tmp, target_mode)
         os.replace(tmp, target)
     finally:

@@ -117,10 +117,10 @@ class MemoryStateMixin(MemoryMixin):
                 return None
             if not isinstance(data.get("conversations", {}), dict):
                 return None
-            # int() 对非数字字符串抛 ValueError；纳入同一 try 统一走降级。
+            # 无法转换的版本号也走同一条降级路径。
             data["version"] = max(int(data.get("version", 1) or 1), MEMORY_VERSION)
             data.setdefault("conversations", {})
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, OverflowError):
             # JSONDecodeError 与 UnicodeDecodeError 都是 ValueError 子类。
             return None
         return data

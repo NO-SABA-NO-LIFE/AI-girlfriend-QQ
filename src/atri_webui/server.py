@@ -711,19 +711,30 @@ class AtriWebUIHandler(
     webui_state: WebUIState
 
 
-def run_coro(coro: Any, *, timeout: float = 90.0) -> Any:
-    future = asyncio.run_coroutine_threadsafe(coro, _main_loop())
+def run_coro(
+    coro: Any, *, timeout: float | None = 90.0, wait_for_cleanup: bool = False
+) -> Any:
+    loop = _main_loop()
+    if wait_for_cleanup and timeout is not None:
+        deadline = loop.time() + timeout
+
+        async def run_with_deadline() -> Any:
+            result = await asyncio.wait_for(coro, deadline - loop.time())
+            # A task can return after handling cancellation, or block the loop
+            # long enough that the timeout callback cannot run before it returns.
+            if loop.time() >= deadline:
+                raise TimeoutError("配置热重载超时")
+            return result
+
+        # The event loop waits for task cleanup. Cancelling the thread-side
+        # future would mark it done before the asyncio task actually exits.
+        return asyncio.run_coroutine_threadsafe(run_with_deadline(), loop).result()
+
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
         return future.result(timeout=timeout)
     except TimeoutError:
-        # The result future timed out but the apply coroutine can still be
-        # running on the main loop. Request cancellation and wait for it to
-        # settle before propagating, so a rollback reload cannot race the
-        # still-running apply and leave the runtime briefly on the new config
-        # after the 400 response has already been sent.
         future.cancel()
-        with contextlib.suppress(Exception):
-            future.result(timeout=timeout)
         raise
 
 

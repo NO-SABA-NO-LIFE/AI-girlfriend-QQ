@@ -199,3 +199,20 @@ def test_non_integer_version_degrades_without_overwriting(tmp_path) -> None:
     store = UserMemoryStore(memory_path)
     assert store._reload_failed is True
     assert memory_path.read_bytes() == original_bytes
+
+
+def test_overflowing_version_degrades_and_recovers(tmp_path) -> None:
+    memory_path = tmp_path / "users.json"
+    invalid_bytes = b'{"version": 1e999, "conversations": {}}'
+    memory_path.write_bytes(invalid_bytes)
+
+    store = UserMemoryStore(memory_path)
+    store.observe_user("private:10001", "降级期间", now=1000)
+    assert store._reload_failed is True
+    assert memory_path.read_bytes() == invalid_bytes
+
+    memory_path.write_text('{"version": 1, "conversations": {}}', encoding="utf-8")
+    store.observe_user("private:10002", "恢复后", now=1001)
+    assert store._reload_failed is False
+    saved = json.loads(memory_path.read_text(encoding="utf-8"))
+    assert set(saved["conversations"]) == {"private:10002"}
