@@ -5,6 +5,7 @@ from .support import MemoryMixin
 
 
 class MemoryObservationMixin(MemoryMixin):
+    @_locked_mutation
     def observe_user(
         self,
         conversation_id: str,
@@ -322,6 +323,7 @@ class MemoryObservationMixin(MemoryMixin):
             return []
         return [entry for entry in history[-max(0, limit) :] if isinstance(entry, dict)]
 
+    @_locked_mutation
     def profile(self, conversation_id: str, now: float | None = None) -> dict[str, Any]:
         now = now or time.time()
         item = self._profile_item(conversation_id)

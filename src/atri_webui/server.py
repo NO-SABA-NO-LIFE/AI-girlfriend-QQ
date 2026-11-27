@@ -81,6 +81,7 @@ from . import account_view
 from atri_qq_bot.accounts import (
     qq_from_account_id,
     resolve_account,
+    resolve_account_settings,
     resolve_config,
 )
 # QQ空间 Bridge 改由 WebUI 手动启停（默认不随桌宠/NapCat 启动）。
@@ -254,7 +255,7 @@ class WebUIState:
     def __init__(self, config: BotConfig, server: Any) -> None:
         self.config = config
         self.server = server
-        self.lock = asyncio.Lock()
+        self.lock = getattr(server, "_account_config_lock", None) or asyncio.Lock()
         self.group_name_lock = asyncio.Lock()
         self.group_name_refresh_submit_lock = threading.Lock()
         self._group_name_refresh_at = 0.0
@@ -555,9 +556,32 @@ class WebUIState:
 
         future.add_done_callback(done)
 
+    async def reload_insights_config(self) -> dict[str, Any]:
+        async with self.lock:
+            return await self._reload_scoped_insights()
+
+    async def _reload_scoped_insights(self) -> dict[str, Any]:
+        runtime = getattr(self.server, "insights", None)
+        if runtime is None:
+            raise RuntimeError("评测与群聊总结旁路未启动，请查看项目日志")
+        coordinator = getattr(self.server, "account_coordinator", None)
+        context = coordinator.context if coordinator is not None else None
+        if context is not None and context.layout is not None:
+            return await runtime.reload_config(database_path=context.layout.insights_db_path)
+        return await runtime.reload_config()
+
     async def reload_config(self) -> BotConfig:
         async with self.lock:
-            new_config = load_config()
+            base_config = load_config()
+            coordinator = getattr(self.server, "account_coordinator", None)
+            context = coordinator.context if coordinator is not None else None
+            new_config = base_config
+            if context is not None and context.account is not None:
+                new_config = resolve_config(
+                    base_config,
+                    context.account,
+                    overrides=resolve_account_settings(base_config, context.account),
+                )
             self.config = new_config
             self.memory_admin = memory_admin_for_config(new_config)
             self.server.config = new_config
@@ -624,14 +648,17 @@ class WebUIState:
             self.server.tools.max_media_bytes = int(
                 new_config.toolbox_max_media_bytes
             )
-            if hasattr(self.server, "voice"):
+            if getattr(self.server, "voice", None) is not None:
                 self.server.voice.update_config(new_config)
-            if hasattr(self.server, "proactive_planner"):
+            if getattr(self.server, "proactive_planner", None) is not None:
                 self.server.proactive_planner.update_owner_qqs(new_config.owner_qqs)
             # 模型页面切换聊天模型后，评测旁路立即复用同一模型；不再维护第二套
             # Judge 接口和密钥配置。评测自身仍然在后台队列中执行。
             if getattr(self.server, "insights", None) is not None:
-                await self.server.insights.reload_config()
+                await self._reload_scoped_insights()
+            if coordinator is not None:
+                self.server._account_base_config = base_config
+                coordinator.update_config(new_config)
             return new_config
 
 

@@ -237,8 +237,9 @@ EDITABLE_ENV_FIELDS = {
 
 def save_insights_env(changes: dict[str, Any]) -> None:
     """只改写 insights 白名单字段，并保留用户原有 ``.env`` 排版和注释。"""
+    from atri_shared.config_admin import CONFIG_UPDATE_LOCK, write_env
+
     env_path = PROJECT_ROOT / ".env"
-    lines = env_path.read_text(encoding="utf-8-sig", errors="replace").splitlines() if env_path.exists() else []
     normalized = {
         key: ("true" if value else "false") if isinstance(value, bool) else str(value).strip()
         for key, value in changes.items()
@@ -248,17 +249,5 @@ def save_insights_env(changes: dict[str, Any]) -> None:
     # 意外清空已经配置好的评测密钥；如需清除，请直接编辑 .env。
     if not normalized.get("EVALUATION_API_KEY"):
         normalized.pop("EVALUATION_API_KEY", None)
-    seen: set[str] = set()
-    output: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        key = stripped.split("=", 1)[0].strip() if "=" in stripped and not stripped.startswith("#") else ""
-        if key in normalized:
-            output.append(f"{key}={normalized[key]}")
-            seen.add(key)
-        else:
-            output.append(line)
-    for key, value in normalized.items():
-        if key not in seen:
-            output.append(f"{key}={value}")
-    env_path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    with CONFIG_UPDATE_LOCK:
+        write_env(normalized, extra_keys=tuple(normalized), target_path=env_path)

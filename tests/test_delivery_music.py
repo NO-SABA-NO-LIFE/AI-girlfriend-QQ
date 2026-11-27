@@ -1,12 +1,30 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
 from atri_qq_bot.music.library import song_catalog, save_song
 from atri_qq_bot.music.session import SingingConversationController
 from atri_qq_bot.runtime.paths import DATA_DIR, MUSIC_ROOT
+
+
+def test_concurrent_imports_preserve_same_name_songs(tmp_path: Path) -> None:
+    payloads = [f"song {index}".encode() for index in range(8)]
+    start = Barrier(len(payloads), timeout=5)
+
+    def import_song(payload):
+        start.wait()
+        return save_song("同名歌曲.wav", payload, root=tmp_path)
+
+    with ThreadPoolExecutor(max_workers=len(payloads)) as pool:
+        paths = list(pool.map(import_song, payloads))
+    assert len(set(paths)) == len(payloads)
+    assert [path.read_bytes() for path in paths] == payloads
+    assert {song.path for song in song_catalog(tmp_path)} == set(paths)
+    assert not list(tmp_path.glob("*.uploading"))
 
 
 def _build_natural_language_catalog(root: Path) -> Path:

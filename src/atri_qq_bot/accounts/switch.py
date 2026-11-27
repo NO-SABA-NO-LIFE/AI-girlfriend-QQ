@@ -24,7 +24,7 @@ import logging
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Iterator, Mapping
 
 from .layout import AccountPaths
@@ -147,6 +147,11 @@ class AccountSwitchCoordinator:
     def account(self) -> Account | None:
         with self._context_lock:
             return self._context.account
+
+    def update_config(self, config: Any) -> None:
+        """Refresh the running account's config without switching resources."""
+        with self._context_lock:
+            self._context = replace(self._context, config=config)
 
     def still_current(self, generation: int) -> bool:
         """这份快照是否仍属于当前账号。"""

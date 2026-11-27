@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from . import _locked_mutation
 from .support import MemoryMixin
 
 
@@ -11,6 +12,7 @@ class MemoryProactiveMixin(MemoryMixin):
             RetrievalSettings.from_config(self.path, config)
         )
 
+    @_locked_mutation
     def affection_summary(self, conversation_id: str, is_owner: bool = False) -> str:
         item = self._conversation(conversation_id)
         _ensure_structured_memory(item)
@@ -26,12 +28,14 @@ class MemoryProactiveMixin(MemoryMixin):
                 item = canonical
         return _trust_tier(item.get("trust_tier"))
 
+    @_locked_mutation
     def set_trust_tier(self, conversation_id: str, value: str) -> str:
         item = self._conversation(conversation_id)
         item["trust_tier"] = _trust_tier(value)
         self._save()
         return item["trust_tier"]
 
+    @_locked_mutation
     def set_affection(self, conversation_id: str, value: float, is_owner: bool = False) -> str:
         item = self._conversation(conversation_id)
         _ensure_structured_memory(item)
@@ -40,6 +44,7 @@ class MemoryProactiveMixin(MemoryMixin):
         self._save()
         return _affection_set_text(float(item["affection_score"]))
 
+    @_locked_mutation
     def reset_affection(self, conversation_id: str, is_owner: bool = False) -> str:
         item = self._conversation(conversation_id)
         _ensure_structured_memory(item)
@@ -48,6 +53,7 @@ class MemoryProactiveMixin(MemoryMixin):
         self._save()
         return _affection_reset_text(float(item["affection_score"]))
 
+    @_locked_mutation
     def due_idle_targets(
         self,
         idle_minutes: int,
@@ -94,6 +100,7 @@ class MemoryProactiveMixin(MemoryMixin):
 
         return due
 
+    @_locked_mutation
     def due_group_targets(
         self,
         idle_minutes: int,
@@ -147,6 +154,7 @@ class MemoryProactiveMixin(MemoryMixin):
 
         return due
 
+    @_locked_mutation
     def mark_group_proactive(self, conversation_id: str, now: float | None = None) -> None:
         now = now or time.time()
         today = datetime.fromtimestamp(now).date().isoformat()
@@ -159,6 +167,7 @@ class MemoryProactiveMixin(MemoryMixin):
         item["last_bot_at"] = now
         self._save()
 
+    @_locked_mutation
     def mark_idle_nudged(self, conversation_id: str, now: float | None = None) -> None:
         item = self._conversation(conversation_id)
         item["last_idle_nudge_at"] = now or time.time()
@@ -222,6 +231,7 @@ class MemoryProactiveMixin(MemoryMixin):
                     due.append((conversation_id, {"message_type": "private", "user_id": user_id}, dict(event)))
         return due
 
+    @_locked_mutation
     def mark_personal_event_sent(
         self,
         conversation_id: str,
@@ -236,6 +246,7 @@ class MemoryProactiveMixin(MemoryMixin):
                 self._save()
                 return
 
+    @_locked_mutation
     def proactive_state(
         self,
         conversation_id: str,
@@ -280,6 +291,7 @@ class MemoryProactiveMixin(MemoryMixin):
             "trust_tier": _trust_tier(item.get("trust_tier")),
         }
 
+    @_locked_mutation
     def set_proactive_plan(
         self,
         conversation_id: str,
@@ -291,6 +303,7 @@ class MemoryProactiveMixin(MemoryMixin):
         item["next_proactive_event_type"] = str(event_type)
         self._save()
 
+    @_locked_mutation
     def clear_proactive_plan(self, conversation_id: str) -> None:
         item = self._conversation(conversation_id)
         changed = False
@@ -301,6 +314,7 @@ class MemoryProactiveMixin(MemoryMixin):
         if changed:
             self._save()
 
+    @_locked_mutation
     def note_proactive_unanswered(self, conversation_id: str) -> int:
         item = self._conversation(conversation_id)
         if item.get("proactive_awaiting_reply"):
@@ -312,6 +326,7 @@ class MemoryProactiveMixin(MemoryMixin):
             self._save()
         return int(item.get("proactive_ignored_streak", 0))
 
+    @_locked_mutation
     def mark_proactive_sent(
         self,
         conversation_id: str,
@@ -343,6 +358,7 @@ class MemoryProactiveMixin(MemoryMixin):
         item["recent_proactive_messages"] = recent[-8:]
         self._save()
 
+    @_locked_mutation
     def due_morning_targets(
         self,
         owner_qqs: Iterable[int],
@@ -377,6 +393,7 @@ class MemoryProactiveMixin(MemoryMixin):
             due.append((conversation_id, target))
         return due
 
+    @_locked_mutation
     def mark_morning_greeted(
         self,
         conversation_id: str,

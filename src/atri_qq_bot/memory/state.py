@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from . import _locked_mutation
+from .file_lock import memory_file_lock
 from .support import MemoryMixin
 from ..knowledge import KnowledgeStore as _KnowledgeStore
 
@@ -16,12 +18,12 @@ class MemoryStateMixin(MemoryMixin):
         # fail-closed 标记：重读已存在文件失败时置 True，期间保留上次可用数据并
         # 拒绝写盘，防止用空记忆覆盖主文件；下次重读成功后自动清除。
         self._reload_failed = False
-        self._data = self._load_initial()
-        self._loaded_file_state = self._current_file_state()
+        self._memory_state_lock = memory_file_lock(path)
+        with self._memory_state_lock:
+            self._data = self._load_initial()
         self._session_l3: dict[str, list[dict[str, Any]]] = {}
         self._save_retry_after = 0.0
         self._save_failure_count = 0
-        self._memory_state_lock = threading.RLock()
         # 检索器是可选的旁路；即使 SQLite 文件损坏，原 JSON 记忆仍能正常工作。
         self._retrieval = ContextRetrievalPlanner(
             RetrievalSettings.from_config(path, config)
@@ -54,6 +56,7 @@ class MemoryStateMixin(MemoryMixin):
             )
             self._backfill_thread.start()
 
+    @_locked_mutation
     def _conversation(self, conversation_id: str, save: bool = True) -> dict[str, Any]:
         self._reload_if_changed()
         conversations = self._data.setdefault("conversations", {})
@@ -70,6 +73,7 @@ class MemoryStateMixin(MemoryMixin):
             return None
         return stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino
 
+    @_locked_mutation
     def _reload_if_changed(self) -> None:
         current_state = self._current_file_state()
         # 非降级状态且文件未变化：无需处理。降级状态下即使状态相同也要重试，
@@ -82,13 +86,13 @@ class MemoryStateMixin(MemoryMixin):
             self._reload_failed = True
             return
         data = self._read_file()
-        if data is None:
+        if data is None or current_state is None or current_state != self._current_file_state():
             # 读取或解析失败：保留上次成功加载的数据，不更新 _loaded_file_state，
             # 以便下一次访问继续重试；主文件保持原样。
             self._reload_failed = True
             return
         self._data = data
-        self._loaded_file_state = self._current_file_state()
+        self._loaded_file_state = current_state
         self._reload_failed = False
 
     def _load_initial(self) -> dict[str, Any]:
@@ -97,12 +101,14 @@ class MemoryStateMixin(MemoryMixin):
         文件已存在却读取失败时，保留主文件并以空记忆降级运行（标记禁止保存），
         等待下一次成功重读，而不是把空状态写回覆盖原有 users.json。
         """
-        if not self.path.exists():
+        current_state = self._current_file_state()
+        if current_state is None and not self.path.exists():
             return {"version": MEMORY_VERSION, "conversations": {}}
         data = self._read_file()
-        if data is None:
+        if data is None or current_state is None or current_state != self._current_file_state():
             self._reload_failed = True
             return {"version": MEMORY_VERSION, "conversations": {}}
+        self._loaded_file_state = current_state
         return data
 
     def _read_file(self) -> dict[str, Any] | None:
@@ -125,6 +131,7 @@ class MemoryStateMixin(MemoryMixin):
             return None
         return data
 
+    @_locked_mutation
     def _save(self) -> bool:
         """尽量持久化记忆，但绝不让持久化异常中断当前回复。
 
@@ -156,6 +163,10 @@ class MemoryStateMixin(MemoryMixin):
                 stream.flush()
             for attempt in range(4):
                 try:
+                    if self._current_file_state() != self._loaded_file_state:
+                        self._reload_failed = True
+                        LOGGER.warning("保存前记忆文件已变更，跳过写入以保留磁盘上的新版本")
+                        return False
                     tmp_path.replace(self.path)
                     break
                 except PermissionError:

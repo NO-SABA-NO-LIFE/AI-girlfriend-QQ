@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,6 +13,7 @@ from ..runtime.paths import MUSIC_ROOT
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac", ".opus"}
 NON_SONG_ARTIFACT_NAMES = {"execute", "function", "tool", "assistant", "none", "null", "unknown"}
+_song_import_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -44,12 +47,17 @@ def save_song(filename: str, data: bytes, *, root: Path = MUSIC_ROOT) -> Path:
     if not stem or stem.casefold() in {"con", "prn", "aux", "nul"}:
         raise ValueError("歌曲名称不能为空或为 Windows 保留名称")
     root.mkdir(parents=True, exist_ok=True)
-    target = root / f"{stem}{suffix}"
-    counter = 2
-    while target.exists():
-        target = root / f"{stem}_{counter}{suffix}"
-        counter += 1
-    temporary = target.with_suffix(target.suffix + ".uploading")
-    temporary.write_bytes(data)
-    temporary.replace(target)
-    return target.resolve()
+    temporary = root / f".{uuid.uuid4().hex}.uploading"
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(data)
+        with _song_import_lock:
+            target = root / f"{stem}{suffix}"
+            counter = 2
+            while target.exists() or target.is_symlink():
+                target = root / f"{stem}_{counter}{suffix}"
+                counter += 1
+            temporary.replace(target)
+        return target.resolve()
+    finally:
+        temporary.unlink(missing_ok=True)

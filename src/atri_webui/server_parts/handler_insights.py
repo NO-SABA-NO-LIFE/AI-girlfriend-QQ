@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 from urllib.parse import quote
 
+from atri_qq_bot.insights.config import EDITABLE_ENV_FIELDS
+
 from .handler_support import WebUIHandlerMixin, _sync_webui_globals
 
 
@@ -265,12 +267,19 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
         payload = self._read_json()
         if not isinstance(payload, dict):
             return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
-        try:
-            save_insights_env(payload)
-            status = run_coro(self._insights_runtime().reload_config())
-        except Exception as exc:
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True, **status})
+        with CONFIG_UPDATE_LOCK:
+            try:
+                self._insights_runtime()
+                previous_bytes = ENV_PATH.read_bytes() if ENV_PATH.exists() else None
+                env_snapshot = snapshot_process_env(merge_env({}).keys() | EDITABLE_ENV_FIELDS)
+                save_insights_env(payload)
+            except Exception as exc:
+                return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            status = self._reload_or_rollback(
+                self.webui_state.reload_insights_config, previous_bytes, env_snapshot
+            )
+            if status is not None:
+                self._send_json({"ok": True, **status})
 
     def _handle_insights_check(self) -> None:
         """WebUI 中的连通性检查；只访问 /models，不发送评测内容。"""

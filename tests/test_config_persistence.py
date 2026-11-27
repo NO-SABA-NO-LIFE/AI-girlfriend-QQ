@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -16,8 +17,10 @@ import atri_shared.config_admin as config_admin
 import atri_shared.model_profiles as model_profiles
 import atri_qq_bot.__main__ as main_module
 import atri_qq_bot.config.loader as loader
+import atri_qq_bot.insights.config as insights_config
 import atri_webui.server as webui_server
 from atri_webui.server_parts.handler_config import HandlerConfigMixin
+from atri_webui.server_parts.handler_insights import HandlerInsightsMixin
 
 
 @pytest.fixture
@@ -90,6 +93,74 @@ def _point_env(monkeypatch, env_path) -> None:
     # copied into the handler mixin by _sync_webui_globals) at the temp .env.
     monkeypatch.setattr(config_admin, "ENV_PATH", env_path)
     monkeypatch.setattr(webui_server, "ENV_PATH", env_path)
+
+
+def test_config_save_validates_the_exact_bytes_it_publishes(tmp_path, monkeypatch):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "# original file\nREPLY_MODE=unused\nexport REPLY_MODE=mention\nTEMPERATURE=0.4\n",
+        encoding="utf-8",
+    )
+    _point_env(monkeypatch, env_path)
+    monkeypatch.setattr(loader, "_project_root", lambda: tmp_path)
+    monkeypatch.setenv("REPLY_MODE", "mention")
+    monkeypatch.setenv("TEMPERATURE", "0.4")
+    monkeypatch.setattr(webui_server, "run_coro", lambda coro, **_: asyncio.run(coro))
+    captured = []
+    original_run = subprocess.run
+
+    def validate(args, **kwargs):
+        captured.append(Path(args[-1]).read_bytes())
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr(config_admin.subprocess, "run", validate)
+
+    async def reload_config():
+        return loader.load_config()
+
+    handler = _ConfigHandler({"TEMPERATURE": 0.7})
+    handler.webui_state = SimpleNamespace(reload_config=reload_config)
+    handler._handle_config_update()
+    assert handler.error is None and handler.sent["ok"]
+    assert captured == [env_path.read_bytes()]
+    assert b"export REPLY_MODE=mention\n" in captured[0]
+    assert loader.load_config().temperature == 0.7
+
+
+def test_insights_save_rolls_back_without_removing_unrelated_settings(tmp_path, monkeypatch):
+    class InsightsHandler(HandlerInsightsMixin, _ConfigHandler):
+        pass
+
+    env_path = tmp_path / ".env"
+    original = b"# settings\nOPENAI_MODEL=old-model\nEVALUATION_TIMEOUT_SECONDS=45\n"
+    env_path.write_bytes(original)
+    _point_env(monkeypatch, env_path)
+    monkeypatch.setattr(insights_config, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("OPENAI_MODEL", "old-model")
+    monkeypatch.setenv("EVALUATION_TIMEOUT_SECONDS", "45")
+    monkeypatch.delenv("GROUP_SUMMARY_ENABLED", raising=False)
+    monkeypatch.setattr(webui_server, "run_coro", lambda coro, **_: asyncio.run(coro))
+    applied = []
+
+    async def reload_config():
+        from dotenv import load_dotenv
+
+        load_dotenv(env_path, override=True)
+        applied.append(int(os.environ["EVALUATION_TIMEOUT_SECONDS"]))
+        if len(applied) == 1:
+            raise RuntimeError("late Insights failure")
+        return {}
+
+    handler = InsightsHandler({"EVALUATION_TIMEOUT_SECONDS": 90, "GROUP_SUMMARY_ENABLED": True})
+    handler.webui_state = SimpleNamespace(
+        server=SimpleNamespace(insights=object()), reload_insights_config=reload_config
+    )
+    handler._handle_insights_config()
+    assert handler.error == (400, "late Insights failure")
+    assert applied == [90, 45]
+    assert env_path.read_bytes() == original
+    assert os.environ["EVALUATION_TIMEOUT_SECONDS"] == "45"
+    assert "GROUP_SUMMARY_ENABLED" not in os.environ
 
 
 @pytest.fixture

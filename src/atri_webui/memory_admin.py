@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
+from atri_qq_bot.memory.file_lock import memory_file_lock
 from atri_qq_bot.runtime.paths import MEMORY_BACKUP_DIR, MEMORY_PATH
 from atri_qq_bot.retrieval import SemanticMemoryRepository
 
@@ -28,17 +29,17 @@ class MemoryAdmin:
         self.semantic_memory_path = semantic_memory_path or memory_path.with_name(
             "semantic_memory.sqlite3"
         )
-        self._lock = threading.RLock()
-        self._summary_cache_signature: tuple[int, int] | None = None
+        self._lock = memory_file_lock(memory_path)
+        self._summary_cache_signature: tuple[int, int, int, int] | None = None
         self._summary_cache: dict[str, Any] | None = None
 
     def summary(self) -> dict[str, Any]:
         with self._lock:
             try:
                 stat = self.memory_path.stat()
-                signature = (stat.st_mtime_ns, stat.st_size)
+                signature = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino)
             except OSError:
-                signature = (0, 0)
+                signature = (0, 0, 0, 0)
             if self._summary_cache_signature == signature and self._summary_cache is not None:
                 return copy.deepcopy(self._summary_cache)
 

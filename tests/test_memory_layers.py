@@ -3,10 +3,54 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import atri_qq_bot.memory as memory_module
 from atri_qq_bot.memory import UserMemoryStore
 from atri_webui.memory_admin import MemoryAdmin
+
+
+def test_webui_relationship_edit_and_incoming_message_both_persist(tmp_path, monkeypatch):
+    path = tmp_path / "users.json"
+    store = UserMemoryStore(path)
+    admin = MemoryAdmin(path, tmp_path / "backups")
+    first_conversation = "private:10001"
+    store.observe_user(first_conversation, "第一条消息", now=1000)
+    admin.update_relationship(first_conversation, 35, None)
+    reading = Event()
+    editing = Event()
+    continue_read = Event()
+    original_read = store._read_file
+
+    def pause_after_read():
+        data = original_read()
+        reading.set()
+        assert continue_read.wait(5)
+        return data
+
+    def edit():
+        unlocked = admin._lock.acquire(blocking=False)
+        if unlocked:
+            admin._lock.release()
+        editing.set()
+        assert not unlocked, "WebUI must wait for the message's memory transaction"
+        return admin.update_relationship(first_conversation, 85, None)
+
+    monkeypatch.setattr(store, "_read_file", pause_after_read)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        message = pool.submit(store.observe_user, "private:10002", "并发消息", now=1001)
+        try:
+            assert reading.wait(5)
+            change = pool.submit(edit)
+            assert editing.wait(5)
+        finally:
+            continue_read.set()
+        message.result(timeout=5)
+        change.result(timeout=5)
+    data = json.loads(path.read_text(encoding="utf-8"))["conversations"]
+    assert data[first_conversation]["affection_score"] == 85
+    assert data["private:10002"]["history"][-1]["text"] == "并发消息"
 
 
 def test_memory_writes_traits_events_and_session_context_to_separate_layers(tmp_path) -> None:

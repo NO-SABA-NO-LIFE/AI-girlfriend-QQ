@@ -7,11 +7,41 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
+from atri_qq_bot.onebot import server as server_module
 from atri_qq_bot.onebot.server_parts import server_connection
 from atri_qq_bot.runtime import control
+
+
+def test_foreign_account_is_dropped_before_group_archive_or_queue(monkeypatch):
+    monkeypatch.setattr(server_module, "publish_onebot_event_activity", Mock())
+    server = object.__new__(server_module.OneBotServer)
+    server.config = SimpleNamespace(bot_qq=123456789)
+    server.insights = SimpleNamespace(archive_group_message=Mock())
+    server._warn_foreign_account_event = Mock()
+    server._enqueue_message_event = Mock()
+    server.helldivers = SimpleNamespace(handle=AsyncMock())
+    event = {"post_type": "message", "message_type": "group", "self_id": 987654321,
+             "group_id": 1, "user_id": 2, "message": "本地测试"}
+
+    async def check():
+        await server.handle_payload(object(), json.dumps(event))
+        server._warn_foreign_account_event.assert_called_once_with(987654321)
+        server.insights.archive_group_message.assert_not_called()
+        server._enqueue_message_event.assert_not_called()
+        await server._handle_event(object(), event)
+        server.helldivers.handle.assert_not_awaited()
+
+        for self_id in (123456789, None):
+            await server.handle_payload(object(), json.dumps({**event, "self_id": self_id}))
+        assert server.insights.archive_group_message.call_count == 2
+        assert server._enqueue_message_event.call_count == 2
+
+    asyncio.run(check())
 
 
 def _stub(action_results: dict[str, object]):

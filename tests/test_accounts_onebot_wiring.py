@@ -67,6 +67,7 @@ def _server_stub(config, *, coordinator=None, engine=None):
     server = OneBotServer.__new__(OneBotServer)
     server.config = config
     server._account_base_config = config
+    server._account_config_lock = asyncio.Lock()
     server.account_coordinator = coordinator
     server.reply_engine = engine or _FakeEngine("base")
     server.insights = None
@@ -79,6 +80,61 @@ def _server_stub(config, *, coordinator=None, engine=None):
     server._message_tasks = set()
     server._conversation_workers = {}
     return server
+
+
+def test_webui_reload_preserves_scoped_resources_and_future_switches(tmp_path, monkeypatch):
+    import atri_qq_bot.config.loader as loader
+    import atri_qq_bot.insights.runtime as insights_runtime
+    from atri_qq_bot.persona import AtriReplyEngine
+    from atri_webui.server import WebUIState
+
+    path = tmp_path / ".env"
+    monkeypatch.setattr(loader, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(insights_runtime, "ENV_PATH", path)
+    settings = (
+        f"BOT_QQ={BOT_QQ}\nACCOUNTS_DB_PATH={tmp_path / 'accounts.sqlite3'}\n"
+        f"INSIGHTS_DB_PATH={tmp_path / 'insights.sqlite3'}\n"
+        f"MEMORY_PATH={tmp_path / 'users.json'}\n"
+        f"MEMORY_RETRIEVAL_PATH={tmp_path / 'semantic.sqlite3'}\n"
+        f"QZONE_AUTOMATION_DB={tmp_path / 'qzone.sqlite3'}\n"
+        "ACCOUNT_SYSTEM_ENABLED=true\nACCOUNT_FOLLOW_NAPCAT=true\n"
+        "MEMORY_EXTRACTION_ENABLED=false\nMEMORY_BACKFILL_ENABLED=false\n"
+    )
+    for line in (settings + "TEMPERATURE=0.4\n").splitlines():
+        key, value = line.split("=", 1)
+        monkeypatch.setenv(key, value)
+    path.write_text(settings + "TEMPERATURE=0.4\n", encoding="utf-8")
+    initial = load_config()
+    server = OneBotServer(initial, AtriReplyEngine(initial))
+    registry = AccountRegistry(initial.accounts_db_path)
+    other = registry.register(OTHER_QQ, confirmed=True, enabled=True)
+    registry.set_settings(other.account_id, {"TEMPERATURE": 0.6})
+    webui = WebUIState(initial, server)
+
+    async def check():
+        await server.follow_napcat_account(OTHER_QQ)
+        before = server.account_coordinator.context
+        memory_path = server.reply_engine.memory.path
+        scoped_insights = server.insights
+        path.write_text(settings + "TEMPERATURE=0.9\n", encoding="utf-8")
+        config = await webui.reload_config()
+        assert config.bot_qq == OTHER_QQ
+        assert config.temperature == 0.6
+        assert server.config is server.reply_engine.config is config
+        assert server.account_coordinator.context.config is config
+        assert server.account_coordinator.context.generation == before.generation
+        assert server.reply_engine.memory.path == webui.memory_admin.memory_path == memory_path
+        assert server.insights is scoped_insights
+        assert scoped_insights.config.database_path == before.layout.insights_db_path
+        await webui.reload_insights_config()
+        assert scoped_insights.config.database_path == before.layout.insights_db_path
+        await server.follow_napcat_account(BOT_QQ)
+        assert server.config.bot_qq == BOT_QQ
+        assert server.config.temperature == 0.9
+        await scoped_insights.close()
+        await server.insights.close()
+
+    asyncio.run(check())
 
 
 def _coordinator_for(config):

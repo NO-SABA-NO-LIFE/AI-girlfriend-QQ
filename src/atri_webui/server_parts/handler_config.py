@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from atri_qq_bot.config import BotConfig
+from collections.abc import Callable, Coroutine
+from typing import Any, TypeVar
 
-from ..config_admin import CONFIG_FIELDS, read_env
+from ..config_admin import CONFIG_FIELDS, read_env, write_validated_env
 from .handler_support import WebUIHandlerMixin, _sync_webui_globals
 from .handler_account import effective_bot_qq_for, view_memory_admin_for
+
+_ReloadResult = TypeVar("_ReloadResult")
 
 
 class HandlerConfigMixin(WebUIHandlerMixin):
@@ -19,30 +22,36 @@ class HandlerConfigMixin(WebUIHandlerMixin):
         # 所有会修改 .env 的入口，避免回滚撤销另一个已成功的模型切换。
         with CONFIG_UPDATE_LOCK:
             try:
-                validate_env_isolated(payload)
-                env_snapshot = snapshot_process_env(merge_env(payload).keys())
                 previous_bytes = ENV_PATH.read_bytes() if ENV_PATH.exists() else None
-                update_env(payload)
+                candidate = validate_env_isolated(payload)
+                env_snapshot = snapshot_process_env(merge_env(payload).keys())
+                disk_bytes = ENV_PATH.read_bytes() if ENV_PATH.exists() else None
+                if disk_bytes != previous_bytes:
+                    raise ValueError("配置文件在校验期间已变更，请刷新后重新保存")
+                write_validated_env(candidate)
             except Exception as exc:
                 return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-            config = self._reload_or_rollback(previous_bytes, env_snapshot)
+            config = self._reload_or_rollback(
+                self.webui_state.reload_config, previous_bytes, env_snapshot
+            )
             if config is not None:
                 self._send_json({"ok": True, "config": config_payload(config)})
 
     def _reload_or_rollback(
         self,
+        reload: Callable[[], Coroutine[Any, Any, _ReloadResult]],
         previous_bytes: bytes | None,
         env_snapshot: dict[str, str | None],
-    ) -> BotConfig | None:
+    ) -> _ReloadResult | None:
         """Reload after a write, or restore the old configuration and report the error."""
         try:
-            return run_coro(self.webui_state.reload_config(), wait_for_cleanup=True)
+            return run_coro(reload(), wait_for_cleanup=True)
         except Exception as exc:
             try:
                 restore_env_file(previous_bytes)
                 restore_process_env(env_snapshot)
                 # 恢复任务必须在事务锁释放前结束，避免与下一次保存交错。
-                run_coro(self.webui_state.reload_config(), timeout=None)
+                run_coro(reload(), timeout=None)
             except Exception:
                 LOGGER.exception("配置保存失败，回滚未完成")
                 self._send_error(
@@ -449,7 +458,9 @@ class HandlerConfigMixin(WebUIHandlerMixin):
                 profile = activate_model_profile(profile_id)
             except Exception as exc:
                 return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-            config = self._reload_or_rollback(previous_bytes, env_snapshot)
+            config = self._reload_or_rollback(
+                self.webui_state.reload_config, previous_bytes, env_snapshot
+            )
             if config is None:
                 return
             self._send_json(

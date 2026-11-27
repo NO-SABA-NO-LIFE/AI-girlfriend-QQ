@@ -106,6 +106,10 @@ class OneBotEventMixin(OneBotServerMixin):
 
     async def _handle_event(self, websocket: Any, event: dict[str, Any]) -> None:
         """执行一次完整的入站消息决策和回复流程。"""
+        # 排队期间可能已切号。先复核身份，再进入确定性指令和普通回复。
+        event_self_id = _as_int(event.get("self_id"))
+        if event_self_id is not None and event_self_id != self.config.bot_qq:
+            return
         # 补昵称要在抽取纯文本之前——否则回复链路拿到的还是"QQ 号"版本。
         if event.get("_atri_group_increase_event"):
             event = await self._resolve_group_increase_name(websocket, event)

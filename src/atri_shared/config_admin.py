@@ -144,7 +144,7 @@ def update_env(changes: Mapping[str, Any]) -> None:
 
 def validate_env_isolated(
     changes: Mapping[str, Any], *, timeout: float = 30.0
-) -> None:
+) -> bytes:
     """Validate candidate config in a separate process without side effects.
 
     The candidate is serialized to a same-directory temp file and checked by an
@@ -152,7 +152,7 @@ def validate_env_isolated(
     load_dotenv override cannot leak back) and dotenv quoting is decoded by the
     real loader. The temp file is permission-restricted and always removed.
     """
-    candidate = merge_env(changes)
+    candidate = _render_env(merge_env(changes), ENV_PATH)
     # Unique per transaction: concurrent requests must never read or overwrite
     # each other's candidate file, otherwise a valid request could be rejected
     # against another request's invalid values (or an invalid one pass against
@@ -161,7 +161,7 @@ def validate_env_isolated(
         f".{ENV_PATH.name}.candidate.{uuid.uuid4().hex}.tmp"
     )
     try:
-        write_env(candidate, target_path=temp_path)
+        _atomic_write_bytes(temp_path, candidate)
         result = subprocess.run(
             [
                 sys.executable,
@@ -177,6 +177,7 @@ def validate_env_isolated(
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
             raise ValueError(detail or "invalid configuration")
+        return candidate
     finally:
         with contextlib.suppress(OSError):
             temp_path.unlink()
@@ -202,6 +203,17 @@ def write_env(
     target_path: Path | None = None,
 ) -> None:
     target = ENV_PATH if target_path is None else target_path
+    _atomic_write_bytes(target, _render_env(values, target, extra_keys=extra_keys))
+
+
+def write_validated_env(data: bytes) -> None:
+    """Publish the exact bytes returned by isolated validation."""
+    _atomic_write_bytes(ENV_PATH, data)
+
+
+def _render_env(
+    values: Mapping[str, str], target: Path, *, extra_keys: tuple[str, ...] = ()
+) -> bytes:
     existing_lines: list[str] = []
     if target.exists():
         existing_lines = target.read_text(encoding="utf-8-sig", errors="replace").splitlines()
@@ -223,7 +235,7 @@ def write_env(
     for key in (*CONFIG_FIELDS, *extra_keys):
         if key in values and key not in seen:
             new_lines.append(f"{key}={values[key]}")
-    _atomic_write_bytes(target, ("\n".join(new_lines).rstrip() + "\n").encode("utf-8"))
+    return ("\n".join(new_lines).rstrip() + "\n").encode("utf-8")
 
 
 def _atomic_write_bytes(target: Path, data: bytes) -> None:

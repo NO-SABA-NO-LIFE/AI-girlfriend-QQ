@@ -392,6 +392,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
         # 关闭时 coordinator 为 None，下面所有账号相关方法都是空操作，
         # 整条链路与账号化之前逐条一致。
         self._account_base_config = config
+        self._account_config_lock = asyncio.Lock()
         self.account_coordinator = None
         if bool(getattr(config, "account_system_enabled", False)):
             self.account_coordinator = self._build_account_coordinator(config)
@@ -663,7 +664,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
         return AccountSwitchCoordinator(
             config,
             build=lambda target, previous: build_runtime_resources(
-                config,
+                self._account_base_config,
                 target,
                 builders=builders,
                 required=(
@@ -753,6 +754,12 @@ class OneBotConnectionMixin(OneBotServerMixin):
         if coordinator is None:
             return
 
+        async with self._account_config_lock:
+            await self._follow_napcat_account(coordinator, peer_uin)
+
+    async def _follow_napcat_account(
+        self, coordinator: AccountSwitchCoordinator, peer_uin: int | None
+    ) -> None:
         base = self._account_base_config
         if peer_uin is not None and bool(getattr(base, "account_follow_napcat", False)):
             try:
@@ -978,6 +985,12 @@ class OneBotConnectionMixin(OneBotServerMixin):
             self._resolve_pending_action(event)
             return
 
+        if event.get("post_type") in ("message", "notice"):
+            event_self_id = _as_int(event.get("self_id"))
+            if event_self_id is not None and event_self_id != self.config.bot_qq:
+                self._warn_foreign_account_event(event_self_id)
+                return
+
         # OneBot 的戳一戳是 notice 事件。只把“目标是亚托莉”的事件归一化，
         # 戳其他人的通知直接忽略，避免误触发正常对话链路。
         if is_poke_event(event):
@@ -993,11 +1006,6 @@ class OneBotConnectionMixin(OneBotServerMixin):
                 return
 
         if event.get("post_type") == "message":
-            event_self_id = _as_int(event.get("self_id"))
-            if event_self_id not in {None, self.config.bot_qq}:
-                # 事件是别的 QQ 号的（NapCat 登录号与 BOT_QQ 不一致）：旧代码会
-                # 静默忽略，用户只看到"发了消息没反应"。这里留下可排查的告警。
-                self._warn_foreign_account_event(event_self_id)
             if getattr(self, "insights", None) is not None and event.get("message_type") == "group":
                 # 在 1.2 秒防抖合并前归档，避免连续群消息被合并后丢失统计粒度。
                 self.insights.archive_group_message(
