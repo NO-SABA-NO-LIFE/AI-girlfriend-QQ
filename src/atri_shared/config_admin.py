@@ -4,11 +4,20 @@ import contextlib
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from atri_qq_bot.config import BotConfig
 from atri_qq_bot.runtime import ENV_PATH
+
+
+# Serializes the whole "snapshot -> validate -> write -> reload -> rollback"
+# transaction across WebUI worker threads. An RLock because the rollback of a
+# failed request runs inside the same critical section. The file restore and
+# the normal save share this lock, so a failing request can never overwrite a
+# successful save with an older snapshot.
+CONFIG_UPDATE_LOCK = threading.RLock()
 
 
 CONFIG_FIELDS: dict[str, str] = {
@@ -209,7 +218,51 @@ def write_env(
     for key in (*CONFIG_FIELDS, *extra_keys):
         if key in values and key not in seen:
             new_lines.append(f"{key}={values[key]}")
-    target.write_text("\n".join(new_lines).rstrip() + "\n", encoding="utf-8")
+    _atomic_write_bytes(target, ("\n".join(new_lines).rstrip() + "\n").encode("utf-8"))
+
+
+def _atomic_write_bytes(target: Path, data: bytes) -> None:
+    """Replace ``target`` atomically via a same-directory temp file.
+
+    Writing next to the target keeps the rename on the same filesystem, so the
+    official file is never observed half-written and a crash leaves either the
+    old or the new version, never a corrupt mix.
+    """
+    tmp = target.with_name(f".{target.name}.tmp.{os.getpid()}.{threading.get_ident()}")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, target)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
+def snapshot_process_env(keys: Iterable[str]) -> dict[str, str | None]:
+    """Capture each key's current value and presence in the WebUI process."""
+    return {str(key): os.environ.get(str(key)) for key in keys}
+
+
+def restore_process_env(snapshot: Mapping[str, str | None]) -> None:
+    """Restore process env to the captured values and presence state.
+
+    A key that was absent before the save is removed instead of being left with
+    the newly applied value, because load_dotenv sets keys but never deletes
+    them on its own.
+    """
+    for key, previous in snapshot.items():
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
+
+def restore_env_file(previous_bytes: bytes | None) -> None:
+    """Atomically restore the previous .env, or remove it if it did not exist."""
+    if previous_bytes is None:
+        if ENV_PATH.exists():
+            ENV_PATH.unlink()
+    else:
+        _atomic_write_bytes(ENV_PATH, previous_bytes)
 
 
 def normalize_env_value(value: Any) -> str:

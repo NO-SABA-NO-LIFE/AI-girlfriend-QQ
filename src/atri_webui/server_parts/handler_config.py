@@ -19,32 +19,37 @@ class HandlerConfigMixin(WebUIHandlerMixin):
         except Exception as exc:
             return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
 
-        # 保存上一份有效 .env，以便热重载在后段组件失败时回滚。
-        previous_bytes = ENV_PATH.read_bytes() if ENV_PATH.exists() else None
-        try:
-            update_env(payload)
-            config = run_coro(self.webui_state.reload_config())
-        except Exception as exc:
-            self._rollback_config(previous_bytes)
-            return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
-        self._send_json({"ok": True, "config": config_payload(config)})
+        # 整个写事务持锁：快照、写盘、热重载与失败回滚串行，避免并发请求用
+        # 旧快照覆盖另一次成功保存。
+        with CONFIG_UPDATE_LOCK:
+            # 记录受影响键的原值/存在状态与上一份有效 .env，供失败回滚。
+            env_snapshot = snapshot_process_env(merge_env(payload).keys())
+            previous_bytes = ENV_PATH.read_bytes() if ENV_PATH.exists() else None
+            try:
+                update_env(payload)
+                config = run_coro(self.webui_state.reload_config())
+            except Exception as exc:
+                self._rollback_config(previous_bytes, env_snapshot)
+                return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            self._send_json({"ok": True, "config": config_payload(config)})
 
-    def _rollback_config(self, previous_bytes: bytes | None) -> None:
-        """Restore the previous .env and rebuild runtime components after a failure."""
+    def _rollback_config(
+        self,
+        previous_bytes: bytes | None,
+        env_snapshot: dict[str, str | None],
+    ) -> None:
+        """Restore .env, process env and runtime components after a failure."""
         try:
-            if previous_bytes is None:
-                if ENV_PATH.exists():
-                    ENV_PATH.unlink()
-            else:
-                ENV_PATH.write_bytes(previous_bytes)
-            # 基于回滚后的 .env 重建运行组件；旧配置已知可用，即使二次失败也不
-            # 再抛出，至少保证下次重启沿用上一份有效配置。
+            restore_env_file(previous_bytes)
+            restore_process_env(env_snapshot)
+            # 在干净的环境与旧 .env 上重建运行组件；旧配置已知可用，即使二次
+            # 失败也不再抛出，至少保证下次重启沿用上一份有效配置。
             try:
                 run_coro(self.webui_state.reload_config())
             except Exception:
                 LOGGER.exception("回滚后重建运行配置失败，将在下次重启时恢复")
         except Exception:
-            LOGGER.exception("回滚 .env 失败，需要人工检查配置文件")
+            LOGGER.exception("回滚配置失败，需要人工检查配置文件与进程环境")
 
     def _handle_modality_access(self) -> None:
         """返回白名单配置及已归档成员/群聊，供高级面板勾选。"""

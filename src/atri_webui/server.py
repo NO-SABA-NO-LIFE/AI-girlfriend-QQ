@@ -67,9 +67,13 @@ from atri_qq_bot.runtime.reply_strategy import (
     update_object_rule,
 )
 from .config_admin import (
+    CONFIG_UPDATE_LOCK,
     ENV_PATH,
     config_payload,
     merge_env,
+    restore_env_file,
+    restore_process_env,
+    snapshot_process_env,
     update_env,
     validate_env_isolated,
 )

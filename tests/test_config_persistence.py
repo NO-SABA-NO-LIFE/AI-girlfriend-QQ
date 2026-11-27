@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest import mock
 
@@ -61,7 +64,6 @@ class _ConfigHandler(HandlerConfigMixin):
         self._payload = payload
         self.sent: dict | None = None
         self.error: tuple | None = None
-        self.reload_calls = 0
 
     def _read_json(self) -> dict:
         return self._payload
@@ -83,38 +85,107 @@ def _point_env(monkeypatch, env_path) -> None:
     monkeypatch.setattr(webui_server, "ENV_PATH", env_path)
 
 
-def test_rollback_when_reload_fails_after_write(tmp_path, monkeypatch) -> None:
+def test_rollback_restores_file_env_runtime_and_new_process(tmp_path, monkeypatch) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text("REPLY_MODE=mention\nTEMPERATURE=0.4\n", encoding="utf-8")
     original_bytes = env_path.read_bytes()
     _point_env(monkeypatch, env_path)
+    monkeypatch.setattr(loader, "_project_root", lambda: tmp_path)
+    os.environ.pop("STICKER_CHANCE", None)
 
     state = SimpleNamespace()
-    fail_next = {"value": True}
+    rebuilt: dict = {}
+    call = {"n": 0}
 
     async def fake_reload():
-        handler.reload_calls += 1
-        if fail_next["value"]:
-            fail_next["value"] = False  # the rollback-triggered reload succeeds
-            raise RuntimeError("insights boom")
-        return SimpleNamespace(to_dict=lambda: {})
+        # Real load against the on-disk .env so os.environ and the config are
+        # genuine, not a stub: merely asserting "reload was called twice" would
+        # not prove the runtime actually returned to the previous config.
+        call["n"] += 1
+        cfg = loader.load_config(env_path)
+        if call["n"] == 1:
+            raise RuntimeError("insights boom")  # late component failure
+        rebuilt["cfg"] = cfg
+        return cfg
 
     state.reload_config = fake_reload
     monkeypatch.setattr(
-        webui_server,
-        "run_coro",
-        lambda coro: asyncio.run(coro),
+        webui_server, "run_coro", lambda coro: asyncio.run(coro)
     )
 
-    handler = _ConfigHandler({"TEMPERATURE": "0.7"})
+    handler = _ConfigHandler({"STICKER_CHANCE": "0.9"})
     handler.webui_state = state
     handler._handle_config_update()
 
     assert handler.error is not None
-    # The .env is restored to the previous valid content ...
+    # (1) the .env bytes are restored exactly ...
     assert env_path.read_bytes() == original_bytes
-    # ... and the rollback reloaded once to rebuild runtime components.
-    assert handler.reload_calls == 2
+    # ... (2) process env presence and value are restored: the newly added key
+    # is removed rather than left holding the applied value ...
+    assert "STICKER_CHANCE" not in os.environ
+    # ... (3) the rebuilt runtime config is the previous valid state ...
+    runtime_cfg = rebuilt["cfg"]
+    assert runtime_cfg.sticker_chance == pytest.approx(0.24)
+    assert runtime_cfg.temperature == pytest.approx(0.4)
+    assert call["n"] == 2
+    # ... (4) a brand-new process reading the restored file gets the old config.
+    code = (
+        "from atri_qq_bot.config.loader import load_config;"
+        "c=load_config(r'''%s''');"
+        "print(round(c.sticker_chance,4), round(c.temperature,4))" % str(env_path)
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip() == "0.24 0.4"
+
+
+def test_config_transaction_holds_the_shared_lock(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("REPLY_MODE=mention\nTEMPERATURE=0.4\n", encoding="utf-8")
+    _point_env(monkeypatch, env_path)
+    monkeypatch.setattr(loader, "_project_root", lambda: tmp_path)
+    real_config = loader.load_config(env_path)
+    held_during_reload: dict = {}
+
+    state = SimpleNamespace()
+
+    async def fake_reload():
+        # The reload runs inside the handler's critical section, so the lock is
+        # held on this thread. The rollback uses the same `with` block/lock.
+        held_during_reload["held"] = config_admin.CONFIG_UPDATE_LOCK._is_owned()
+        return real_config
+
+    state.reload_config = fake_reload
+    monkeypatch.setattr(
+        webui_server, "run_coro", lambda coro: asyncio.run(coro)
+    )
+
+    handler = _ConfigHandler({"REPLY_MODE": "all"})
+    handler.webui_state = state
+    handler._handle_config_update()
+
+    assert webui_server.CONFIG_UPDATE_LOCK is config_admin.CONFIG_UPDATE_LOCK
+    assert held_during_reload["held"] is True
+
+
+def test_write_env_uses_atomic_replace(isolated_env, monkeypatch) -> None:
+    replaced: list = []
+
+    def record_replace(src, dst):
+        replaced.append((src, dst))
+
+    monkeypatch.setattr(config_admin.os, "replace", record_replace)
+    config_admin.write_env({"REPLY_MODE": "all"}, target_path=isolated_env)
+
+    # The official file is published through os.replace, not written in place.
+    assert replaced and replaced[0][1] == isolated_env
+
+
+def test_write_env_leaves_no_temp_file(isolated_env) -> None:
+    config_admin.write_env({"REPLY_MODE": "all"}, target_path=isolated_env)
+    assert "REPLY_MODE=all" in isolated_env.read_text(encoding="utf-8")
+    assert not [p for p in isolated_env.parent.iterdir() if ".tmp." in p.name]
 
 
 def test_successful_save_applies_and_returns_ok(tmp_path, monkeypatch) -> None:
