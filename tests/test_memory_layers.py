@@ -143,3 +143,35 @@ def test_corrupt_existing_file_at_startup_does_not_overwrite(tmp_path) -> None:
     assert store._reload_failed is False
     saved = json.loads(memory_path.read_text(encoding="utf-8"))
     assert "private:10009" in saved["conversations"]
+
+
+def test_reload_recovers_without_file_change_after_boot_failure(
+    tmp_path, monkeypatch
+) -> None:
+    """启动读取失败后，即使文件字节/mtime/inode 完全不变，也要能退出降级。"""
+    memory_path = tmp_path / "users.json"
+    memory_path.write_text(
+        json.dumps(
+            {"version": 1, "conversations": {"private:10001": {"message_count": 1}}}
+        ),
+        encoding="utf-8",
+    )
+    original_bytes = memory_path.read_bytes()
+
+    def fail_read(self, *args, **kwargs):
+        raise OSError("boot failure")
+
+    # 构造（启动）期间第一次读取就失败；文件本身始终完好。
+    monkeypatch.setattr(pathlib.Path, "read_text", fail_read)
+    store = UserMemoryStore(memory_path)
+    assert store._reload_failed is True
+    monkeypatch.undo()  # 瞬时故障解除，没有 touch 任何文件
+
+    # 不改变文件，下一次访问也必须成功重读、清除标志并恢复保存。
+    store.observe_user("private:10002", "恢复后的新消息", now=1000)
+
+    assert store._reload_failed is False
+    saved = json.loads(memory_path.read_text(encoding="utf-8"))
+    assert "private:10001" in saved["conversations"]
+    assert "private:10002" in saved["conversations"]
+    assert original_bytes != memory_path.read_bytes()
