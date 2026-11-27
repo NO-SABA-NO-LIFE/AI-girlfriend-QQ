@@ -230,12 +230,8 @@ class MemoryObservationMixin(MemoryMixin):
                         session_l3.pop(key, None)
                 conversations.update(originals)
                 session_l3.update(original_l3)
-        if accepted and started_degraded:
-            # 记录需要在文件修复后丢弃的 L3，降级期间的请求也不进入后台队列。
-            self._degraded_group_l3.update(
-                key for key in affected if session_l3.get(key) is not original_l3.get(key)
-            )
-        elif accepted:
+        # 降级期间保留的内存更新只供当前进程使用，提取请求不进入后台队列。
+        if accepted and not started_degraded:
             for request in extractions:
                 self._submit_memory_extraction(request)
         return group, member

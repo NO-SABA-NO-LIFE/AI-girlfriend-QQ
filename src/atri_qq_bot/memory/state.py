@@ -23,7 +23,6 @@ class MemoryStateMixin(MemoryMixin):
             self._data = self._load_initial()
         self._session_l3: dict[str, list[dict[str, Any]]] = {}
         self._group_message_extractions: list[MemoryExtractionRequest] | None = None
-        self._degraded_group_l3: set[str] = set()
         self._save_retry_after = 0.0
         self._save_failure_count = 0
         # 检索器是可选的旁路；即使 SQLite 文件损坏，原 JSON 记忆仍能正常工作。
@@ -94,10 +93,10 @@ class MemoryStateMixin(MemoryMixin):
             # 以便下一次访问继续重试；主文件保持原样。
             self._reload_failed = True
             return
-        # 恢复后的文件是记忆来源，降级期间的临时群聊 L3 不能混进恢复的历史。
-        for key in self._degraded_group_l3:
-            self._session_l3.pop(key, None)
-        self._degraded_group_l3.clear()
+        # 恢复后的文件是记忆来源。降级期间追加到内存的 L3 不能混进恢复后的
+        # 历史；整体清空缓存，后续由各会话在磁盘上保存的 L3 窗口重新建立。
+        if self._reload_failed:
+            self._session_l3.clear()
         self._data = data
         self._loaded_file_state = current_state
         self._reload_failed = False

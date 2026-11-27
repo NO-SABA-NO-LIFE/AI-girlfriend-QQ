@@ -159,6 +159,30 @@ def test_group_incoming_keeps_context_in_memory_until_corrupt_file_is_repaired(
     ]
 
 
+def test_private_incoming_does_not_restore_degraded_l3_after_file_repair(tmp_path):
+    path = tmp_path / "users.json"
+    store = UserMemoryStore(path)
+    store.observe_user("private:10001", "正常消息", now=1000)
+    good = path.read_bytes()
+
+    path.write_text('{"conversations":', encoding="utf-8")
+    store.observe_user("private:10001", "降级期私聊消息", now=1010)
+    assert path.read_bytes() == b'{"conversations":'
+    assert [entry["text"] for entry in store._session_l3["private:10001"]] == [
+        "正常消息",
+        "降级期私聊消息",
+    ]
+
+    path.write_bytes(good)
+    store.observe_user("private:10001", "恢复后消息", now=1020)
+
+    conversations = json.loads(path.read_bytes())["conversations"]
+    assert [entry["text"] for entry in conversations["private:10001"]["structured_memory"]["l3"]] == [
+        "正常消息",
+        "恢复后消息",
+    ]
+
+
 def test_group_incoming_keeps_complete_update_for_save_retry(tmp_path, monkeypatch):
     path = tmp_path / "users.json"
     store = UserMemoryStore(path)
