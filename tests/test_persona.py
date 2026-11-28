@@ -6,8 +6,8 @@ from atri_qq_bot.config import BotConfig, load_config
 from atri_qq_bot.persona import (
     AtriReplyEngine,
     _group_fallback_reply,
-    _looks_like_tool_schema_error,
     _looks_incomplete_reply,
+    _looks_like_tool_schema_error,
     _normalize_reply,
     _persona_repair_fallback,
     _persona_violations,
@@ -1344,7 +1344,8 @@ def test_ordinary_group_chat_does_not_inject_full_lore_or_capability_catalog(
 
 def test_local_chat_ensures_ollama_inside_inference_lease(tmp_path, monkeypatch) -> None:
     from contextlib import asynccontextmanager
-    from atri_qq_bot.persona import core as persona_core
+
+    from atri_qq_bot.persona import engine_tools
 
     config = BotConfig(
         bot_qq=100000001,
@@ -1389,8 +1390,8 @@ def test_local_chat_ensures_ollama_inside_inference_lease(tmp_path, monkeypatch)
             events.append("post")
             return FakeResponse()
 
-    monkeypatch.setattr(persona_core, "inference_resource_lease", fake_lease)
-    monkeypatch.setattr(persona_core, "ensure_ollama_service", fake_ensure)
+    monkeypatch.setattr(engine_tools, "inference_resource_lease", fake_lease)
+    monkeypatch.setattr(engine_tools, "ensure_ollama_service", fake_ensure)
     monkeypatch.setattr(
         persona_core,
         "release_ollama_model",

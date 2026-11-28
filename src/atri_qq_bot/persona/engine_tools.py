@@ -1,8 +1,79 @@
 from __future__ import annotations
 
-from ..lore.triggers import _explicit_lore_context
+import json
+import re
+from datetime import datetime
+from typing import Any
 
-from .engine_support import PersonaEngineMixin
+from ..application.automatic_tool_runner import AutomaticToolRunner
+from ..cognition.prompt_context import render_cognition_context
+from ..group_chat import GROUP_PROMPT
+from ..group_reply_focus import GroupReplyFocus
+from ..iteration import iteration_prompt_hint
+from ..language_guard import has_illegal_language_or_garbage
+from ..llm_tools import (
+    AUTOMATIC_TOOL_INSTRUCTION_PROMPT,
+    FINAL_ANSWER_TOOL_NAME,
+    TOOL_INSTRUCTION_PROMPT,
+    ToolExecutionReceipt,
+    append_tool_results,
+    available_tool_schemas,
+    final_answer_payload_from_call,
+    has_unsupported_deferred_action,
+    has_unverified_research_claim,
+    needs_fresh_evidence,
+    rejected_final_answer_messages,
+    tool_calls_from_message,
+)
+from ..lore import ATRI_LORE_PROMPT, has_lore_trigger
+from ..lore.triggers import _explicit_lore_context
+from ..prompting import load_prompt
+from ..runtime.inference_lock import InferencePriority, inference_resource_lease
+from ..runtime.services import ensure_ollama_service, release_ollama_model
+from ..voice import (
+    CallInviteRequest,
+    VoiceRequest,
+    detect_explicit_delivery_intent,
+    evaluate_call_request,
+    evaluate_reply_voice_choice,
+    evaluate_voice_request,
+    load_voice_behavior,
+    voice_policy_prompt,
+)
+from .input_helpers import (
+    _chat_http_timeout,
+    _is_local_ollama_endpoint,
+    _shorten,
+    _user_id_from_profile_id,
+    chat_attempt_timeout,
+)
+from .prompt_rules import (
+    COMFORT_REPAIR_PROMPT,
+    LANGUAGE_GUARD_PROMPT,
+    LANGUAGE_RETRY_PROMPT,
+    PERSONA_PROMPT,
+    _has_current_visual_context,
+    has_prompt_leak,
+)
+from .reply_fallbacks import (
+    _fit_reply_with_sources,
+    _looks_like_tool_schema_error,
+    _provider_payload_overrides,
+    _source_matches_receipts,
+    _tool_receipt_urls,
+)
+from .reply_rules import (
+    _current_speaker_boundary_prompt,
+    _format_user_content,
+    _has_substantive_content,
+    _needs_capability_context,
+    _needs_comfort_repair_mode,
+    _needs_continuity_context,
+    _needs_identity_context,
+    _normalize_reply,
+    _requests_serious_mode,
+    _scene_control_prompt,
+)
 from .stream_helpers import (
     apply_sse_event,
     completion_from_state,
@@ -11,7 +82,7 @@ from .stream_helpers import (
 )
 
 
-class EngineToolsMixin(PersonaEngineMixin):
+class EngineToolsMixin:
     async def _reply_with_api(
         self,
         conversation_id: str,
@@ -875,8 +946,9 @@ class EngineToolsMixin(PersonaEngineMixin):
         headers: dict[str, str],
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        import httpx
         import time
+
+        import httpx
 
         class TruncatedCompletionError(httpx.TransportError):
             """200 响应但内容被截断：finish=length 或流结束时没有 finish 信号。
@@ -1081,8 +1153,9 @@ class EngineToolsMixin(PersonaEngineMixin):
         出错时先把响应体读出来再抛 HTTPStatusError，保证外层工具协议兜底
         仍能根据错误内容判断是否去掉 tools 重试。
         """
-        import httpx
         import json
+
+        import httpx
 
         stream_payload = dict(request_payload)
         stream_payload["stream"] = True

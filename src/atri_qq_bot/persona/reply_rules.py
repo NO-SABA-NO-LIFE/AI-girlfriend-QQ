@@ -1,21 +1,28 @@
 from __future__ import annotations
 
-from ..lore.triggers import _explicit_lore_context
-
+import random
 import re
-
 from typing import Any
 
-from . import core as _core
-
-
-def _sync_module_globals() -> None:
-    for name, value in vars(_core).items():
-        if name not in {"AtriReplyEngine"} and not name.startswith("__"):
-            globals()[name] = value
-
-
-_sync_module_globals()
+from ..language_guard import has_illegal_language_or_garbage
+from ..lore import has_lore_trigger, lore_direct_reply
+from ..lore.triggers import _explicit_lore_context
+from ..prompting import render_prompt
+from . import reply_fallbacks as _reply_fallbacks
+from .input_helpers import _intent_text, _shorten
+from .prompt_rules import (
+    ABSTRACT_NOISE_PATTERNS,
+    ABSTRACT_TRIGGER_WORDS,
+    ABUSE_HINTS,
+    BOT_REPAIR_HINTS,
+    CORRECTION_KEYWORDS,
+    DEFLECTION_PATTERNS,
+    DISTRESS_KEYWORDS,
+    SERIOUS_MODE_HINTS,
+    STANCE_KEYWORDS,
+    STANCE_MARKERS,
+    TIRED_KEYWORDS,
+)
 
 # Markdown heading hashes at the start of a line, e.g. "### 标题".
 _MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*", flags=re.MULTILINE)
@@ -476,7 +483,7 @@ def _group_fallback_reply(
         )
 
     if _needs_direct_answer(text):
-        return _question_fallback(text).replace("主人", "你").replace("亚托莉偏务实", "我偏务实")
+        return _reply_fallbacks._question_fallback(text).replace("主人", "你").replace("亚托莉偏务实", "我偏务实")
 
     if any(word in text for word in ("[图片]", "[表情]", "[动画表情]", "[QQ表情]", "[表情包]", "[表情包/图片]")):
         if serious_mode:

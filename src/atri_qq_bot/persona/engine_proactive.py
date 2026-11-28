@@ -1,9 +1,38 @@
 from __future__ import annotations
 
-from .engine_support import PersonaEngineMixin
+import random
+import time
+from datetime import datetime
+from typing import Any
+
+from ..group_chat import group_nudge_text
+from ..llm_tools import (
+    AUTOMATIC_TOOL_INSTRUCTION_PROMPT,
+    append_tool_results,
+    available_tool_schemas,
+    tool_calls_from_message,
+)
+from ..proactive import safe_zoneinfo
+from ..prompting import load_prompt, render_prompt
+from ..voice import voice_policy_prompt
+from .input_helpers import _chat_http_timeout, _intent_text
+from .prompt_rules import (
+    ABSTRACT_REPLY_CHANCE,
+    ABSTRACT_REPLY_COOLDOWN_SECONDS,
+    LANGUAGE_GUARD_PROMPT,
+    PERSONA_PROMPT,
+    SERIOUS_MODE_SECONDS,
+)
+from .reply_fallbacks import _provider_payload_overrides
+from .reply_rules import (
+    _has_abstract_trigger,
+    _needs_proactive_grounding_repair,
+    _needs_topic_guidance_repair,
+    _normalize_reply,
+)
 
 
-class EngineProactiveMixin(PersonaEngineMixin):
+class EngineProactiveMixin:
     async def generate_proactive_message(
         self,
         conversation_id: str,

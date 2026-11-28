@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import random
+from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
+from typing import Any
 
-from .engine_support import PersonaEngineMixin, _sync_core_globals
+from ..cognition.store import CognitionStateStore
+from ..memory import UserMemoryStore
+from ..proactive import morning_greeting_text
+from ..voice import CallInviteRequest, VoiceRequest
+from .input_helpers import _is_affection_command, _is_owner_id
+from .prompt_rules import LOGGER
 
 # 执行器入参为 (会话标识, 规范命令词, 实体, 新鲜度, 是否显式新鲜度, 静默内部查证)，
 # 返回给模型的工具回执文本。
 HD2ToolExecutor = Callable[[str, str, str, str, bool, bool], Awaitable[str]]
 
 
-class EngineStateMixin(PersonaEngineMixin):
+class EngineStateMixin:
     def __init__(self, config: Any) -> None:
-        _sync_core_globals(self)
         self.config = config
         # 将配置注入记忆门面；人格层只依赖 recall_context 这一稳定接口。
         self.memory = UserMemoryStore(config.memory_path, config=config)

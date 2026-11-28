@@ -1,10 +1,55 @@
 from __future__ import annotations
 
+import random
+import time
+from difflib import SequenceMatcher
+from typing import Any
+
 from ..group_reply_focus import relative_time_label
-from .engine_support import PersonaEngineMixin
+from ..language_guard import has_illegal_language_or_garbage
+from ..memory import is_memory_pollution_text
+from .input_helpers import _intent_text, _shorten
+from .prompt_rules import (
+    DISTRESS_KEYWORDS,
+    FAILURE_TEMPLATE_PATTERNS,
+    GENERIC_REPLY_PATTERNS,
+    TIRED_KEYWORDS,
+    has_prompt_leak,
+)
+from .reply_fallbacks import (
+    _looks_incomplete_reply,
+    _persona_violations,
+    _question_fallback,
+    _redact_sensitive_output,
+    _trim_extra_questions,
+)
+from .reply_rules import (
+    _accepted_correction_reply,
+    _asks_for_direct_suggestion,
+    _asks_for_stance,
+    _emotional_fallback_reply,
+    _extract_emotion_tag,
+    _format_user_content,
+    _group_fallback_reply,
+    _group_speaker_label,
+    _has_abstract_trigger,
+    _has_concrete_suggestion,
+    _has_specific_support_move,
+    _has_stance,
+    _is_correction,
+    _is_deflecting_answer,
+    _is_distress,
+    _needs_direct_answer,
+    _normalize_for_compare,
+    _normalize_reply,
+    _question_count,
+    _sanitize_group_mentions,
+    _shares_content_word,
+    _strip_leading_private_mention,
+)
 
 
-class EngineContextMixin(PersonaEngineMixin):
+class EngineContextMixin:
     def _remember_user_context(
         self,
         conversation_id: str,

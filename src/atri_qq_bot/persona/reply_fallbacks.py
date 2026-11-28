@@ -1,28 +1,30 @@
 from __future__ import annotations
 
-from ..lore.triggers import _explicit_lore_context
-
+import re
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
-from . import core as _core
-
-
-def _sync_module_globals() -> None:
-    for name, value in vars(_core).items():
-        if name not in {"AtriReplyEngine"} and not name.startswith("__"):
-            globals()[name] = value
-
-
-_sync_module_globals()
-
+from ..llm_tools import ToolExecutionReceipt
+from ..lore import has_lore_trigger, lore_direct_reply
+from ..lore.triggers import _explicit_lore_context
+from .input_helpers import _shorten
+from .prompt_rules import (
+    BANNED_ASSISTANT_PATTERNS,
+    GENERIC_REPLY_PATTERNS,
+    HARD_REALITY_CLAIM_PATTERNS,
+    LORE_IMAGERY_WORDS,
+    REAL_WORLD_ACTION_PATTERNS,
+    STALE_MEME_WORDS,
+    has_prompt_leak,
+)
 from .reply_rules import (
     _accepted_correction_reply,
     _asks_for_direct_suggestion,
     _asks_for_stance,
     _direct_answer_override,
     _emotional_fallback_reply,
-    _has_concrete_suggestion,
     _has_abstract_noise,
+    _has_concrete_suggestion,
     _has_specific_support_move,
     _has_stance,
     _is_correction,
@@ -36,6 +38,7 @@ from .reply_rules import (
     _sanitize_group_mentions,
     _shares_content_word,
 )
+
 
 def _trim_extra_questions(text: str, keep_questions: int = 1) -> str:
     sentences = _split_sentences(text)

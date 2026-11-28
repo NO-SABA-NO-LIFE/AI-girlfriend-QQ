@@ -7,27 +7,19 @@
 
 from __future__ import annotations
 
-import sys
 from types import SimpleNamespace
 
 import pytest
 
-from atri_qq_bot.persona import core as persona_core
-from atri_qq_bot.persona import engine_context
-from atri_qq_bot.persona import reply_fallbacks, reply_rules
-
-
-def _install_core_globals() -> None:
-    """复刻 PersonaEngineMixin 的全局注入，让 mixin 方法可独立调用。"""
-
-    for module in (reply_fallbacks, reply_rules, engine_context):
-        for name, value in vars(persona_core).items():
-            if name not in {"AtriReplyEngine"} and not name.startswith("__"):
-                setattr(module, name, value)
+from atri_qq_bot.persona import (
+    core as persona_core,
+    engine_context,
+    reply_fallbacks,
+    reply_rules,
+)
 
 
 def _finalize(reply_text: str, *, user_text: str = "在吗") -> str:
-    _install_core_globals()
     return engine_context.EngineContextMixin._finalize_reply(
         SimpleNamespace(),
         "private:900000001",
@@ -51,12 +43,6 @@ def test_real_failure_templates_are_still_rejected() -> None:
 def test_failure_pattern_list_keeps_only_fallback_only_phrases() -> None:
     assert "在呢，刚忙完呢" not in persona_core.FAILURE_TEMPLATE_PATTERNS
     assert "刚才没接住，再说一遍吧" in persona_core.FAILURE_TEMPLATE_PATTERNS
-
-
-def test_persona_core_module_is_the_sync_source() -> None:
-    """mixin 依赖 core.py 的全局注入；这里守住注入来源不被人为改名。"""
-
-    assert "atri_qq_bot.persona.core" in sys.modules
 
 
 def test_relative_time_tag_at_start_is_stripped() -> None:

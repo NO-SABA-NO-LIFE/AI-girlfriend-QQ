@@ -1,11 +1,46 @@
 from __future__ import annotations
 
 import random
+from typing import Any
 
-from .engine_support import PersonaEngineMixin
+from ..group_reply_focus import GroupReplyFocus
+from ..iteration import judge_correction
+from ..voice import (
+    detect_explicit_delivery_intent,
+    evaluate_reply_voice_choice,
+    load_voice_behavior,
+)
+from .input_helpers import (
+    _is_owner_id,
+    _parse_affection_set_value,
+    _user_id_from_profile_id,
+    new_chat_deadline,
+)
+from .prompt_rules import (
+    COMFORT_REPAIR_PROMPT,
+    REWRITE_PROMPT,
+    TIRED_KEYWORDS,
+    _has_current_visual_context,
+    _visual_fail_safe_context,
+)
+from .reply_fallbacks import (
+    _looks_incomplete_reply,
+    _needs_hard_reality_repair,
+    _needs_history_grounding_review,
+    _persona_repair_fallback,
+    _persona_violations,
+    _repair_incomplete_reply,
+)
+from .reply_rules import (
+    _is_distress,
+    _is_serious_only_message,
+    _needs_comfort_repair_mode,
+    _requests_serious_mode,
+    _rewrite_instruction,
+)
 
 
-class EngineReplyMixin(PersonaEngineMixin):
+class EngineReplyMixin:
     async def reply(
         self,
         conversation_id: str,
