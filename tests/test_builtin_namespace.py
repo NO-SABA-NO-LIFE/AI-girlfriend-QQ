@@ -3,9 +3,10 @@ import sys
 import textwrap
 
 
-def test_runtime_sync_preserves_builtins() -> None:
+def test_mixin_attribute_access_preserves_module_namespaces() -> None:
     script = textwrap.dedent('''
         import builtins
+        import sys
 
         from atri_qq_bot.insights.store import InsightsStore
         from atri_qq_bot.memory import UserMemoryStore
@@ -23,16 +24,23 @@ def test_runtime_sync_preserves_builtins() -> None:
             OneBotServer, AtriReplyEngine, UserMemoryStore, ToolAnalyzer,
             InsightsStore, QZoneAutomation, AtriWebUIHandler,
         )
-        before = dict(vars(builtins))
-        for cls in classes:
-            _ = object.__new__(cls).__class__
-        after = vars(builtins)
-        delta = sorted(before.keys() ^ after.keys())
-        changed = sorted(
-            name for name in before.keys() & after.keys()
-            if before[name] is not after[name]
-        )
-        assert not delta and not changed, (delta, changed)
+        def check():
+            modules = (builtins, sys.modules[__name__], server_events)
+            snapshots = [(module, dict(vars(module))) for module in modules]
+            for cls in classes:
+                # An application subclass must not cause writes into its host module.
+                subclass = type("Example", (cls,), {"__module__": __name__})
+                assert object.__new__(subclass).__class__ is subclass
+            for module, before in snapshots:
+                after = vars(module)
+                delta = sorted(before.keys() ^ after.keys())
+                changed = sorted(
+                    name for name in before.keys() & after.keys()
+                    if before[name] is not after[name]
+                )
+                assert not delta and not changed, (module.__name__, delta, changed)
+
+        check()
     ''')
     result = subprocess.run(
         [sys.executable, "-c", script],
