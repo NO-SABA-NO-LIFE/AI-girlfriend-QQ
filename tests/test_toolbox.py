@@ -1,29 +1,31 @@
 import asyncio
-from contextlib import asynccontextmanager
 import http.server
 import io
 import json
 import threading
 import zipfile
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import atri_qq_bot.toolbox as toolbox_module
 from atri_qq_bot.config import BotConfig
 from atri_qq_bot.persona import AtriReplyEngine
 from atri_qq_bot.runtime.inference_lock import _InterprocessFileLock
-import atri_qq_bot.toolbox as toolbox_module
-from atri_qq_bot.toolbox_parts import ocr as ocr_module
 from atri_qq_bot.toolbox import (
     ToolAnalysisResult,
     ToolAnalyzer,
-    _VisionModelResponse,
     _demote_unverified_visual_identity,
     _prepare_images_for_vision,
     _search_result_supports_query,
+    _VisionModelResponse,
     _visual_prompt_for_kind,
     _visual_search_query,
+    video as toolbox_video,
+    vision as toolbox_vision,
 )
+from atri_qq_bot.toolbox_parts import ocr as ocr_module
 
 
 def _config(tmp_path: Path) -> BotConfig:
@@ -270,8 +272,9 @@ def test_toolbox_uses_vision_analysis_for_images(monkeypatch, tmp_path) -> None:
 
 
 def test_analyze_propagates_visual_failure_status(monkeypatch, tmp_path) -> None:
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     source = io.BytesIO()
     Image.new("RGB", (160, 120), "white").save(source, format="PNG")
@@ -399,8 +402,9 @@ def test_toolbox_keeps_independent_ocr_when_vision_is_temporarily_unavailable(
     monkeypatch,
     tmp_path,
 ) -> None:
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     source = io.BytesIO()
     Image.new("RGB", (320, 180), "white").save(source, format="PNG")
@@ -440,8 +444,9 @@ def test_independent_ocr_overrides_conflicting_visual_model_text(
     monkeypatch,
     tmp_path,
 ) -> None:
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     source = io.BytesIO()
     Image.new("RGB", (320, 180), "white").save(source, format="PNG")
@@ -493,8 +498,9 @@ def test_ocr_rejects_tiny_image_ascii_noise_but_keeps_real_chinese_text() -> Non
 
 
 def test_ocr_prepares_color_and_contrast_variants_for_text_images() -> None:
-    from PIL import Image, ImageDraw
     import io
+
+    from PIL import Image, ImageDraw
 
     source = io.BytesIO()
     image = Image.new("RGB", (320, 120), (180, 190, 205))
@@ -511,8 +517,9 @@ def test_ollama_vision_retries_transient_memory_allocation_failure(
     monkeypatch,
     tmp_path,
 ) -> None:
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     source = io.BytesIO()
     Image.new("RGB", (64, 64), "white").save(source, format="PNG")
@@ -555,13 +562,13 @@ def test_ollama_vision_retries_transient_memory_allocation_failure(
         calls.append(f"sleep:{seconds}")
 
     monkeypatch.setattr(
-        toolbox_module,
+        toolbox_vision,
         "inference_resource_lease",
         fake_lease,
         raising=False,
     )
     monkeypatch.setattr(
-        toolbox_module,
+        toolbox_vision,
         "ensure_ollama_service",
         fake_ensure,
         raising=False,
@@ -592,8 +599,9 @@ def test_ollama_vision_switches_to_fallback_model_after_resource_failure(
     monkeypatch,
     tmp_path,
 ) -> None:
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     source = io.BytesIO()
     Image.new("RGB", (64, 64), "white").save(source, format="PNG")
@@ -634,7 +642,7 @@ def test_ollama_vision_switches_to_fallback_model_after_resource_failure(
         return None
 
     monkeypatch.setattr(
-        toolbox_module,
+        toolbox_vision,
         "inference_resource_lease",
         fake_lease,
         raising=False,
@@ -668,8 +676,9 @@ def test_cloud_vision_fallback_starts_local_ollama_on_demand(
     tmp_path,
 ) -> None:
     """云端视觉失败后，本地兜底必须先拉起 Ollama，不能直接请求关闭的端口。"""
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     source = io.BytesIO()
     Image.new("RGB", (64, 64), "white").save(source, format="PNG")
@@ -706,7 +715,7 @@ def test_cloud_vision_fallback_starts_local_ollama_on_demand(
         return None
 
     monkeypatch.setattr(
-        toolbox_module,
+        toolbox_vision,
         "ensure_ollama_service",
         fake_ensure,
         raising=False,
@@ -728,6 +737,7 @@ def test_cloud_vision_fallback_starts_local_ollama_on_demand(
 
 def test_vision_404_is_classified_as_retryable() -> None:
     import httpx
+
     from atri_qq_bot.toolbox.helpers import _is_retryable_vision_resource_error
 
     request = httpx.Request("POST", "https://vision.example/v1/chat/completions")
@@ -956,8 +966,9 @@ def test_ollama_vision_switches_to_fallback_after_empty_truncated_output(
     monkeypatch,
     tmp_path,
 ) -> None:
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     source = io.BytesIO()
     Image.new("RGB", (64, 64), "white").save(source, format="PNG")
@@ -1005,7 +1016,7 @@ def test_ollama_vision_switches_to_fallback_after_empty_truncated_output(
         return None
 
     monkeypatch.setattr(
-        toolbox_module,
+        toolbox_vision,
         "inference_resource_lease",
         fake_lease,
         raising=False,
@@ -1670,8 +1681,9 @@ def test_current_visual_question_is_sent_with_the_current_image(monkeypatch, tmp
 
 
 def test_animated_visual_is_sent_as_independent_readable_frames() -> None:
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     frames = [
         Image.new("RGB", (1200, 900), color)
@@ -1820,7 +1832,7 @@ def test_toolbox_reads_mobile_video_through_onebot_action(monkeypatch, tmp_path)
         vision_calls.append({"source": source, "prompt": prompt, **kwargs})
         return "看到人物在室内展示物品，整体偏轻松生活记录。", ""
 
-    monkeypatch.setattr(toolbox_module, "_extract_video_frames", fake_extract)
+    monkeypatch.setattr(toolbox_video, "_extract_video_frames", fake_extract)
     monkeypatch.setattr(analyzer, "_analyze_image_with_vision", fake_vision)
 
     context = asyncio.run(analyzer.analyze(event, "[视频:手机发来的视频]", fake_action))
@@ -1865,7 +1877,7 @@ def test_video_vision_failure_falls_back_to_frame_ocr(monkeypatch, tmp_path) -> 
     async def failed_vision(*args, **kwargs):
         return "", "视觉模型超时"
 
-    monkeypatch.setattr(toolbox_module, "_extract_video_frames", lambda *args: ([frame], ""))
+    monkeypatch.setattr(toolbox_video, "_extract_video_frames", lambda *args: ([frame], ""))
     monkeypatch.setattr(analyzer, "_extract_image_ocr", fake_ocr)
     monkeypatch.setattr(analyzer, "_analyze_image_with_vision", failed_vision)
 
@@ -1896,7 +1908,7 @@ def test_video_vision_and_ocr_failure_falls_back_to_title(monkeypatch, tmp_path)
     async def failed_vision(*args, **kwargs):
         return "", "视觉模型不可用"
 
-    monkeypatch.setattr(toolbox_module, "_extract_video_frames", lambda *args: ([], "抽帧失败"))
+    monkeypatch.setattr(toolbox_video, "_extract_video_frames", lambda *args: ([], "抽帧失败"))
     monkeypatch.setattr(analyzer, "_analyze_image_with_vision", failed_vision)
 
     context = asyncio.run(analyzer.analyze(event, "这个视频讲了什么", fake_action))

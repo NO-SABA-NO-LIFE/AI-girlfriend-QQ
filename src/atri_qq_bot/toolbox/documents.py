@@ -1,6 +1,49 @@
 from __future__ import annotations
 
-from .support import ToolboxMixin
+import csv
+import io
+import json
+import zipfile
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+from ..toolbox_parts.analysis_result import ToolAnalysisResult
+from ..toolbox_parts.formatting import (
+    _clean_bilibili_title,
+    _decode_bytes,
+    _extract_bvid,
+    _extract_html_title,
+    _extract_meta_description,
+    _extract_readable_text,
+    _looks_authoritative,
+    _shorten,
+    _summarize_json,
+    _summarize_table_rows,
+)
+from ..toolbox_parts.office_docs import (
+    _docx_text_part_names,
+    _docx_xml_to_text,
+    _read_xlsx_shared_strings,
+    _read_xlsx_sheet_refs,
+    _read_xlsx_sheet_rows,
+)
+from ..toolbox_parts.request_collection import (
+    _basename_from_ref,
+    _extension_for_material,
+    _is_bilibili_url,
+    _SegmentRef,
+)
+from .constants import (
+    DOC_EXTENSIONS,
+    IMAGE_EXTENSIONS,
+    SHEET_EXTENSIONS,
+    TEXT_EXTENSIONS,
+    VIDEO_EXTENSIONS,
+    OneBotActionCaller,
+)
+from .helpers import _dedupe, _exception_summary, _looks_like_text_bytes
 
 
 def _knowledge_material(source, text, coverage, blocks=None):
@@ -9,7 +52,7 @@ def _knowledge_material(source, text, coverage, blocks=None):
             "blocks": blocks or [{"anchor": "text", "text": text}]}
 
 
-class ToolboxDocumentsMixin(ToolboxMixin):
+class ToolboxDocumentsMixin:
     async def _analyze_url(self, url: str) -> ToolAnalysisResult:
         from ..toolbox_parts.douyin import is_douyin_url
         if is_douyin_url(url):

@@ -1,9 +1,37 @@
 from __future__ import annotations
 
-from .support import ToolboxMixin
+import asyncio
+import time
+from dataclasses import replace
+from typing import Any
+
+from ..toolbox_parts.analysis_result import ToolAnalysisResult
+from ..toolbox_parts.formatting import _shorten
+from ..toolbox_parts.request_collection import (
+    _classify_category,
+    _collect_request,
+    _material_filename_hint,
+    _SegmentRef,
+)
+from .constants import OneBotActionCaller
+from .helpers import (
+    _dedupe,
+    _demote_unverified_visual_identity,
+    _exception_summary,
+    _is_visual_ref,
+    _looks_like_video_url,
+    _meaningful_video_title,
+    _merge_read_levels,
+    _merge_visual_statuses,
+    _requests_full_text_transcription,
+    _search_result_supports_query,
+    _video_url_metadata_fallback,
+    _visual_prompt_for_kind,
+    _visual_search_query,
+)
 
 
-class ToolboxRequestMixin(ToolboxMixin):
+class ToolboxRequestMixin:
     async def analyze_url_material(self, url: str, share_text: str = '') -> ToolAnalysisResult:
         """Run a durable URL import through the same request pipeline as QQ.
 

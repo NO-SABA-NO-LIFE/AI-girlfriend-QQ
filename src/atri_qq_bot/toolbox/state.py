@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
-from .support import ToolboxMixin
+from ..runtime.paths import PROJECT_ROOT
 
 
-class ToolboxStateMixin(ToolboxMixin):
+class ToolboxStateMixin:
     def __init__(self, config: Any) -> None:
         self.config = config
         self.enabled = bool(getattr(config, "toolbox_enabled", True))

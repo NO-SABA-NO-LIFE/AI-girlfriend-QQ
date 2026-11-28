@@ -1,13 +1,65 @@
 from __future__ import annotations
 
-from .support import ToolboxMixin
+import asyncio
+import base64
+import contextlib
+import hashlib
+import json
+import time
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+from ..prompting import load_prompt
+from ..runtime.inference_lock import InferencePriority, inference_resource_lease
+from ..runtime.services import ensure_ollama_service
+from ..toolbox_parts.analysis_result import ToolAnalysisResult, _VisionModelResponse
+from ..toolbox_parts.formatting import _shorten
+from ..toolbox_parts.media_probe import _image_info, _image_mime_type
+from ..toolbox_parts.ocr import OcrExtraction, extract_image_text
+from ..toolbox_parts.request_collection import (
+    _basename_from_ref,
+    _is_bilibili_url,
+    _material_filename_hint,
+    _onebot_material_actions,
+    _resolve_material_from_action_response,
+    _SegmentRef,
+)
+from .constants import (
+    DOC_EXTENSIONS,
+    IMAGE_EXTENSIONS,
+    SHEET_EXTENSIONS,
+    TEXT_EXTENSIONS,
+    VIDEO_EXTENSIONS,
+    VISUAL_RESPONSE_SCHEMA,
+    OneBotActionCaller,
+)
+from .helpers import (
+    _classify_visual_material,
+    _duration_ms,
+    _ensure_visual_identity_requires_verification,
+    _exception_summary,
+    _fallback_visual_kind,
+    _is_retryable_vision_resource_error,
+    _meaningful_video_title,
+    _normalize_visual_model_output,
+    _ollama_native_base_url,
+    _prepare_images_for_vision,
+    _replace_visual_visible_text,
+    _requests_full_text_transcription,
+    _sanitize_vision_text,
+    _visual_kind_from_analysis,
+    _visual_meta_line,
+    _visual_prompt_for_kind,
+    _visual_response_failure_reason,
+)
 
 # 全文模式下放宽 OCR 截断，让完整文字能进入视觉证据与对话上下文；
 # 普通模式仍沿用 1200/1600 的精简上限，不增加日常成本。
 _FULL_TEXT_CHAR_LIMIT = 4000
 
 
-class ToolboxVisionMixin(ToolboxMixin):
+class ToolboxVisionMixin:
     async def analyze_image_upload(
         self,
         data: bytes,

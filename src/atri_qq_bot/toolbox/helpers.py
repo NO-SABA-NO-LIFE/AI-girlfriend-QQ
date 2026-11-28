@@ -1,37 +1,17 @@
 from __future__ import annotations
 
-from . import *  # noqa: F403 — compatibility globals are populated by the package.
-from . import (
-    _toolbox_formatting,
-    _toolbox_media_probe,
-    _toolbox_office_docs,
-    _toolbox_request_collection,
-)
+import io
+import json
+import re
+from pathlib import Path
+from typing import Any
+from urllib.parse import unquote, urlparse
 
-_SegmentRef = _toolbox_request_collection._SegmentRef
-_MaterialRequest = _toolbox_request_collection._MaterialRequest
-_collect_request = _toolbox_request_collection._collect_request
-_segment_ref = _toolbox_request_collection._segment_ref
-_material_filename_hint = _toolbox_request_collection._material_filename_hint
-_message_has_only_material = _toolbox_request_collection._message_has_only_material
-_collect_share_segment = _toolbox_request_collection._collect_share_segment
-_parse_maybe_json = _toolbox_request_collection._parse_maybe_json
-_extract_urls_from_any = _toolbox_request_collection._extract_urls_from_any
-_extract_share_hints = _toolbox_request_collection._extract_share_hints
-_extract_xmlish_tag = _toolbox_request_collection._extract_xmlish_tag
-_first_text = _toolbox_request_collection._first_text
-_as_positive_int = _toolbox_request_collection._as_positive_int
-_extension_for_material = _toolbox_request_collection._extension_for_material
-_basename_from_ref = _toolbox_request_collection._basename_from_ref
-_is_bilibili_url = _toolbox_request_collection._is_bilibili_url
-_onebot_material_actions = _toolbox_request_collection._onebot_material_actions
-_resolve_material_from_action_response = _toolbox_request_collection._resolve_material_from_action_response
-_extract_path_from_any = _toolbox_request_collection._extract_path_from_any
-_int_or_original = _toolbox_request_collection._int_or_original
-_extract_urls = _toolbox_request_collection._extract_urls
-_extract_paths = _toolbox_request_collection._extract_paths
-_classify_category = _toolbox_request_collection._classify_category
-
+from ..toolbox_parts.analysis_result import ToolAnalysisResult
+from ..toolbox_parts.formatting import _shorten
+from ..toolbox_parts.media_probe import _image_info
+from ..toolbox_parts.request_collection import _is_bilibili_url, _SegmentRef
+from .constants import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 
 
 def _prepare_images_for_vision(
@@ -771,38 +751,12 @@ def _looks_like_text_bytes(data: bytes) -> bool:
 
 
 
-_decode_bytes = _toolbox_formatting._decode_bytes
-_extract_html_title = _toolbox_formatting._extract_html_title
-_extract_meta_description = _toolbox_formatting._extract_meta_description
-_extract_readable_text = _toolbox_formatting._extract_readable_text
-_clean_html_text = _toolbox_formatting._clean_html_text
-_extract_bvid = _toolbox_formatting._extract_bvid
-_clean_bilibili_title = _toolbox_formatting._clean_bilibili_title
-_looks_authoritative = _toolbox_formatting._looks_authoritative
-_shorten = _toolbox_formatting._shorten
-_summarize_json = _toolbox_formatting._summarize_json
-_summarize_table_rows = _toolbox_formatting._summarize_table_rows
-_numeric_column_summaries = _toolbox_formatting._numeric_column_summaries
-_to_float = _toolbox_formatting._to_float
-_format_number = _toolbox_formatting._format_number
 
 
 
-_docx_text_part_names = _toolbox_office_docs._docx_text_part_names
-_docx_xml_to_text = _toolbox_office_docs._docx_xml_to_text
-_read_xlsx_sheet_refs = _toolbox_office_docs._read_xlsx_sheet_refs
-_read_xlsx_shared_strings = _toolbox_office_docs._read_xlsx_shared_strings
-_first_xlsx_sheet_name = _toolbox_office_docs._first_xlsx_sheet_name
-_read_xlsx_sheet_rows = _toolbox_office_docs._read_xlsx_sheet_rows
 
 
 
-_image_mime_type = _toolbox_media_probe._image_mime_type
-_extract_video_frames = _toolbox_media_probe._extract_video_frames
-_probe_video_duration_seconds = _toolbox_media_probe._probe_video_duration_seconds
-_extract_even_video_frames = _toolbox_media_probe._extract_even_video_frames
-_image_info = _toolbox_media_probe._image_info
-_jpeg_info = _toolbox_media_probe._jpeg_info
 
 
 

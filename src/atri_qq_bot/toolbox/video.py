@@ -1,9 +1,28 @@
 from __future__ import annotations
 
-from .support import ToolboxMixin
+import asyncio
+import time
+from pathlib import Path
+
+from ..toolbox_parts.analysis_result import ToolAnalysisResult
+from ..toolbox_parts.formatting import _shorten
+from ..toolbox_parts.media_probe import _extract_video_frames
+from ..toolbox_parts.ocr import OcrExtraction
+from ..toolbox_parts.request_collection import (
+    _basename_from_ref,
+    _extension_for_material,
+    _is_bilibili_url,
+)
+from .constants import TEXT_EXTENSIONS
+from .helpers import (
+    _dedupe,
+    _meaningful_video_title,
+    _prepare_image_for_vision,
+    _video_frame_position_labels,
+)
 
 
-class ToolboxVideoMixin(ToolboxMixin):
+class ToolboxVideoMixin:
     async def _analyze_video_bytes(self, data: bytes, source: str, filename: str = "") -> ToolAnalysisResult:
         findings = [f"视频文件：{filename or _basename_from_ref(source) or '未命名视频'}，约 {len(data)} 字节。"]
         limitations: list[str] = []
