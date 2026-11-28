@@ -1,9 +1,23 @@
 from __future__ import annotations
 
-from .support import QZoneMixin
+import json
+import sqlite3
+import threading
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from .rules import (
+    DEFAULT_SETTINGS,
+    DEFAULT_TOPIC_ROTATION,
+    LEGACY_TOPIC_ROTATION,
+    _schedule_signature,
+)
 
 
-class QZoneStoreMixin(QZoneMixin):
+class QZoneStoreMixin:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or Path("data") / "qzone_automation.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -490,3 +504,7 @@ class QZoneStoreMixin(QZoneMixin):
             ).fetchone()
         return int(row["count"] if row else 0)
 
+
+
+class QZoneAutomationStore(QZoneStoreMixin):
+    """Stable SQLite interface for QZone automation state."""

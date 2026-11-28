@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import asyncio
 import threading
+import time
 import uuid
+from datetime import datetime
+from typing import Any
 
-from .support import QZoneMixin
+from .rules import (
+    DEFAULT_SETTINGS,
+    MAX_RECENT_COMMENT_FEEDS,
+    _period_window,
+    _zone,
+    content_quality_issues,
+    next_window_time,
+    schedule_times,
+    topic_for_schedule,
+    topic_prompt,
+)
+from .store import QZoneAutomationStore
 
 
-class QZoneAutomationMixin(QZoneMixin):
+class QZoneAutomationMixin:
     def __init__(self, store: QZoneAutomationStore, admin_factory: Any, post_generator: Any = None, comment_generator: Any = None, fact_context_provider: Any = None) -> None:
         self.store = store
         self.admin_factory = admin_factory
