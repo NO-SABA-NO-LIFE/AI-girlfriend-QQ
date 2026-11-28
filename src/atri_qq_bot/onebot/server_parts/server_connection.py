@@ -2,16 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import json
 import logging
 import time
-
 from pathlib import Path
+from typing import Any
 
-from .server_support import OneBotServerMixin, _sync_server_globals
-
-# 显式导入而不是依赖 _sync_server_globals 的全局注入：账号路径是安全关键路径，
-# 不应该依赖那个 __getattribute__ 钩子在运行时把名字塞进来。
-# 这几个模块本身不 import onebot，所以不会形成循环依赖。
 from ...accounts import (  # type: ignore[import-not-found]
     AccountContext,
     AccountSwitchCoordinator,
@@ -20,16 +17,38 @@ from ...accounts import (  # type: ignore[import-not-found]
     current_account,
     registry_for_config,
 )
+from ...group_reply_focus import GroupReplyFocusStore
 
 # Helldivers 情报桥接。helldivers 包只依赖 message_plan，不反向依赖 onebot，
 # 因此在这里导入不会形成循环依赖。
 from ...helldivers.bridge import HelldiversBridge
 from ...helldivers.config import HelldiversConfig
+from ...insights import InsightsRuntime
 from ...message_plan import outgoing_to_onebot_message, outgoing_to_segments
-from ...runtime.paths import DATA_DIR
+from ...music import SingingConversationController
+from ...persona import AtriReplyEngine
+from ...proactive import ProactivePlanner
+from ...runtime.paths import DATA_DIR, PROJECT_ROOT
+from ...stickers import StickerManager
+from ...toolbox import ToolAnalyzer
+from ...voice import VoiceCallStore, VoiceManager
+from .. import server as _server
+from ..message_batch import _merge_message_batch
+from ..message_parser import (
+    extract_plain_text,
+    is_group_increase_event,
+    is_poke_event,
+    normalize_group_increase_event,
+    normalize_poke_event,
+)
+from ..reply_policy import _as_int
+from .helpers import (
+    _conversation_id,
+    _message_queue_id,
+    _onebot_action_error_detail,
+    _onebot_status_is_healthy,
+)
 
-# 运行时会由 _sync_server_globals 注入 server.py 的同名 logger；这里显式声明一份，
-# 保证模块在被单独导入（例如单元测试）时也能正常记录账号/连接类告警。
 LOGGER = logging.getLogger("atri.onebot")
 
 # 自然语言 HD2 结果的复用窗口：与 bridge 侧 300 秒数据缓存对齐。
@@ -307,14 +326,13 @@ async def _hd2_internal_fact(
     )
 
 
-class OneBotConnectionMixin(OneBotServerMixin):
+class OneBotConnectionMixin:
     def __init__(
         self,
         config: Any,
         reply_engine: AtriReplyEngine,
         insights_runtime: InsightsRuntime | None = None,
     ) -> None:
-        _sync_server_globals(self)
         self.config = config
         self.reply_engine = reply_engine
         # 由生命周期入口注入旁路；单元测试和独立适配器构造不会隐式创建数据库。
@@ -326,9 +344,9 @@ class OneBotConnectionMixin(OneBotServerMixin):
         self.cognition_shadow = None
         if bool(getattr(config, "cognition_shadow_enabled", False)):
             try:
-                if CognitionShadowRunner is None:
-                    raise RuntimeError(f"认知依赖不可用：{_COGNITION_IMPORT_ERROR}")
-                self.cognition_shadow = CognitionShadowRunner.from_config(config)
+                if _server.CognitionShadowRunner is None:
+                    raise RuntimeError(f"认知依赖不可用：{_server._COGNITION_IMPORT_ERROR}")
+                self.cognition_shadow = _server.CognitionShadowRunner.from_config(config)
             except Exception as exc:
                 # 扩展架构必须可降级：认知内核不可用时仍保留原有 QQ 回复能力。
                 LOGGER.warning("认知影子内核未启用，继续使用稳定回复链路：%s", exc)
@@ -800,7 +818,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
         # get_status。连接存在不等于 QQ 已登录，健康状态还要参考 online/good 回执。
         LOGGER.info("NapCat 已连接：remote=%s", getattr(websocket, "remote_address", "unknown"))
         self._active_websockets.add(websocket)
-        publish_napcat_runtime_state("probing", detail="NapCat 已连接，正在确认 QQ 登录状态")
+        _server.publish_napcat_runtime_state("probing", detail="NapCat 已连接，正在确认 QQ 登录状态")
         health_task = asyncio.create_task(self.onebot_health_loop(websocket))
         try:
             async for raw_message in websocket:
@@ -813,7 +831,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
                 await health_task
             self._active_websockets.discard(websocket)
             if not self._active_websockets:
-                publish_napcat_runtime_state(
+                _server.publish_napcat_runtime_state(
                     "disconnected",
                     detail="NapCat 连接已断开，正在等待重连",
                 )
@@ -864,7 +882,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
                 5.0,
             )
         except Exception as exc:
-            publish_onebot_probe_result(False, detail=f"QQ 状态探测失败：{exc}")
+            _server.publish_onebot_probe_result(False, detail=f"QQ 状态探测失败：{exc}")
             LOGGER.warning("QQ 状态探测失败：%s", exc)
             return False
         healthy = _onebot_status_is_healthy(result)
@@ -881,7 +899,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
                     "账号不一致，机器人会忽略所有消息"
                 )
                 self._warn_account_mismatch(peer_uin)
-            publish_onebot_probe_result(
+            _server.publish_onebot_probe_result(
                 True,
                 detail=detail,
                 self_id=self_id,
@@ -891,7 +909,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
             await self.follow_napcat_account(peer_uin)
             return True
         detail = _onebot_action_error_detail(result, default="QQ 内核报告离线或异常")
-        publish_onebot_probe_result(
+        _server.publish_onebot_probe_result(
             False,
             detail=detail,
             self_id=self.config.bot_qq if isinstance(data, dict) else None,
@@ -951,20 +969,20 @@ class OneBotConnectionMixin(OneBotServerMixin):
             else:
                 self._onebot_probe_failures += 1
                 await self._mark_napcat_manual_login_required()
-            await asyncio.sleep(ONEBOT_HEALTH_INTERVAL_SECONDS)
+            await asyncio.sleep(_server.ONEBOT_HEALTH_INTERVAL_SECONDS)
 
     async def _mark_napcat_manual_login_required(self) -> None:
-        if self._onebot_probe_failures < ONEBOT_HEALTH_FAILURES_BEFORE_MANUAL_LOGIN_NOTICE:
+        if self._onebot_probe_failures < _server.ONEBOT_HEALTH_FAILURES_BEFORE_MANUAL_LOGIN_NOTICE:
             return
         now = time.monotonic()
         if (
             now - self._last_napcat_manual_login_notice_at
-            < NAPCAT_MANUAL_LOGIN_NOTICE_COOLDOWN_SECONDS
+            < _server.NAPCAT_MANUAL_LOGIN_NOTICE_COOLDOWN_SECONDS
         ):
             return
         self._last_napcat_manual_login_notice_at = now
         detail = "NapCat/QQ 状态连续异常，请打开 NapCat WebUI 手动扫码登录"
-        publish_napcat_runtime_state("login_required", detail=detail)
+        _server.publish_napcat_runtime_state("login_required", detail=detail)
         LOGGER.warning("%s；项目不自动重启或弹出二维码", detail)
 
     async def handle_payload(self, websocket: Any, raw_message: str) -> None:
@@ -982,7 +1000,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
 
         # OneBot 心跳是验证 QQ/NapCat 事件流仍活着的唯一低成本信号；仅有
         # WebSocket TCP 连接并不足以说明机器人还能接收 QQ 消息。
-        publish_onebot_event_activity(is_message=event.get("post_type") == "message")
+        _server.publish_onebot_event_activity(is_message=event.get("post_type") == "message")
 
         if "echo" in event and "retcode" in event:
             self._resolve_pending_action(event)
@@ -1034,7 +1052,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
         queue_id = _message_queue_id(event)
         queue = self._conversation_queues.get(queue_id)
         if queue is None:
-            queue = asyncio.Queue(maxsize=CONVERSATION_QUEUE_MAXSIZE)
+            queue = asyncio.Queue(maxsize=_server.CONVERSATION_QUEUE_MAXSIZE)
             self._conversation_queues[queue_id] = queue
 
         if queue.full():
@@ -1047,7 +1065,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
                     "会话队列已满，丢弃较旧消息：conversation=%s dropped_message=%s queue_limit=%s",
                     queue_id,
                     dropped_event.get("message_id"),
-                    CONVERSATION_QUEUE_MAXSIZE,
+                    _server.CONVERSATION_QUEUE_MAXSIZE,
                 )
         queue.put_nowait((websocket, event))
 
@@ -1079,7 +1097,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
                 try:
                     websocket, event = await asyncio.wait_for(
                         queue.get(),
-                        timeout=QUEUE_IDLE_TIMEOUT_SECONDS,
+                        timeout=_server.QUEUE_IDLE_TIMEOUT_SECONDS,
                     )
                 except asyncio.TimeoutError:
                     if queue.empty():
@@ -1087,7 +1105,7 @@ class OneBotConnectionMixin(OneBotServerMixin):
                     continue
 
                 batch = [(websocket, event)]
-                await asyncio.sleep(MESSAGE_DEBOUNCE_SECONDS)
+                await asyncio.sleep(_server.MESSAGE_DEBOUNCE_SECONDS)
                 while True:
                     try:
                         batch.append(queue.get_nowait())

@@ -863,22 +863,9 @@ def _fake_server(*, affection: float = 10.0, activity: float = 5.0):
     )
 
 
-def _sync_event_mixin_globals() -> None:
-    """复刻 server_support 的全局注入，让 mixin 方法能在无真实服务端时运行。"""
-
-    from atri_qq_bot.onebot.reply_policy import is_bot_mentioned
-    from atri_qq_bot.onebot.server_parts import server_events as events
-
-    events.is_bot_mentioned = is_bot_mentioned
-    events.evaluate_reply = evaluate_reply
-    events.load_reply_strategy = reply_strategy.load_reply_strategy
-    events.ReplyDecision = reply_strategy.ReplyDecision
-
-
 def test_gate_blocks_denied_object(monkeypatch, tmp_path) -> None:
     from atri_qq_bot.onebot.server_parts import server_events as events
 
-    _sync_event_mixin_globals()
     path = tmp_path / "reply_strategy.json"
     reply_strategy.save_reply_strategy(
         {"enabled": True, "users": {"10001": {"mode": "deny"}}}, path
@@ -902,7 +889,6 @@ def test_gate_blocks_denied_object(monkeypatch, tmp_path) -> None:
 def test_gate_allows_when_policy_disabled(monkeypatch, tmp_path) -> None:
     from atri_qq_bot.onebot.server_parts import server_events as events
 
-    _sync_event_mixin_globals()
     path = tmp_path / "reply_strategy.json"
     reply_strategy.save_reply_strategy({"enabled": False}, path)
     monkeypatch.setattr(reply_strategy, "REPLY_STRATEGY_PATH", path)
@@ -926,7 +912,6 @@ def test_length_strategy_prompt_is_no_longer_injected() -> None:
 
     from atri_qq_bot.onebot.server_parts import server_events as events
 
-    _sync_event_mixin_globals()
     fake = _fake_server()
 
     assert events.OneBotEventMixin._reply_strategy_system_prompt(fake, None) is None

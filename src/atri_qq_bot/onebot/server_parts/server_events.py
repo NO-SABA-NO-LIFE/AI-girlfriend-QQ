@@ -1,40 +1,68 @@
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import logging
 import random
 import time
+import uuid
+from dataclasses import replace
+from typing import Any
 
-from .server_support import OneBotServerMixin, _sync_server_globals
-
-# 显式导入而不是依赖 _sync_server_globals 的全局注入：注入只在**实例**属性访问时
-# 才把 server.py 的名字塞进本模块，直接以类方法调用（测试、脚本）时会 NameError。
-from .helpers import _conversation_id
-from .server_connection import _note_hd2_turn_text, _record_hd2_msg_ids
-from ..message_parser import (  # type: ignore[import-not-found]
-    extract_reply_message_id,
-    group_increase_text,
-)
-from ..reply_policy import (  # type: ignore[import-not-found]
-    _at_segment_targets,
-    _has_reply_segment,
-    _quoted_sender_is_bot,
-    poke_command_target,
-)
+from ...application import ConversationTurnRequest
 from ...group_reply_focus import (  # type: ignore[import-not-found]
     _looks_like_end_conversation,
     _strip_placeholder_text,
     relative_time_label,
 )
-from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
-    forced_event_block_reason,
-    object_requires_mention,
-)
+from ...insights import EvaluationSample, context_from_tool_context
 from ...llm_tools.hd2_intent import detect_hd2_command_hint
+from ...message_plan import OutgoingMessage, build_outgoing_messages
 from ...persona.reply_rules import _group_speaker_label
+from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
+    ReplyDecision,
+    evaluate_reply,
+    forced_event_block_reason,
+    load_reply_strategy,
+    object_requires_mention,
+    record_reply,
+)
+from ...voice import (
+    VoicePromptContext,
+    build_autonomous_voice_fallback,
+    build_explicit_voice_fallback,
+    find_record_segments,
+    load_voice_behavior,
+    sanitize_voice_request,
+    stabilize_explicit_voice_request,
+)
+from .. import server as _server
+from ..message_parser import (  # type: ignore[import-not-found]
+    extract_plain_text,
+    extract_reply_message_id,
+    group_increase_text,
+)
+from ..reply_policy import (  # type: ignore[import-not-found]
+    _as_int,
+    _at_segment_targets,
+    _has_reply_segment,
+    _quoted_sender_is_bot,
+    is_bot_mentioned,
+    poke_command_target,
+    should_reply,
+)
+from .helpers import (
+    _compose_model_input,
+    _conversation_id,
+    _event_has_visual_material,
+    _nickname,
+    _pending_visual_key,
+    _profile_id,
+    _should_reuse_cached_visual,
+)
+from .server_connection import _note_hd2_turn_text, _record_hd2_msg_ids
+from .server_delivery import cached_origin_name
 
-# 运行时会由 _sync_server_globals 注入 server.py 的同名 logger；这里显式声明一份，
-# 便于模块被单独导入（单元测试）时也能正常记录。
 LOGGER = logging.getLogger("atri.onebot")
 
 # 戳一戳动作（指令戳人或被戳回戳）已由系统完成、但配套文字生成超时时，用
@@ -62,7 +90,7 @@ _END_CONVERSATION_FALLBACK_REPLIES = (
 )
 
 
-class OneBotEventMixin(OneBotServerMixin):
+class OneBotEventMixin:
     async def _resolve_group_increase_name(
         self, websocket: Any, event: dict[str, Any]
     ) -> dict[str, Any]:
@@ -474,7 +502,7 @@ class OneBotEventMixin(OneBotServerMixin):
         # 不受模型工具调用、TTS 开关或群聊提示词影响，也不会用文字假装唱歌。
         turn_id = str(event.get("message_id") or uuid.uuid4().hex)
         singing_decision = self.singing.resolve(profile_id, plain_text)
-        if singing_decision.handled and not is_event_modality_allowed(event, "voice"):
+        if singing_decision.handled and not _server.is_event_modality_allowed(event, "voice"):
             # 点歌属于语音模型能力；未授权时回到普通文本回复，不读取或发送音频。
             LOGGER.info("语音白名单拒绝点歌：user=%s group=%s", event.get("user_id"), event.get("group_id"))
             singing_decision = replace(singing_decision, handled=False)
@@ -637,7 +665,7 @@ class OneBotEventMixin(OneBotServerMixin):
             self._recent_visual_contexts.pop(conversation_id, None)
 
         tool_context = None
-        vision_allowed = is_event_modality_allowed(event, "vision")
+        vision_allowed = _server.is_event_modality_allowed(event, "vision")
         try:
             tool_context = await self.tools.analyze(
                 analysis_event,
@@ -667,7 +695,7 @@ class OneBotEventMixin(OneBotServerMixin):
             model_input_text,
         ):
             cached = self._recent_visual_contexts.get(conversation_id)
-            if cached and time.time() - cached[0] <= VISUAL_CONTEXT_TTL_SECONDS:
+            if cached and time.time() - cached[0] <= _server.VISUAL_CONTEXT_TTL_SECONDS:
                 # 兼容旧的 2 元组缓存：缺失发送者时留空，按“非本人”处理而不猜测。
                 cached_context = cached[1]
                 # 别人发的图才标注归属；本人发的图返回空串。
@@ -750,7 +778,7 @@ class OneBotEventMixin(OneBotServerMixin):
             profile_snapshot = self.reply_engine.profile_for(profile_id)
             self.cognition_shadow.submit(
                 request,
-                evidence_from_tool_context(tool_context),
+                _server.evidence_from_tool_context(tool_context),
                 profile=profile_snapshot,
             )
 
@@ -885,7 +913,7 @@ class OneBotEventMixin(OneBotServerMixin):
                     event.get("message_type") != "group"
                     or bool(self.config.voice_group_enabled)
                 )
-                and evaluate_voice_request(
+                and _server.evaluate_voice_request(
                     conversation_id,
                     profile,
                     guarded_request.reason,
@@ -906,7 +934,7 @@ class OneBotEventMixin(OneBotServerMixin):
                         event.get("message_type") != "group"
                         or bool(self.config.voice_group_enabled)
                     )
-                    and evaluate_voice_request(
+                    and _server.evaluate_voice_request(
                         conversation_id,
                         profile,
                         autonomous_request.reason,
@@ -917,13 +945,13 @@ class OneBotEventMixin(OneBotServerMixin):
         # 点歌只允许上面的固定会话入口；模型工具和旧请求不能绕过歌单确认。
         if voice_request is not None and voice_request.mode != "speech":
             voice_request = None
-        if voice_request is not None and not is_event_modality_allowed(event, "voice"):
+        if voice_request is not None and not _server.is_event_modality_allowed(event, "voice"):
             # 保留本轮文字回复，但不进入 TTS，避免未授权用户消耗语音服务资源。
             LOGGER.info("语音白名单拒绝 TTS：user=%s group=%s", event.get("user_id"), event.get("group_id"))
             voice_request = None
         consume_call = getattr(self.reply_engine, "consume_call_request", None)
         call_request = consume_call(conversation_id) if callable(consume_call) else None
-        if call_request is not None and not is_event_modality_allowed(event, "voice"):
+        if call_request is not None and not _server.is_event_modality_allowed(event, "voice"):
             LOGGER.info("语音白名单拒绝通话邀请：user=%s group=%s", event.get("user_id"), event.get("group_id"))
             call_request = None
         # 模型在对话中因情绪自主决定要戳当前对话者，这里取出后在回复发送成功时执行。
@@ -1284,8 +1312,9 @@ class OneBotEventMixin(OneBotServerMixin):
         绝不让接话判断的故障影响主消息链路。
         """
         try:
-            from ...prompting import load_prompt
             import httpx
+
+            from ...prompting import load_prompt
 
             system_prompt = load_prompt("ambient_gate")
             new_message = str(plain_text or "")[:500]

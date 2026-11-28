@@ -1,9 +1,20 @@
 from __future__ import annotations
 
-from .server_support import OneBotServerMixin, _sync_server_globals
+import asyncio
+import contextlib
+import json
+import os
+from datetime import datetime
+from typing import Any
+
+from ...insights import EvaluationSample, context_from_tool_context
+from ...message_plan import OutgoingMessage, outgoing_to_onebot_message
+from ...proactive import load_proactive_policy, safe_zoneinfo
+from .. import server as _server
+from .helpers import _now_text, _personal_event_message
 
 
-class OneBotProactiveMixin(OneBotServerMixin):
+class OneBotProactiveMixin:
     async def idle_nudge_loop(self) -> None:
         while True:
             await asyncio.sleep(max(10, int(self.config.idle_check_seconds)))
@@ -22,7 +33,7 @@ class OneBotProactiveMixin(OneBotServerMixin):
                     continue
                 text = self.reply_engine.idle_nudge_text(conversation_id)
                 try:
-                    await asyncio.sleep(_first_reply_delay(self.config, text))
+                    await asyncio.sleep(_server._first_reply_delay(self.config, text))
                     await self.call_action(
                         websocket,
                         "send_private_msg",
@@ -57,7 +68,7 @@ class OneBotProactiveMixin(OneBotServerMixin):
                     continue
                 text = self.reply_engine.morning_greeting_text()
                 try:
-                    await asyncio.sleep(_first_reply_delay(self.config, text))
+                    await asyncio.sleep(_server._first_reply_delay(self.config, text))
                     await self.call_action(
                         websocket,
                         "send_private_msg",
@@ -91,7 +102,7 @@ class OneBotProactiveMixin(OneBotServerMixin):
             for conversation_id, target, personal_event in due_events:
                 try:
                     text = _personal_event_message(personal_event)
-                    await asyncio.sleep(_first_reply_delay(self.config, text))
+                    await asyncio.sleep(_server._first_reply_delay(self.config, text))
                     await self.call_action(
                         websocket,
                         "send_private_msg",
@@ -132,7 +143,7 @@ class OneBotProactiveMixin(OneBotServerMixin):
                     "user_id": user_id,
                     "group_id": group_id,
                 }
-                if voice_request is not None and not is_event_modality_allowed(
+                if voice_request is not None and not _server.is_event_modality_allowed(
                     permission_event,
                     "voice",
                 ):
@@ -163,14 +174,14 @@ class OneBotProactiveMixin(OneBotServerMixin):
                             print(f"[onebot] Proactive voice fell back to text: {exc}")
                             message = voice_request.text
                     if message_type == "group":
-                        await asyncio.sleep(_first_reply_delay(self.config, sent_text))
+                        await asyncio.sleep(_server._first_reply_delay(self.config, sent_text))
                         await self.call_action(
                             websocket,
                             "send_group_msg",
                             {"group_id": group_id, "message": message},
                         )
                     else:
-                        await asyncio.sleep(_first_reply_delay(self.config, sent_text))
+                        await asyncio.sleep(_server._first_reply_delay(self.config, sent_text))
                         await self.call_action(
                             websocket,
                             "send_private_msg",
@@ -349,7 +360,7 @@ class OneBotProactiveMixin(OneBotServerMixin):
     ) -> None:
         """把失败写入诊断与评测旁路，不生成或发送任何 QQ 消息。"""
         safe_reason = str(reason or "未知回复错误").strip()[:800]
-        LOGGER.error(
+        _server.LOGGER.error(
             "回复失败，已保持用户侧静默：conversation=%s error=%s",
             conversation_id,
             safe_reason,

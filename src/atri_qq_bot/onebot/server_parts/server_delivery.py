@@ -1,14 +1,45 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import copy
+import json
 import logging
 import time
+import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from .server_support import OneBotServerMixin, _sync_server_globals
-from ..reply_policy import normalize_dedup_key
-from ...message_plan import outgoing_to_segments  # type: ignore[import-not-found]
+from ...message_plan import (
+    OutgoingMessage,
+    outgoing_to_onebot_message,
+    outgoing_to_segments,  # type: ignore[import-not-found]
+)
+from ...music import SingingDecision
+from ...voice import VoiceRequest, split_spoken_text
+from .. import server as _server
+from ..message_batch import _message_to_segments
+from ..message_parser import (
+    extract_plain_text,
+    extract_reply_inline_message,
+    extract_reply_message_id,
+)
+from ..reply_policy import is_bot_mentioned, normalize_dedup_key
+from .helpers import (
+    _conversation_id,
+    _event_has_visual_material,
+    _merge_pending_visual_event,
+    _message_queue_id,
+    _nickname,
+    _onebot_action_error_detail,
+    _pending_visual_key,
+    _require_onebot_action_success,
+    _send_delay,
+    _typing_delay,
+    _voice_remaining_text,
+)
 
 LOGGER = logging.getLogger("atri.onebot")
 
@@ -178,7 +209,7 @@ def _outgoing_delay_text(
     return "".join(str(getattr(message, "content", "") or "") for message in messages)
 
 
-class OneBotDeliveryMixin(OneBotServerMixin):
+class OneBotDeliveryMixin:
     async def send_group_summary(self, group_id: str, image_path: str) -> None:
         """将总结 PNG 作为 QQ 图片消息发送到对应群聊。"""
         websocket = self._first_active_websocket()
@@ -430,14 +461,14 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         """回戳动作的会话级短冷却：正常连续戳都能回戳，只防秒级狂戳刷屏。"""
 
         return self._poke_cooldown_passed(
-            event, "_last_poke_back_at", POKE_BACK_COOLDOWN_SECONDS
+            event, "_last_poke_back_at", _server.POKE_BACK_COOLDOWN_SECONDS
         )
 
     def _allow_poke_text(self, event: dict[str, Any]) -> bool:
         """文字回复的会话级长冷却：避免连续戳产生大段文字刷屏。"""
 
         return self._poke_cooldown_passed(
-            event, "_last_poke_text_at", POKE_TEXT_COOLDOWN_SECONDS
+            event, "_last_poke_text_at", _server.POKE_TEXT_COOLDOWN_SECONDS
         )
 
     def _poke_cooldown_passed(
@@ -568,7 +599,7 @@ class OneBotDeliveryMixin(OneBotServerMixin):
         pending = self._pending_group_visual_events.pop(key, None)
         if (
             not pending
-            or time.time() - pending[0] > PENDING_GROUP_VISUAL_TTL_SECONDS
+            or time.time() - pending[0] > _server.PENDING_GROUP_VISUAL_TTL_SECONDS
         ):
             return event
         return _merge_pending_visual_event(pending[1], event)
@@ -729,7 +760,7 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             # 真人不会在消息到达的同一瞬间发出回复：先停顿"看到消息 + 起手打字"。
             # 语音分段逐段调用本方法，由调用方用 first_delay=False 关掉重复停顿。
             await asyncio.sleep(
-                _first_reply_delay(
+                _server._first_reply_delay(
                     self.config, _outgoing_delay_text(outgoing, fallback_text)
                 )
             )
@@ -849,7 +880,7 @@ class OneBotDeliveryMixin(OneBotServerMixin):
 
         now = datetime.now().timestamp()
         last_at = float(self._last_smart_group_reply_at.get(conversation_id, 0.0))
-        return now - last_at >= SMART_GROUP_REPLY_COOLDOWN_SECONDS
+        return now - last_at >= _server.SMART_GROUP_REPLY_COOLDOWN_SECONDS
 
     def _mark_smart_group_reply(
         self,
@@ -1081,11 +1112,11 @@ class OneBotDeliveryMixin(OneBotServerMixin):
             _require_onebot_action_success(result)
         except RuntimeError:
             detail = _onebot_action_error_detail(result, default="QQ 消息发送失败")
-            publish_onebot_probe_result(False, detail=detail, self_id=self.config.bot_qq)
+            _server.publish_onebot_probe_result(False, detail=detail, self_id=self.config.bot_qq)
             self._onebot_probe_failures += 1
             raise
         self._onebot_probe_failures = 0
-        publish_onebot_probe_result(
+        _server.publish_onebot_probe_result(
             True,
             detail="QQ 消息发送成功",
             self_id=self.config.bot_qq,
