@@ -39,6 +39,23 @@ def test_onebot_status_probe_requires_real_online_and_good_flags() -> None:
     assert not _onebot_status_is_healthy(
         {"status": "ok", "retcode": 0, "data": {"online": False, "good": True}}
     )
+
+
+def test_send_action_respects_turn_deadline() -> None:
+    server = object.__new__(OneBotServer)
+
+    async def slow_action(websocket, action, params, timeout_seconds):
+        await asyncio.sleep(0.5)
+        return {"status": "ok"}
+
+    server.call_action_and_wait = slow_action  # type: ignore[method-assign]
+
+    async def run() -> None:
+        deadline = asyncio.get_running_loop().time() + 0.02
+        with pytest.raises(TimeoutError):
+            await server._send_action(object(), "send_private_msg", {}, deadline)
+
+    asyncio.run(run())
     assert not _onebot_status_is_healthy(
         {"status": "ok", "retcode": 0, "data": {"online": True, "good": False}}
     )

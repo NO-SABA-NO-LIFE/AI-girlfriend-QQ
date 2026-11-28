@@ -1216,6 +1216,7 @@ class OneBotEventMixin:
                 event,
                 conversation_id,
                 voice_request,
+                delivery_deadline=budget.delivery_deadline if budget is not None else None,
             )
             outgoing = []
             voice_streamed = True

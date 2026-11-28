@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from atri_qq_bot.onebot.server import OneBotServer, cached_origin_name
@@ -235,3 +236,35 @@ def test_cached_visual_context_stores_and_marks_origin() -> None:
     assert origin == "栞栞"
     reused = dataclasses.replace(original, sender_origin_name=origin)
     assert "图片归属" in reused.prompt_context() and "栞栞" in reused.prompt_context()
+
+
+def test_successful_reply_consumes_pending_visual() -> None:
+    """图片本轮已经收到回复后，不能在下一条普通文本里再次被复用。"""
+    server = _server()
+    server.insights = None
+    image = _image_event(SHIORI_ID, "栞栞", "first.png")
+    server._remember_pending_group_visual(image)
+
+    async def send_one(websocket, event, message, **kwargs):
+        return "ok"
+
+    server._send_one_reply = send_one  # type: ignore[method-assign]
+
+    delivered = asyncio.run(
+        server.send_reply(
+            object(),
+            image,
+            "收到这张图了。",
+            first_delay=False,
+        )
+    )
+
+    assert delivered == "收到这张图了。"
+    assert not server._pending_group_visual_events
+
+    mention = {
+        **_poke_event(SHIORI_ID, "栞栞"),
+        "message": [{"type": "text", "data": {"text": "再说一句"}}],
+    }
+    merged = server._event_with_pending_group_visual(mention)
+    assert not _collect_request(merged, "").image_refs

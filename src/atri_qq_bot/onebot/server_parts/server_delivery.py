@@ -478,6 +478,18 @@ class OneBotDeliveryMixin:
         store[key] = now
         return True
 
+    def _mark_pending_group_visual_consumed(self, event: dict[str, Any]) -> None:
+        """一轮图片已经被实际回复消费后，清掉该用户待复用的旧图。
+
+        这个清单位是“图先到、文字后到”时的补偿路径；如果图片本身已经
+        触发并完成了一次回复，再把它留给下一条普通文本会造成重复识图或
+        归属错配。
+        """
+        key = _pending_visual_key(event)
+        pending = getattr(self, "_pending_group_visual_events", None)
+        if key and pending is not None:
+            pending.pop(key, None)
+
     def _remember_pending_group_visual(self, event: dict[str, Any]) -> None:
         key = _pending_visual_key(event)
         if not key or not _event_has_visual_material(event):
@@ -724,6 +736,8 @@ class OneBotDeliveryMixin:
         event: dict[str, Any],
         conversation_id: str,
         request: Any,
+        *,
+        delivery_deadline: float | None = None,
     ) -> str:
         segments = split_spoken_text(
             request.text,
@@ -743,6 +757,7 @@ class OneBotDeliveryMixin:
                     conversation_id,
                     segment_request,
                     enforce_cooldown=index == 0,
+                    delivery_deadline=delivery_deadline,
                 )
                 self._log_voice_event(
                     event,
@@ -759,6 +774,7 @@ class OneBotDeliveryMixin:
                     model_type="voice",
                     model_name=self._delivery_model_name("voice"),
                     first_delay=index == 0,
+                    delivery_deadline=delivery_deadline,
                 )
                 if not delivered:
                     # 音频文件已经生成，但 NapCat 可能拒绝了 record 上传。
@@ -775,6 +791,7 @@ class OneBotDeliveryMixin:
                         [OutgoingMessage("text", remaining_text)],
                         model_type="voice",
                         model_name=self._delivery_model_name("voice"),
+                        delivery_deadline=delivery_deadline,
                     )
                     if text_delivered:
                         return "".join(delivered_segments) + text_delivered
@@ -808,12 +825,20 @@ class OneBotDeliveryMixin:
                     [OutgoingMessage("text", remaining_text)],
                     model_type="voice",
                     model_name=self._delivery_model_name("voice"),
+                    delivery_deadline=delivery_deadline,
                 )
                 if text_delivered:
                     return "".join(delivered_segments) + text_delivered
                 return ""
             if index < len(segments) - 1:
-                await asyncio.sleep(_send_delay(self.config))
+                delay = _send_delay(self.config)
+                if delivery_deadline is not None:
+                    remaining = delivery_deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        break
+                    delay = min(delay, remaining)
+                if delay > 0:
+                    await asyncio.sleep(delay)
         return str(request.text or "").strip()
 
     async def _synthesize_voice_segment(
@@ -822,16 +847,26 @@ class OneBotDeliveryMixin:
         request: VoiceRequest,
         *,
         enforce_cooldown: bool,
+        delivery_deadline: float | None = None,
     ) -> Any:
         """One guarded seam for all conversational TTS segments."""
 
-        if enforce_cooldown:
-            return await self.voice.synthesize(conversation_id, request)
-        return await self.voice.synthesize(
+        async def synthesize() -> Any:
+            if enforce_cooldown:
+                return await self.voice.synthesize(conversation_id, request)
+            return await self.voice.synthesize(
                 conversation_id,
                 request,
                 enforce_cooldown=False,
             )
+
+        if delivery_deadline is None:
+            return await synthesize()
+        remaining = delivery_deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("语音合成已超过本轮截止时间")
+        async with asyncio.timeout_at(delivery_deadline):
+            return await synthesize()
 
     def _delivery_model_name(self, model_type: str) -> str:
         if model_type == "vision":
@@ -871,6 +906,7 @@ class OneBotDeliveryMixin:
         if normalized_model_type not in {"chat", "vision", "voice"}:
             normalized_model_type = "voice" if any(item.kind == "record" for item in outgoing) else "chat"
         delivered_parts: list[str] = []
+        sent_any = False
 
         async def pause(delay: float, pauses_left: int) -> None:
             if delivery_deadline is not None:
@@ -895,18 +931,26 @@ class OneBotDeliveryMixin:
             and len(outgoing) > 1
             and any(item.kind == "image" for item in outgoing)
         ):
-            return await self._send_merged_reply(
+            delivered = await self._send_merged_reply(
                 websocket,
                 event,
                 outgoing,
                 group_quote=group_quote,
                 collect_ids=collect_ids,
+                delivery_deadline=delivery_deadline,
             )
+            self._mark_pending_group_visual_consumed(event)
+            return delivered
         for index, message in enumerate(outgoing):
             try:
                 # 引用+@只加在第一个气泡，后续气泡不带前缀，避免重复刷屏。
+                send_kwargs: dict[str, Any] = {}
+                if not (group_quote and index == 0):
+                    send_kwargs["group_quote"] = False
+                if delivery_deadline is not None:
+                    send_kwargs["delivery_deadline"] = delivery_deadline
                 message_id = await self._send_one_reply(
-                    websocket, event, message, group_quote=group_quote and index == 0
+                    websocket, event, message, **send_kwargs
                 )
                 if (
                     collect_ids is not None
@@ -915,6 +959,17 @@ class OneBotDeliveryMixin:
                 ):
                     collect_ids.append(message_id)
                 self._record_delivery_event(event, message=message, model_type=normalized_model_type, model_name=model_name, status="success")
+                sent_any = True
+            except TimeoutError:
+                self._record_delivery_event(event, message=message, model_type=normalized_model_type, model_name=model_name, status="failed", error="delivery_deadline")
+                LOGGER.warning(
+                    "OneBot 发送超过本轮截止时间：message_type=%s user=%s group=%s kind=%s",
+                    event.get("message_type"),
+                    event.get("user_id"),
+                    event.get("group_id"),
+                    message.kind,
+                )
+                return ""
             except Exception as exc:
                 self._record_delivery_event(event, message=message, model_type=normalized_model_type, model_name=model_name, status="failed", error=str(exc))
                 LOGGER.error(
@@ -931,8 +986,13 @@ class OneBotDeliveryMixin:
                     # 回复失败。这里不递归调用 send_reply，防止二次异常扩大。
                     text_fallback = OutgoingMessage("text", str(fallback_text).strip())
                     try:
+                        fallback_kwargs: dict[str, Any] = {}
+                        if not group_quote:
+                            fallback_kwargs["group_quote"] = False
+                        if delivery_deadline is not None:
+                            fallback_kwargs["delivery_deadline"] = delivery_deadline
                         await self._send_one_reply(
-                            websocket, event, text_fallback, group_quote=group_quote
+                            websocket, event, text_fallback, **fallback_kwargs
                         )
                         self._record_delivery_event(event, message=text_fallback, model_type=normalized_model_type, model_name=model_name, status="success")
                     except Exception as fallback_exc:
@@ -945,6 +1005,7 @@ class OneBotDeliveryMixin:
                         )
                         await self._mark_napcat_manual_login_required()
                         return ""
+                    self._mark_pending_group_visual_consumed(event)
                     return str(fallback_text).strip()
                 await self._mark_napcat_manual_login_required()
                 return ""
@@ -960,6 +1021,8 @@ class OneBotDeliveryMixin:
                     _typing_delay(self.config, _outgoing_delay_text([message], fallback_text)),
                     len(outgoing) - index - 1,
                 )
+        if sent_any:
+            self._mark_pending_group_visual_consumed(event)
         return "\n".join(part for part in delivered_parts if part).strip()
 
     def _record_delivery_event(
@@ -1123,6 +1186,35 @@ class OneBotDeliveryMixin:
             segments = onebot_message
         return self._group_reply_prefix_segments(event) + segments
 
+    async def _send_action(
+        self,
+        websocket: Any,
+        action: str,
+        params: dict[str, Any],
+        delivery_deadline: float | None,
+        timeout_seconds: float = 12.0,
+    ) -> dict[str, Any]:
+        """在整轮发送截止时间前完成一次 OneBot 发送动作。
+
+        OneBot 的 ``call_action_and_wait`` 内部会把超时下限压到 1 秒，单靠
+        ``timeout_seconds`` 无法表达“只剩 200 毫秒”的硬截止；这里在外层再套
+        一层 ``asyncio.timeout_at``，保证发送 RPC 不会突破本轮 deadline。
+        """
+        if delivery_deadline is None:
+            return await self.call_action_and_wait(
+                websocket, action, params, timeout_seconds
+            )
+        remaining = delivery_deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("回复发送已超过本轮截止时间")
+        async with asyncio.timeout_at(delivery_deadline):
+            return await self.call_action_and_wait(
+                websocket,
+                action,
+                params,
+                min(float(timeout_seconds), remaining),
+            )
+
     async def _send_one_reply(
         self,
         websocket: Any,
@@ -1130,17 +1222,18 @@ class OneBotDeliveryMixin:
         message: OutgoingMessage,
         *,
         group_quote: bool = True,
+        delivery_deadline: float | None = None,
     ) -> str:
         """发出一条消息，成功时返回 OneBot 的 message_id（取不到返回空串）。"""
         message_type = event.get("message_type")
         onebot_message = outgoing_to_onebot_message(message)
         if message.kind == "record":
             if message_type == "private":
-                result = await self.call_action_and_wait(
+                result = await self._send_action(
                     websocket,
                     "send_private_msg",
                     {"user_id": event["user_id"], "message": onebot_message},
-                    12.0,
+                    delivery_deadline,
                 )
                 try:
                     self._require_message_delivery(result)
@@ -1153,11 +1246,11 @@ class OneBotDeliveryMixin:
                 group_message = self._with_group_reply_prefix(
                     event, onebot_message, group_quote=group_quote
                 )
-                result = await self.call_action_and_wait(
+                result = await self._send_action(
                     websocket,
                     "send_group_msg",
                     {"group_id": event["group_id"], "message": group_message},
-                    12.0,
+                    delivery_deadline,
                 )
                 try:
                     self._require_message_delivery(result)
@@ -1167,11 +1260,11 @@ class OneBotDeliveryMixin:
                 self._log_voice_event(event, "delivered", message=message, result=result)
                 return _message_id_from_result(result)
         if message_type == "private":
-            result = await self.call_action_and_wait(
+            result = await self._send_action(
                 websocket,
                 "send_private_msg",
                 {"user_id": event["user_id"], "message": onebot_message},
-                12.0,
+                delivery_deadline,
             )
             self._require_message_delivery(result)
             return _message_id_from_result(result)
@@ -1180,11 +1273,11 @@ class OneBotDeliveryMixin:
             group_message = self._with_group_reply_prefix(
                 event, onebot_message, group_quote=group_quote
             )
-            result = await self.call_action_and_wait(
+            result = await self._send_action(
                 websocket,
                 "send_group_msg",
                 {"group_id": event["group_id"], "message": group_message},
-                12.0,
+                delivery_deadline,
             )
             self._require_message_delivery(result)
             return _message_id_from_result(result)
@@ -1198,6 +1291,7 @@ class OneBotDeliveryMixin:
         *,
         group_quote: bool = True,
         collect_ids: list[str] | None = None,
+        delivery_deadline: float | None = None,
     ) -> str:
         """把多条 OutgoingMessage 的消息段 flatten 成一条 QQ 消息整体发送。"""
         segments: list[dict[str, Any]] = []
@@ -1209,18 +1303,18 @@ class OneBotDeliveryMixin:
             merged_segments = self._with_group_reply_prefix(
                 event, segments, group_quote=group_quote
             )
-            result = await self.call_action_and_wait(
+            result = await self._send_action(
                 websocket,
                 "send_group_msg",
                 {"group_id": event["group_id"], "message": merged_segments},
-                12.0,
+                delivery_deadline,
             )
         else:
-            result = await self.call_action_and_wait(
+            result = await self._send_action(
                 websocket,
                 "send_private_msg",
                 {"user_id": event["user_id"], "message": segments},
-                12.0,
+                delivery_deadline,
             )
         self._require_message_delivery(result)
         if collect_ids is not None and any(item.kind == "image" for item in outgoing):
