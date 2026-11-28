@@ -1,10 +1,19 @@
 from __future__ import annotations
 
-from .handler_support import WebUIHandlerMixin, _sync_webui_globals
+from http import HTTPStatus
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from atri_qq_bot.runtime.control import restart_background_services
+from atri_webui import server as _server
+
+from ..call_page import render_voice_call
+from ..model_profiles import MODEL_PRESETS, local_models_payload, model_profiles_payload
+from ..sticker_admin import sticker_summary
 from .handler_account import view_memory_admin_for
 
 
-class HandlerCoreMixin(WebUIHandlerMixin):
+class HandlerCoreMixin:
     def log_message(self, format: str, *args: Any) -> None:
         return
 
@@ -13,7 +22,7 @@ class HandlerCoreMixin(WebUIHandlerMixin):
         if parsed.path == "/knowledge" or parsed.path.startswith("/api/knowledge/"):
             return self._handle_knowledge_get(parsed.path, parsed.query)
         if parsed.path == "/":
-            return self._send_html(_render_index_dynamic())
+            return self._send_html(_server._render_index_dynamic())
         if parsed.path == "/voice-call":
             token = parse_qs(parsed.query).get("token", [""])[0]
             session = self.webui_state.server.voice_calls.get(token)
@@ -50,7 +59,7 @@ class HandlerCoreMixin(WebUIHandlerMixin):
         if parsed.path == "/api/config":
             # 读路径跟随「查看账号」：看别的账号时展示它的有效配置。
             # 写入仍然是全局 .env（运行账号的配置），见 _handle_config_update。
-            return self._send_json(config_payload(self.webui_state.view_config()))
+            return self._send_json(_server.config_payload(self.webui_state.view_config()))
         if parsed.path == "/api/account/current":
             return self._handle_account_current()
         if parsed.path == "/api/account/napcat":
@@ -76,7 +85,7 @@ class HandlerCoreMixin(WebUIHandlerMixin):
         if parsed.path == "/api/voice/service":
             return self._handle_voice_service_status()
         if parsed.path == "/api/voice/behavior":
-            return self._send_json({"ok": True, "behavior": load_voice_behavior()})
+            return self._send_json({"ok": True, "behavior": _server.load_voice_behavior()})
         # 歌曲合成工作流已迁出到独立的 AI_music 项目；这里只保留入口探活。
         if parsed.path == "/api/music/entry-status":
             return self._handle_music_workbench_status()

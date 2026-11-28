@@ -1,9 +1,25 @@
 from __future__ import annotations
 
-from .handler_support import WebUIHandlerMixin, _sync_webui_globals
+import shutil
+from http import HTTPStatus
+from pathlib import Path
+
+from atri_qq_bot.runtime import STICKER_DELETED_DIR, STICKER_ROOT
+from atri_webui import server as _server
+
+from ..sticker_admin import (
+    IMAGE_EXTENSIONS,
+    looks_like_image_bytes,
+    resolve_under,
+    safe_filename,
+    sanitize_category,
+    sticker_file_payload,
+    unique_path,
+)
+from ..upload_parser import multipart_file, multipart_text, parse_multipart_form
 
 
-class HandlerStickersMemoryMixin(WebUIHandlerMixin):
+class HandlerStickersMemoryMixin:
     def _handle_sticker_category(self) -> None:
         payload = self._read_json()
         name = sanitize_category(str((payload or {}).get("name") or ""))
@@ -17,7 +33,7 @@ class HandlerStickersMemoryMixin(WebUIHandlerMixin):
         content_length = int(self.headers.get("Content-Length") or 0)
         if content_length <= 0:
             return self._send_error(HTTPStatus.BAD_REQUEST, "empty upload")
-        if content_length > MAX_UPLOAD_BYTES + 200_000:
+        if content_length > _server.MAX_UPLOAD_BYTES + 200_000:
             return self._send_error(HTTPStatus.BAD_REQUEST, "文件太大，单个表情包最多 8MB")
 
         try:
@@ -40,7 +56,7 @@ class HandlerStickersMemoryMixin(WebUIHandlerMixin):
         if suffix not in IMAGE_EXTENSIONS:
             return self._send_error(HTTPStatus.BAD_REQUEST, "只支持 jpg/png/gif/webp")
         data = file_item.data
-        if len(data) > MAX_UPLOAD_BYTES:
+        if len(data) > _server.MAX_UPLOAD_BYTES:
             return self._send_error(HTTPStatus.BAD_REQUEST, "文件太大，单个表情包最多 8MB")
         if not looks_like_image_bytes(data, suffix):
             return self._send_error(HTTPStatus.BAD_REQUEST, "文件内容不像有效图片")

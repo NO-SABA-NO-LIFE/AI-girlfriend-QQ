@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import json
+import mimetypes
+from datetime import datetime
 from http import HTTPStatus
+from typing import Any
+from urllib.parse import parse_qs
 
-from .handler_support import WebUIHandlerMixin, _sync_webui_globals
+from atri_qq_bot.runtime import LOG_DIR, STICKER_ROOT, read_project_logs
+from atri_qq_bot.runtime.control import runtime_status
+
+from ..sticker_admin import IMAGE_EXTENSIONS, resolve_under
+from ..voice_admin import resolve_voice_audio
 
 
-class HandlerResponseMixin(WebUIHandlerMixin):
+class HandlerResponseMixin:
     def _status(self) -> dict[str, Any]:
         return runtime_status(self.webui_state.config)
 

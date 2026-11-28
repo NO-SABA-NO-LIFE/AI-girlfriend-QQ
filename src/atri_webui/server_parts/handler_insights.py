@@ -1,14 +1,28 @@
 from __future__ import annotations
 
 import contextlib
-from urllib.parse import quote
+import json
+import time
+from datetime import datetime, timedelta
+from http import HTTPStatus
+from typing import Any
+from urllib.parse import parse_qs, quote
 
+from atri_qq_bot.insights import (
+    group_summary_html,
+    group_summary_image_path,
+    render_group_summary_image,
+    save_insights_env,
+    summary_markdown,
+)
 from atri_qq_bot.insights.config import EDITABLE_ENV_FIELDS
+from atri_qq_bot.insights.evaluation import EvaluationSample
+from atri_webui import server as _server
 
-from .handler_support import WebUIHandlerMixin, _sync_webui_globals
+from ..config_admin import CONFIG_UPDATE_LOCK, merge_env, snapshot_process_env
 
 
-class HandlerInsightsMixin(WebUIHandlerMixin):
+class HandlerInsightsMixin:
     def _insights_runtime(self) -> Any:
         """**运行账号**的评测运行时。写操作一律走它。"""
         runtime = getattr(self.webui_state.server, "insights", None)
@@ -193,7 +207,7 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
             )
             if raw_period_type in {"daily", "weekly", "monthly"}:
                 # 新接口按当前时刻和周期生成，周期边界由后端统一计算。
-                summary_id = run_coro(
+                summary_id = _server.run_coro(
                     self._insights_runtime().summaries.submit(
                         group_id, trigger_type=trigger_type, period_type=raw_period_type,
                         anchor=period_date or None,
@@ -205,7 +219,7 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
                 period_end = datetime.fromisoformat(str((payload or {}).get("period_end") or ""))
                 if period_start.tzinfo is None or period_end.tzinfo is None:
                     raise ValueError("时间必须包含时区")
-                summary_id = run_coro(
+                summary_id = _server.run_coro(
                     self._insights_runtime().summaries.submit(
                         group_id, period_start.isoformat(), period_end.isoformat(), "manual"
                     )
@@ -270,7 +284,7 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
         with CONFIG_UPDATE_LOCK:
             try:
                 self._insights_runtime()
-                previous_bytes = ENV_PATH.read_bytes() if ENV_PATH.exists() else None
+                previous_bytes = _server.ENV_PATH.read_bytes() if _server.ENV_PATH.exists() else None
                 env_snapshot = snapshot_process_env(merge_env({}).keys() | EDITABLE_ENV_FIELDS)
                 save_insights_env(payload)
             except Exception as exc:
@@ -284,7 +298,7 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
     def _handle_insights_check(self) -> None:
         """WebUI 中的连通性检查；只访问 /models，不发送评测内容。"""
         try:
-            run_coro(self._insights_runtime().check_judge_connection())
+            _server.run_coro(self._insights_runtime().check_judge_connection())
         except Exception as exc:
             return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
         self._send_json({"ok": True, "message": "评测模型接口认证成功"})
@@ -312,7 +326,7 @@ class HandlerInsightsMixin(WebUIHandlerMixin):
                 model_type=str(payload.get("model_type") or "chat").strip() if str(payload.get("model_type") or "chat").strip() in {"chat", "vision", "voice"} else "chat",
                 model_name=str(payload.get("model_name") or "").strip()[:160],
             )
-            evaluation_id = run_coro(self._insights_runtime().evaluations.enqueue(sample))
+            evaluation_id = _server.run_coro(self._insights_runtime().evaluations.enqueue(sample))
         except Exception as exc:
             return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
         self._send_json({"ok": True, "id": evaluation_id, "status": "queued", "source": "model"}, status=HTTPStatus.CREATED)

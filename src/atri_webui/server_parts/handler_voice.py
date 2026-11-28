@@ -1,9 +1,32 @@
 from __future__ import annotations
 
-from .handler_support import WebUIHandlerMixin, _sync_webui_globals
+import contextlib
+import time
+from http import HTTPStatus
+from pathlib import Path
+from urllib.parse import quote
+
+from atri_qq_bot.voice import VoicePromptContext, VoiceRequest, save_voice_behavior
+from atri_webui import server as _server
+
+from ..config_admin import CONFIG_UPDATE_LOCK, update_env
+from ..service_control import (
+    start_voice_service,
+    stop_voice_service,
+    voice_service_status,
+)
+from ..upload_parser import multipart_file, multipart_text, parse_multipart_form
+from ..voice_admin import (
+    save_asr_lexicon_text,
+    save_reference_audio,
+    save_test_audio,
+    save_tts_pronunciation_text,
+    save_voice_profile,
+)
+from .voice_integrations import _voice_preview_synthesis_options_for_mode
 
 
-class HandlerVoiceMixin(WebUIHandlerMixin):
+class HandlerVoiceMixin:
     def _handle_voice_service_status(self) -> None:
         """只读状态：atri_voice_service 是否在跑、模型是否已预热。"""
 
@@ -42,7 +65,7 @@ class HandlerVoiceMixin(WebUIHandlerMixin):
                 # 与其他配置写事务共用同一把锁，避免与模型切换/配置保存交错。
                 with CONFIG_UPDATE_LOCK:
                     update_env(config_changes)
-                    config = run_coro(
+                    config = _server.run_coro(
                         self.webui_state.reload_config(), wait_for_cleanup=True
                     )
             else:
@@ -67,14 +90,14 @@ class HandlerVoiceMixin(WebUIHandlerMixin):
         self._send_json(
             {
                 "ok": True,
-                "config": config_payload(config),
+                "config": _server.config_payload(config),
                 "profile": profile.public_dict() if profile else None,
             }
         )
 
     def _handle_voice_call_turn(self) -> None:
         content_length = int(self.headers.get("Content-Length") or 0)
-        if content_length <= 0 or content_length > MAX_VOICE_UPLOAD_BYTES + 200_000:
+        if content_length <= 0 or content_length > _server.MAX_VOICE_UPLOAD_BYTES + 200_000:
             return self._send_error(HTTPStatus.BAD_REQUEST, "通话音频最大 30MB")
         audio_path: Path | None = None
         try:
@@ -94,10 +117,10 @@ class HandlerVoiceMixin(WebUIHandlerMixin):
                 language = "auto"
             audio_path = save_test_audio(str(file_item.filename), file_item.data)
             started_at = time.perf_counter()
-            transcript = run_coro(
+            transcript = _server.run_coro(
                 self.webui_state.server.voice.client.transcribe(audio_path, language)
             )
-            reply = run_coro(
+            reply = _server.run_coro(
                 self.webui_state.server.reply_engine.reply(
                     session.conversation_id,
                     transcript.text,
@@ -131,7 +154,7 @@ class HandlerVoiceMixin(WebUIHandlerMixin):
                 language=voice_request.language if voice_request else "auto",
                 reason="voice_reply",
             )
-            synthesis = run_coro(
+            synthesis = _server.run_coro(
                 self.webui_state.server.voice.synthesize(
                     session.conversation_id,
                     synthesis_request,
@@ -169,7 +192,7 @@ class HandlerVoiceMixin(WebUIHandlerMixin):
         self._send_json({"ok": True})
 
     def _handle_voice_call_test_invite(self) -> None:
-        policy = load_voice_behavior()
+        policy = _server.load_voice_behavior()
         if not policy["calls_enabled"]:
             return self._send_error(HTTPStatus.BAD_REQUEST, "请先启用并保存浏览器通话")
         if not bool(self.webui_state.config.voice_tts_enabled):
@@ -190,7 +213,7 @@ class HandlerVoiceMixin(WebUIHandlerMixin):
 
     def _handle_voice_reference(self) -> None:
         content_length = int(self.headers.get("Content-Length") or 0)
-        if content_length <= 0 or content_length > MAX_VOICE_UPLOAD_BYTES + 200_000:
+        if content_length <= 0 or content_length > _server.MAX_VOICE_UPLOAD_BYTES + 200_000:
             return self._send_error(HTTPStatus.BAD_REQUEST, "参考音频最大 30MB")
         try:
             form = parse_multipart_form(
@@ -201,7 +224,7 @@ class HandlerVoiceMixin(WebUIHandlerMixin):
             file_item = multipart_file(form, "file")
             if file_item is None or not file_item.filename:
                 raise ValueError("请选择参考音频")
-            if len(file_item.data) > MAX_VOICE_UPLOAD_BYTES:
+            if len(file_item.data) > _server.MAX_VOICE_UPLOAD_BYTES:
                 raise ValueError("参考音频最大 30MB")
             profile = save_reference_audio(
                 profile_id,
@@ -220,9 +243,9 @@ class HandlerVoiceMixin(WebUIHandlerMixin):
                 max_chars=int(self.webui_state.config.voice_max_chars),
             )
             profile_id = str((payload or {}).get("profile") or "atri")
-            behavior = load_voice_behavior()
+            behavior = _server.load_voice_behavior()
             started_at = time.perf_counter()
-            result = run_coro(
+            result = _server.run_coro(
                 self.webui_state.server.voice.client.synthesize(
                     request,
                     profile_id,
@@ -248,7 +271,7 @@ class HandlerVoiceMixin(WebUIHandlerMixin):
 
     def _handle_voice_test_asr(self) -> None:
         content_length = int(self.headers.get("Content-Length") or 0)
-        if content_length <= 0 or content_length > MAX_VOICE_UPLOAD_BYTES + 200_000:
+        if content_length <= 0 or content_length > _server.MAX_VOICE_UPLOAD_BYTES + 200_000:
             return self._send_error(HTTPStatus.BAD_REQUEST, "测试音频最大 30MB")
         audio_path: Path | None = None
         try:
@@ -259,14 +282,14 @@ class HandlerVoiceMixin(WebUIHandlerMixin):
             file_item = multipart_file(form, "file")
             if file_item is None or not file_item.filename:
                 raise ValueError("请选择测试音频")
-            if len(file_item.data) > MAX_VOICE_UPLOAD_BYTES:
+            if len(file_item.data) > _server.MAX_VOICE_UPLOAD_BYTES:
                 raise ValueError("测试音频最大 30MB")
             language = multipart_text(form, "language", "auto").strip().lower()
             if language not in {"auto", "zh", "en", "ja"}:
                 raise ValueError("识别语言只支持自动、中文、英文或日文")
             audio_path = save_test_audio(str(file_item.filename), file_item.data)
             started_at = time.perf_counter()
-            result = run_coro(
+            result = _server.run_coro(
                 self.webui_state.server.voice.client.transcribe(audio_path, language)
             )
             elapsed_ms = round((time.perf_counter() - started_at) * 1000)

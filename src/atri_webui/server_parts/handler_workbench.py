@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
-from .handler_support import WebUIHandlerMixin, _sync_webui_globals
+from http import HTTPStatus
+
+from ..service_control import music_workbench_status, start_music_workbench
 
 
-class HandlerWorkbenchMixin(WebUIHandlerMixin):
+class HandlerWorkbenchMixin:
     def _handle_music_workbench_status(self) -> None:
         """只读：前端、桥接、语音服务三段状态。"""
 

@@ -13,11 +13,11 @@ from unittest import mock
 
 import pytest
 
-import atri_shared.config_admin as config_admin
-import atri_shared.model_profiles as model_profiles
 import atri_qq_bot.__main__ as main_module
 import atri_qq_bot.config.loader as loader
 import atri_qq_bot.insights.config as insights_config
+import atri_shared.config_admin as config_admin
+import atri_shared.model_profiles as model_profiles
 import atri_webui.server as webui_server
 from atri_webui.server_parts.handler_config import HandlerConfigMixin
 from atri_webui.server_parts.handler_insights import HandlerInsightsMixin
@@ -89,8 +89,7 @@ class _ConfigHandler(HandlerConfigMixin):
 
 
 def _point_env(monkeypatch, env_path) -> None:
-    # Point both the shared module and the server module (whose globals are
-    # copied into the handler mixin by _sync_webui_globals) at the temp .env.
+    # Point the shared configuration and the WebUI server at the temp .env.
     monkeypatch.setattr(config_admin, "ENV_PATH", env_path)
     monkeypatch.setattr(webui_server, "ENV_PATH", env_path)
 

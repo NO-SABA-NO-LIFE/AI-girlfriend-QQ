@@ -1,16 +1,56 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Coroutine
+from http import HTTPStatus
 from typing import Any, TypeVar
+from urllib.error import HTTPError
+from urllib.parse import parse_qs
 
-from ..config_admin import CONFIG_FIELDS, read_env, write_validated_env
-from .handler_support import WebUIHandlerMixin, _sync_webui_globals
+from atri_qq_bot.proactive import (
+    load_proactive_policy,
+    persist_tiers_from_payload,
+    save_proactive_policy,
+)
+from atri_qq_bot.runtime.modality_access import (
+    load_modality_access,
+    save_modality_access,
+)
+from atri_qq_bot.runtime.reply_strategy import (
+    counter_snapshot,
+    load_reply_strategy,
+    preview_limits,
+    reset_reply_counters,
+    save_reply_strategy,
+    update_object_rule,
+)
+from atri_webui import server as _server
+
+from ..config_admin import (
+    CONFIG_FIELDS,
+    CONFIG_UPDATE_LOCK,
+    merge_env,
+    read_env,
+    restore_env_file,
+    restore_process_env,
+    snapshot_process_env,
+    validate_env_isolated,
+    write_validated_env,
+)
+from ..model_profiles import (
+    activate_model_profile,
+    delete_model_profile,
+    public_model_profile,
+    upsert_model_profile,
+)
+from ..user_directory import UserDirectory
 from .handler_account import effective_bot_qq_for, view_memory_admin_for
+from .voice_integrations import translate_voice_text
 
 _ReloadResult = TypeVar("_ReloadResult")
 
 
-class HandlerConfigMixin(WebUIHandlerMixin):
+class HandlerConfigMixin:
     def _handle_config_update(self) -> None:
         # 只读检视模式下拒绝改配置：写的是全局 .env，属于运行账号的配置。
         if self._refuse_when_read_only("修改配置"):
@@ -22,10 +62,10 @@ class HandlerConfigMixin(WebUIHandlerMixin):
         # 所有会修改 .env 的入口，避免回滚撤销另一个已成功的模型切换。
         with CONFIG_UPDATE_LOCK:
             try:
-                previous_bytes = ENV_PATH.read_bytes() if ENV_PATH.exists() else None
+                previous_bytes = _server.ENV_PATH.read_bytes() if _server.ENV_PATH.exists() else None
                 candidate = validate_env_isolated(payload)
                 env_snapshot = snapshot_process_env(merge_env(payload).keys())
-                disk_bytes = ENV_PATH.read_bytes() if ENV_PATH.exists() else None
+                disk_bytes = _server.ENV_PATH.read_bytes() if _server.ENV_PATH.exists() else None
                 if disk_bytes != previous_bytes:
                     raise ValueError("配置文件在校验期间已变更，请刷新后重新保存")
                 write_validated_env(candidate)
@@ -35,7 +75,7 @@ class HandlerConfigMixin(WebUIHandlerMixin):
                 self.webui_state.reload_config, previous_bytes, env_snapshot
             )
             if config is not None:
-                self._send_json({"ok": True, "config": config_payload(config)})
+                self._send_json({"ok": True, "config": _server.config_payload(config)})
 
     def _reload_or_rollback(
         self,
@@ -45,15 +85,15 @@ class HandlerConfigMixin(WebUIHandlerMixin):
     ) -> _ReloadResult | None:
         """Reload after a write, or restore the old configuration and report the error."""
         try:
-            return run_coro(reload(), wait_for_cleanup=True)
+            return _server.run_coro(reload(), wait_for_cleanup=True)
         except Exception as exc:
             try:
                 restore_env_file(previous_bytes)
                 restore_process_env(env_snapshot)
                 # 恢复任务必须在事务锁释放前结束，避免与下一次保存交错。
-                run_coro(reload(), timeout=None)
+                _server.run_coro(reload(), timeout=None)
             except Exception:
-                LOGGER.exception("配置保存失败，回滚未完成")
+                _server.LOGGER.exception("配置保存失败，回滚未完成")
                 self._send_error(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     "配置保存失败，回滚未完成，请检查服务日志",
@@ -416,7 +456,7 @@ class HandlerConfigMixin(WebUIHandlerMixin):
             return self._send_error(HTTPStatus.BAD_REQUEST, "未知的预览范围")
         try:
             target_id = int(raw_target_id) if raw_target_id else None
-            result = run_coro(
+            result = _server.run_coro(
                 self.webui_state.server.preview_proactive(event_type, target_id, scope)
             )
         except Exception as exc:
@@ -451,7 +491,7 @@ class HandlerConfigMixin(WebUIHandlerMixin):
         # 写事务互斥，否则一次失败回滚会把已成功的模型切换也撤销。
         with CONFIG_UPDATE_LOCK:
             try:
-                previous_bytes = ENV_PATH.read_bytes() if ENV_PATH.exists() else None
+                previous_bytes = _server.ENV_PATH.read_bytes() if _server.ENV_PATH.exists() else None
                 # 模型启用可能新增 .env 中原本不存在的键，快照也要记录其存在状态。
                 affected_keys = read_env().keys() | CONFIG_FIELDS.keys()
                 env_snapshot = snapshot_process_env(affected_keys)
@@ -467,7 +507,7 @@ class HandlerConfigMixin(WebUIHandlerMixin):
                 {
                     "ok": True,
                     "profile": public_model_profile(profile),
-                    "config": config_payload(config),
+                    "config": _server.config_payload(config),
                     "status": self._status(),
                 }
             )
@@ -478,7 +518,7 @@ class HandlerConfigMixin(WebUIHandlerMixin):
         if not text:
             return self._send_error(HTTPStatus.BAD_REQUEST, "text is required")
         try:
-            result = run_coro(test_chat(self.webui_state.config, text))
+            result = _server.run_coro(_server.test_chat(self.webui_state.config, text))
         except Exception as exc:
             return self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
         self._send_json({"ok": True, **result})
@@ -486,7 +526,7 @@ class HandlerConfigMixin(WebUIHandlerMixin):
     def _handle_voice_translate(self) -> None:
         payload = self._read_json()
         try:
-            result = run_coro(
+            result = _server.run_coro(
                 translate_voice_text(
                     self.webui_state.config,
                     str((payload or {}).get("text") or ""),
@@ -511,7 +551,7 @@ class HandlerConfigMixin(WebUIHandlerMixin):
         """
 
         try:
-            health = run_coro(self.webui_state.server.voice.client.health())
+            health = _server.run_coro(self.webui_state.server.voice.client.health())
         except Exception as exc:
             health = {"ok": False, "error": str(exc), "ready": False}
         singing = health.get("singing")
@@ -523,13 +563,13 @@ class HandlerConfigMixin(WebUIHandlerMixin):
         )
         return {
             "ok": True,
-            "config": config_payload(self.webui_state.config),
+            "config": _server.config_payload(self.webui_state.config),
             "service": health,
-            "profiles": voice_profiles_payload(),
-            "candidates": voice_candidates_payload(),
-            "asr_lexicon_text": asr_lexicon_text(),
-            "tts_pronunciation_text": tts_pronunciation_text(),
-            "behavior": load_voice_behavior(),
+            "profiles": _server.voice_profiles_payload(),
+            "candidates": _server.voice_candidates_payload(),
+            "asr_lexicon_text": _server.asr_lexicon_text(),
+            "tts_pronunciation_text": _server.tts_pronunciation_text(),
+            "behavior": _server.load_voice_behavior(),
             "singing_references": singing_references,
         }
 

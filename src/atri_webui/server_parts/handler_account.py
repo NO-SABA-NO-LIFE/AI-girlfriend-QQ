@@ -13,8 +13,6 @@ import logging
 from http import HTTPStatus
 from typing import Any
 
-from .handler_support import WebUIHandlerMixin, _sync_webui_globals
-
 from atri_qq_bot.accounts import (
     account_data_paths,
     account_id_for,
@@ -22,6 +20,13 @@ from atri_qq_bot.accounts import (
     registry_for_config,
 )
 from atri_webui import account_view
+
+from ..napcat_account import (
+    begin_account_switch,
+    cancel_account_switch,
+    finish_account_switch,
+    napcat_login_state,
+)
 
 LOGGER = logging.getLogger("atri.webui.account")
 
@@ -150,9 +155,8 @@ def running_account_id_for(state: Any) -> str | None:
     return None
 
 
-class HandlerAccountMixin(WebUIHandlerMixin):
+class HandlerAccountMixin:
     def _account_payload(self) -> Any:
-        _sync_webui_globals(self)
         state = self.webui_state
         config = state.config
         enabled = bool(getattr(config, "account_system_enabled", False))

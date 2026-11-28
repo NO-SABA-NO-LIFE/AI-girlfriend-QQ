@@ -9,6 +9,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from atri_webui import server as webui_server
+from atri_webui.server_parts import handler_voice, handler_workbench
 
 
 def _request(port: int, path: str, payload: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
@@ -35,7 +36,7 @@ def test_service_switch_routes_serve_status_and_start(
     """
 
     monkeypatch.setattr(
-        webui_server,
+        handler_workbench,
         "music_workbench_status",
         lambda: {
             "ok": True,
@@ -47,7 +48,7 @@ def test_service_switch_routes_serve_status_and_start(
         },
     )
     monkeypatch.setattr(
-        webui_server,
+        handler_workbench,
         "start_music_workbench",
         lambda: {
             "ok": True,
@@ -60,7 +61,7 @@ def test_service_switch_routes_serve_status_and_start(
         },
     )
     monkeypatch.setattr(
-        webui_server,
+        handler_voice,
         "voice_service_status",
         lambda **kwargs: {
             "ok": True,
@@ -72,7 +73,7 @@ def test_service_switch_routes_serve_status_and_start(
         },
     )
     monkeypatch.setattr(
-        webui_server,
+        handler_voice,
         "start_voice_service",
         lambda: {
             "ok": True,
@@ -85,7 +86,7 @@ def test_service_switch_routes_serve_status_and_start(
         },
     )
     monkeypatch.setattr(
-        webui_server,
+        handler_voice,
         "stop_voice_service",
         lambda: {
             "ok": True,

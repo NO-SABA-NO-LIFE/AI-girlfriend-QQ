@@ -1,9 +1,18 @@
 from __future__ import annotations
 
-from .handler_support import WebUIHandlerMixin, _sync_webui_globals
+import threading
+from http import HTTPStatus
+from typing import Any
+from urllib.parse import parse_qs
+
+from atri_webui import server as _server
+
+from ..qzone_admin import QZoneAdmin, QZoneBridgeError
+from ..qzone_automation import parse_keywords
+from ..qzone_bridge_control import bridge_status, start_bridge, stop_bridge
 
 
-class HandlerQZoneMixin(WebUIHandlerMixin):
+class HandlerQZoneMixin:
     # QQ 空间是**运行账号**的登录会话（Cookie 存在本地 Bridge 里）。
     # 面板查看别的账号时，那个账号没有登录会话——所以这里必须返回"空 + 原因"，
     # 而不是把运行账号的动态/好友继续显示出来。显示别人的数据是在撒谎，
@@ -145,7 +154,7 @@ class HandlerQZoneMixin(WebUIHandlerMixin):
         try:
             item = self.webui_state.qzone_automation.refresh_next_post()
         except Exception as exc:
-            LOGGER.exception("QQ 空间删除动态后重排失败")
+            _server.LOGGER.exception("QQ 空间删除动态后重排失败")
             return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
         self._send_json({"ok": True, "item": item})
 
@@ -175,7 +184,7 @@ class HandlerQZoneMixin(WebUIHandlerMixin):
         except ValueError as exc:
             return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
         except Exception as exc:
-            LOGGER.exception("QQ 空间即时生成发布失败")
+            _server.LOGGER.exception("QQ 空间即时生成发布失败")
             return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
         self._send_json(result)
 
@@ -183,7 +192,7 @@ class HandlerQZoneMixin(WebUIHandlerMixin):
         try:
             item = self.webui_state.qzone_automation.prepare_next_generated()
         except Exception as exc:
-            LOGGER.exception("QQ 空间下一条动态预生成失败")
+            _server.LOGGER.exception("QQ 空间下一条动态预生成失败")
             return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
         self._send_json({"ok": True, "item": item})
 
@@ -204,11 +213,11 @@ class HandlerQZoneMixin(WebUIHandlerMixin):
         if not isinstance(payload, dict):
             return self._send_error(HTTPStatus.BAD_REQUEST, "invalid json")
         try:
-            result = run_coro(generate_qzone_text(self.webui_state.config, str(payload.get("prompt") or ""), str(payload.get("kind") or "post"), str(payload.get("profile_id") or "")))
+            result = _server.run_coro(_server.generate_qzone_text(self.webui_state.config, str(payload.get("prompt") or ""), str(payload.get("kind") or "post"), str(payload.get("profile_id") or "")))
         except ValueError as exc:
             return self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
         except Exception as exc:
-            LOGGER.exception("QQ 空间文案生成失败")
+            _server.LOGGER.exception("QQ 空间文案生成失败")
             return self._send_error(HTTPStatus.BAD_GATEWAY, str(exc))
         self._send_json(result)
 

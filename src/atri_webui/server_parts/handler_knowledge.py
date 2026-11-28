@@ -7,15 +7,17 @@ import sqlite3 as _knowledge_sqlite
 from http import HTTPStatus as _KnowledgeHTTP
 from urllib.parse import parse_qs as _knowledge_query, urlparse as _knowledge_url
 
-from atri_qq_bot.knowledge import store as _knowledge_store
-from atri_qq_bot.knowledge import ingestion as _knowledge_ingestion
-from atri_qq_bot.knowledge import retrieval as _knowledge_retrieval
+from atri_qq_bot.knowledge import (
+    ingestion as _knowledge_ingestion,
+    retrieval as _knowledge_retrieval,
+    store as _knowledge_store,
+)
+
 from ..page import knowledge as _knowledge_page
-from .handler_support import WebUIHandlerMixin
-from .handler_account import view_memory_admin_for, is_read_only_view_for
+from .handler_account import is_read_only_view_for, view_memory_admin_for
 
 
-class HandlerKnowledgeMixin(WebUIHandlerMixin):
+class HandlerKnowledgeMixin:
     def _knowledge_reader(self):
         return _knowledge_store.KnowledgeStore.for_memory(view_memory_admin_for(self).memory_path, read_only=True)
 

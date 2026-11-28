@@ -4,6 +4,9 @@ import json
 import time
 from typing import Any
 
+from atri_qq_bot.config import BotConfig
+
+
 def _voice_preview_synthesis_options(behavior: dict[str, Any]) -> dict[str, Any]:
     return _voice_preview_synthesis_options_for_mode(behavior, "strict")
 

@@ -3,127 +3,56 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
-import json
 import logging
-import math
-import mimetypes
 import os
-import re
-import shutil
 import sqlite3
-import subprocess
 import sys
 import threading
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta
-from http import HTTPStatus
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlparse
-from urllib.request import Request, urlopen
 
-from atri_qq_bot.config import BotConfig, load_config
-from atri_qq_bot.persona import AtriReplyEngine
-from atri_qq_bot.llm_tools.web_search_tool import search_web
-from atri_qq_bot.proactive import (
-    load_proactive_policy,
-    persist_tiers_from_payload,
-    save_proactive_policy,
-)
-from atri_qq_bot.runtime import (
-    LOG_DIR,
-    PROJECT_ROOT,
-    STICKER_DELETED_DIR,
-    STICKER_ROOT,
-    read_project_logs,
-)
-from atri_qq_bot.music import song_catalog, save_song
-from atri_qq_bot.runtime.paths import MUSIC_ROOT
-from atri_qq_bot.insights import (
-    group_summary_html,
-    group_summary_image_path,
-    render_group_summary_image,
-    save_insights_env,
-    summary_markdown,
-)
-from atri_qq_bot.insights.evaluation import EvaluationSample
-from atri_qq_bot.voice import (
-    VoicePromptContext,
-    VoiceRequest,
-    load_voice_behavior,
-    save_voice_behavior,
-)
-from atri_qq_bot.runtime.control import restart_background_services, runtime_status
-from atri_qq_bot.runtime.modality_access import load_modality_access, save_modality_access
-from atri_qq_bot.runtime.reply_strategy import (
-    counter_snapshot,
-    load_reply_strategy,
-    preview_limits,
-    reset_reply_counters,
-    save_reply_strategy,
-    update_object_rule,
-)
-from .config_admin import (
-    CONFIG_UPDATE_LOCK,
-    ENV_PATH,
-    config_payload,
-    merge_env,
-    restore_env_file,
-    restore_process_env,
-    snapshot_process_env,
-    update_env,
-    validate_env_isolated,
-)
-from . import account_view
 from atri_qq_bot.accounts import (
     qq_from_account_id,
     resolve_account,
     resolve_account_settings,
     resolve_config,
 )
-# QQ空间 Bridge 改由 WebUI 手动启停（默认不随桌宠/NapCat 启动）。
-from .qzone_bridge_control import bridge_status, start_bridge, stop_bridge
-from .napcat_account import (
-    begin_account_switch,
-    cancel_account_switch,
-    finish_account_switch,
-    napcat_login_state,
+from atri_qq_bot.config import BotConfig, load_config
+from atri_qq_bot.llm_tools.web_search_tool import search_web
+from atri_qq_bot.music import song_catalog as song_catalog
+from atri_qq_bot.persona import AtriReplyEngine
+from atri_qq_bot.runtime.control import (
+    restart_background_services as restart_background_services,
 )
-from .service_control import (
-    music_workbench_status,
-    start_music_workbench,
-    start_voice_service,
-    stop_voice_service,
-    voice_service_status,
+from atri_qq_bot.runtime.modality_access import load_modality_access
+from atri_qq_bot.runtime.paths import MUSIC_ROOT
+from atri_qq_bot.voice import load_voice_behavior as load_voice_behavior
+
+from . import account_view
+from .config_admin import (
+    CONFIG_UPDATE_LOCK as CONFIG_UPDATE_LOCK,
+    ENV_PATH as ENV_PATH,
+    config_payload as config_payload,
 )
-from .call_page import render_voice_call
-from .model_profiles import (
-    MODEL_PRESETS,
-    activate_model_profile,
-    delete_model_profile,
-    load_model_profiles,
-    local_models_payload,
-    model_profiles_payload,
-    public_model_profile,
-    upsert_model_profile,
-)
+from .evaluation_handlers import EvaluationHandlersMixin
 from .memory_admin import (
     memory_admin_for_config,
 )
-from .qzone_admin import QZoneAdmin, QZoneBridgeError
+
+# QQ空间 Bridge 改由 WebUI 手动启停（默认不随桌宠/NapCat 启动）。
+from .model_profiles import load_model_profiles
+from .page import index as _page_module
+from .qzone_admin import QZoneAdmin
 from .qzone_automation import (
     QZoneAutomation,
     QZoneAutomationStore,
-    parse_keywords,
     sanitize_qzone_fact_context,
     topic_for_schedule,
 )
-from .user_directory import UserDirectory
-from .evaluation_handlers import EvaluationHandlersMixin
-from .page import index as _page_module
 
 _PAGE_DIR = Path(__file__).with_name("page")
 _PAGE_MODULE_PATH = _PAGE_DIR / "index.py"
@@ -183,28 +112,11 @@ def _render_index_dynamic() -> str:
                 _reload_page_modules()
                 _PAGE_MODULE_MTIME_NS = signature
     return _page_module.render_index()
-from .sticker_admin import (
-    IMAGE_EXTENSIONS,
-    looks_like_image_bytes,
-    resolve_under,
-    safe_filename,
-    sanitize_category,
-    sticker_file_payload,
-    sticker_summary,
-    unique_path,
-)
-from .upload_parser import multipart_file, multipart_text, parse_multipart_form
 from .voice_admin import (
-    asr_lexicon_text,
-    resolve_voice_audio,
-    save_asr_lexicon_text,
-    save_reference_audio,
-    save_test_audio,
-    save_tts_pronunciation_text,
-    save_voice_profile,
-    tts_pronunciation_text,
-    voice_candidates_payload,
-    voice_profiles_payload,
+    asr_lexicon_text as asr_lexicon_text,
+    tts_pronunciation_text as tts_pronunciation_text,
+    voice_candidates_payload as voice_candidates_payload,
+    voice_profiles_payload as voice_profiles_payload,
 )
 
 MAX_UPLOAD_BYTES = 8_000_000
@@ -220,12 +132,8 @@ LOGGER = logging.getLogger("atri.webui")
 
 
 from .server_parts.voice_integrations import (
-    _TRANSLATION_LANGUAGES,
-    _detect_translation_source,
-    _extract_translation,
-    _voice_preview_synthesis_options,
-    _voice_preview_synthesis_options_for_mode,
-    translate_voice_text,
+    _voice_preview_synthesis_options as _voice_preview_synthesis_options,
+    _voice_preview_synthesis_options_for_mode as _voice_preview_synthesis_options_for_mode,
 )
 
 
@@ -711,13 +619,13 @@ from .server_parts.handler_account import HandlerAccountMixin
 from .server_parts.handler_config import HandlerConfigMixin
 from .server_parts.handler_core import HandlerCoreMixin
 from .server_parts.handler_insights import HandlerInsightsMixin
+from .server_parts.handler_knowledge import HandlerKnowledgeMixin
 from .server_parts.handler_qq_music import HandlerQQMusicMixin
 from .server_parts.handler_qzone import HandlerQZoneMixin
 from .server_parts.handler_response import HandlerResponseMixin
 from .server_parts.handler_stickers_memory import HandlerStickersMemoryMixin
 from .server_parts.handler_voice import HandlerVoiceMixin
 from .server_parts.handler_workbench import HandlerWorkbenchMixin
-from .server_parts.handler_knowledge import HandlerKnowledgeMixin
 
 
 class AtriWebUIHandler(
