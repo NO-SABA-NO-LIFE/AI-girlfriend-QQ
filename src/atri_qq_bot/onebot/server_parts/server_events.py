@@ -573,6 +573,7 @@ class OneBotEventMixin:
                 first_delay=False,
                 model_type="voice",
                 model_name=self._delivery_model_name("voice"),
+                delivery_deadline=budget.delivery_deadline if budget is not None else None,
             )
             if outgoing and not delivered_text:
                 self._record_reply_failure(
@@ -1089,12 +1090,18 @@ class OneBotEventMixin:
                     model_type="chat",
                     first_delay=False,
                     group_quote=False,
+                    delivery_deadline=budget.delivery_deadline if budget is not None else None,
                 )
             except Exception as send_exc:  # noqa: BLE001
                 LOGGER.warning("失败兜底消息发送失败：%s", send_exc)
             record_media_turn()
             # 即使文字回复为空，HD2 工具可能已成功取到情报，仍把情报发出，避免白查。
-            await self._send_pending_hd2_nl(websocket, event, conversation_id)
+            await self._send_pending_hd2_nl(
+                websocket,
+                event,
+                conversation_id,
+                delivery_deadline=budget.delivery_deadline if budget is not None else None,
+            )
             if self.cognition_shadow is not None:
                 self.cognition_shadow.record_live_outcome(
                     turn_id,
@@ -1294,7 +1301,12 @@ class OneBotEventMixin:
         self._mark_smart_group_reply(event, conversation_id, plain_text)
         self._remember_group_reply_key(event, conversation_id, plain_text)
         # 主回复已发出，再把本轮自然语言 HD2 工具产出的情报（图片/文本卡片）发出。
-        await self._send_pending_hd2_nl(websocket, event, conversation_id)
+        await self._send_pending_hd2_nl(
+            websocket,
+            event,
+            conversation_id,
+            delivery_deadline=budget.delivery_deadline if budget is not None else None,
+        )
         if poke_requested and event.get("message_type") == "group":
             # 回复已成功发出，再执行模型自主决定的戳一戳；戳的是当前对话者。
             try:
@@ -1658,6 +1670,8 @@ class OneBotEventMixin:
         websocket: Any,
         event: dict[str, Any],
         conversation_id: str,
+        *,
+        delivery_deadline: float | None = None,
     ) -> None:
         """发送本轮自然语言 HD2 工具暂存的情报；无待发内容则直接返回。
 
@@ -1676,6 +1690,7 @@ class OneBotEventMixin:
                 first_delay=False,
                 group_quote=False,
                 collect_ids=image_ids,
+                delivery_deadline=delivery_deadline,
             )
             # 记下实际发出的 message_id：下一轮用户引用这张图时能精确认出来。
             _record_hd2_msg_ids(self, conversation_id, image_ids)
