@@ -1,6 +1,43 @@
 from __future__ import annotations
 
-from .rule_common import *  # noqa: F403
+import re
+from datetime import datetime
+from typing import Any, Iterable
+
+from . import extraction_rules as _extraction_rules
+from .rule_common import (
+    ACTIONABLE_STYLE_HINTS,
+    AFFECTION_DAILY_NEGATIVE_CAP,
+    AFFECTION_DAILY_POSITIVE_CAP,
+    AGGRESSIVE_QUALITY_HINTS,
+    CORRECTION_HINTS,
+    DAILY_POSITIVE_HINTS,
+    DEFAULT_AFFECTION,
+    EVENT_HINTS,
+    GROUP_ACTIVITY_DAILY_DECAY,
+    GROUP_ACTIVITY_DEFAULT,
+    MAJOR_NEGATIVE_HINTS,
+    MAJOR_POSITIVE_HINTS,
+    MEDIUM_NEGATIVE_HINTS,
+    MEDIUM_POSITIVE_HINTS,
+    NEGATIVE_MOOD_HINTS,
+    NOISY_MEMORY_HINTS,
+    NORMAL_AFFECTION_COEFFICIENT,
+    NORMAL_AFFECTION_EQUILIBRIUM,
+    OWNER_AFFECTION_COEFFICIENT,
+    OWNER_AFFECTION_EQUILIBRIUM,
+    OWNER_AFFECTION_IDLE_DAILY_DECAY,
+    OWNER_INITIAL_AFFECTION,
+    PRIVATE_AFFECTION_IDLE_DAILY_DECAY,
+    PRIVATE_AFFECTION_IDLE_DECAY_GRACE_DAYS,
+    PRIVATE_NUDGE_CLOSE_AFFECTION,
+    PRIVATE_NUDGE_NORMAL_MULTIPLIER,
+    PRIVATE_NUDGE_SLOW_AFFECTION,
+    PRIVATE_NUDGE_SLOW_MULTIPLIER,
+    PRIVATE_NUDGE_STOP_AFFECTION,
+    TIME_HINT_PATTERN,
+)
+
 
 def _running_average(old_average: float, count: int, new_value: float) -> float:
     if count <= 1:
@@ -280,7 +317,7 @@ def _is_noisy_for_long_memory(text: str) -> bool:
     stripped = str(text or "").strip()
     if not stripped:
         return True
-    if is_memory_pollution_text(stripped):
+    if _extraction_rules.is_memory_pollution_text(stripped):
         return True
     if stripped in {"萝卜子", "萝卜字", "涩涩", "?", "？", "6"}:
         return True

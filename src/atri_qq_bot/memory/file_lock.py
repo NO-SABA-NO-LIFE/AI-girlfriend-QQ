@@ -18,3 +18,13 @@ def memory_file_lock(path: Path) -> threading.RLock:
             lock = threading.RLock()
             _locks[key] = lock
         return lock
+
+
+def _locked_mutation(method):
+    """为主消息写入与后台整合共用一把进程内可重入锁。"""
+    def wrapped(self, *args, **kwargs):
+        with self._memory_state_lock:
+            return method(self, *args, **kwargs)
+    wrapped.__name__ = method.__name__
+    wrapped.__doc__ = method.__doc__
+    return wrapped

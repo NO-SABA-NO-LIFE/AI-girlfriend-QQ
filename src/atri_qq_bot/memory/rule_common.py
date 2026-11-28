@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime
 from typing import Any, Iterable
 
 from ..language_guard import has_illegal_language_or_garbage
-
 
 TOPIC_STOPWORDS = {
     "什么",
@@ -277,3 +277,13 @@ IMPLICIT_INTEREST_HINTS = (
 )
 
 
+
+
+LOGGER = logging.getLogger("atri.memory")
+
+# 记忆保存发生在消息处理链路中，不能因为一次内存不足就让整条回复任务失败。
+# 失败后采用短暂退避，避免在系统内存紧张时每条消息都重复创建序列化缓冲区。
+SAVE_RETRY_MIN_SECONDS = 5.0
+SAVE_RETRY_MAX_SECONDS = 60.0
+MAX_MEMORY_TEXT_CHARS = 2000
+MEMORY_BACKFILL_VERSION = 1

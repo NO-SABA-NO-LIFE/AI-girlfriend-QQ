@@ -1,12 +1,25 @@
 from __future__ import annotations
 
-from . import _locked_mutation
-from .file_lock import memory_file_lock
-from .support import MemoryMixin
+import json
+import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
 from ..knowledge import KnowledgeStore as _KnowledgeStore
+from ..retrieval import ContextRetrievalPlanner, RetrievalSettings
+from .file_lock import _locked_mutation, memory_file_lock
+from .ingestion import MemoryExtractionRequest, MemoryExtractionWorker
+from .rule_common import (
+    LOGGER,
+    MEMORY_VERSION,
+    SAVE_RETRY_MAX_SECONDS,
+    SAVE_RETRY_MIN_SECONDS,
+)
 
 
-class MemoryStateMixin(MemoryMixin):
+class MemoryStateMixin:
     def __init__(self, path: Path, config: Any | None = None) -> None:
         self.path = path
         self.knowledge = _KnowledgeStore.for_memory(path)

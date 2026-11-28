@@ -1,6 +1,19 @@
 from __future__ import annotations
 
-from .rule_common import *  # noqa: F403
+import re
+from typing import Any, Iterable
+
+from . import extraction_rules as _extraction_rules
+from .rule_common import (
+    ABSTRACT_HINTS,
+    COMFORT_HINTS,
+    CORRECTION_HINTS,
+    DIRECT_HINTS,
+    HISTORY_LIMIT,
+    MEMORY_TOPIC_BLOCKLIST,
+    TOPIC_STOPWORDS,
+)
+
 
 def _emoji_count(text: str) -> int:
     unicode_emoji = len(re.findall(r"[\U0001f300-\U0001faff]", text))
@@ -80,7 +93,7 @@ def _append_history(
     actor_id: int | str | None = None,
     nickname: str | None = None,
 ) -> None:
-    if is_memory_pollution_text(text):
+    if _extraction_rules.is_memory_pollution_text(text):
         return
     history = list(item.get("history") or [])
     entry: dict[str, Any] = {
@@ -123,7 +136,7 @@ def _safe_topics(topics: Iterable[Any]) -> list[str]:
 def _is_safe_topic(word: str) -> bool:
     if not word or word in TOPIC_STOPWORDS or word in MEMORY_TOPIC_BLOCKLIST:
         return False
-    if is_memory_pollution_text(word):
+    if _extraction_rules.is_memory_pollution_text(word):
         return False
     if any(pattern in word for pattern in ("任务", "系统", "进度条", "调试", "处理")):
         return False

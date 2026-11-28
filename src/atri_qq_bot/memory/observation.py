@@ -1,12 +1,64 @@
 from __future__ import annotations
 
+import time
 from copy import deepcopy
+from typing import Any
 
-from . import _locked_mutation
-from .support import MemoryMixin
+from .affection_rules import (
+    _affection_state_text,
+    _as_float,
+    _classify_affection_event,
+    _decay_group_activity,
+    _decay_private_affection_for_idle,
+    _group_activity_state_text,
+    _initialize_affection,
+    _is_group_conversation,
+    _running_average,
+    _update_affection,
+    _update_group_activity,
+)
+from .extraction_rules import (
+    _append_session_l3,
+    _ensure_structured_memory,
+    _remember_structured_from_user,
+    is_memory_pollution_text,
+)
+from .feature_rules import (
+    _append_history,
+    _append_iteration_rule,
+    _emoji_count,
+    _extract_topics,
+    _iteration_rule_text,
+    _merge_feature_counts,
+    _merge_topics,
+    _message_features,
+    _safe_topics,
+    _shorten,
+    _style_flags,
+)
+from .file_lock import _locked_mutation
+from .helpers import (
+    _group_member_identity,
+    _merge_group_safe_structured_memory,
+    _remember_personal_event,
+)
+from .ingestion import MemoryExtractionRequest
+from .profile_rules import (
+    _decay_event_memories,
+    _format_recall_context,
+    _personal_question_interval,
+    _remember_important_interaction,
+    _structured_memory_profile,
+)
+from .rule_common import (
+    DEFAULT_AFFECTION,
+    GROUP_ACTIVITY_DEFAULT,
+    LOGGER,
+    MAX_MEMORY_TEXT_CHARS,
+)
 
 
-class MemoryObservationMixin(MemoryMixin):
+class MemoryObservationMixin:
     @_locked_mutation
     def observe_user(
         self,

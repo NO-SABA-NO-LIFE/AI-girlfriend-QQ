@@ -1,6 +1,24 @@
 from __future__ import annotations
 
-from .rule_common import *  # noqa: F403
+import re
+from typing import Any
+
+from ..language_guard import has_illegal_language_or_garbage
+from . import (
+    affection_rules as _affection_rules,
+    feature_rules as _feature_rules,
+    profile_rules as _profile_rules,
+)
+from .rule_common import (
+    ACTIONABLE_STYLE_HINTS,
+    DEFAULT_AFFECTION,
+    EVENT_HINTS,
+    IMPLICIT_INTEREST_HINTS,
+    L1_CONFIRMATIONS_REQUIRED,
+    MEMORY_POLLUTION_PATTERNS,
+    TIME_HINT_PATTERN,
+)
+
 
 def is_memory_pollution_text(text: str) -> bool:
     compact = str(text or "").strip()
@@ -30,7 +48,7 @@ def _append_session_l3(
     now: float,
     memory: dict[str, Any] | None = None,
 ) -> None:
-    if _is_noisy_for_long_memory(text):
+    if _affection_rules._is_noisy_for_long_memory(text):
         return
     items = list(session_l3.get(conversation_id) or [])
     # 进程重启后 session_l3 是空的，必须从持久化窗口恢复，否则第一条
@@ -41,8 +59,8 @@ def _append_session_l3(
         "layer": "L3",
         "category": "session_context",
         "key": "当前会话",
-        "text": _shorten(text, 120),
-        "value": _shorten(text, 120),
+        "text": _feature_rules._shorten(text, 120),
+        "value": _feature_rules._shorten(text, 120),
         "source": "user",
         "at": now,
         "updated_at": now,
@@ -64,35 +82,35 @@ def _remember_structured_from_user(
     # 结构化记忆采用“先纠正冲突 -> 过滤噪声 -> 抽取 L2 事件/L1 特征 -> 建立关联”
     # 的顺序。L3 是会话滚动窗口，不在这里被误写成永久用户画像。
     memory = _ensure_structured_memory(item)
-    _apply_user_corrections(memory, text, now)
+    _profile_rules._apply_user_corrections(memory, text, now)
     style_candidate = _actionable_style_candidate(text, now, visibility, source_context)
     style_memory_id = _upsert_l1_candidate(memory, style_candidate, now) if style_candidate else None
-    if _is_negative_quality_complaint(text):
+    if _affection_rules._is_negative_quality_complaint(text):
         if style_memory_id:
-            _link_related_memories(memory, [style_memory_id])
+            _profile_rules._link_related_memories(memory, [style_memory_id])
         return
-    _remember_important_interaction(item, text, now, affection_event)
+    _profile_rules._remember_important_interaction(item, text, now, affection_event)
 
-    if _is_noisy_for_long_memory(text):
+    if _affection_rules._is_noisy_for_long_memory(text):
         if style_memory_id:
-            _link_related_memories(memory, [style_memory_id])
+            _profile_rules._link_related_memories(memory, [style_memory_id])
         return
 
     new_ids: list[str] = [style_memory_id] if style_memory_id else []
     current_affection = float(item.get("affection_score", DEFAULT_AFFECTION))
     for event in _extract_l2_events(text, now, visibility, source_context):
-        _attach_affection_metadata(event, affection_event, current_affection)
+        _affection_rules._attach_affection_metadata(event, affection_event, current_affection)
         memory_id = _upsert_l2(memory, event, now)
         if memory_id:
             new_ids.append(memory_id)
 
     for candidate in _extract_l1_candidates(text, now, visibility, source_context):
-        _attach_affection_metadata(candidate, affection_event, current_affection)
+        _affection_rules._attach_affection_metadata(candidate, affection_event, current_affection)
         memory_id = _upsert_l1_candidate(memory, candidate, now)
         if memory_id:
             new_ids.append(memory_id)
 
-    _link_related_memories(memory, new_ids)
+    _profile_rules._link_related_memories(memory, new_ids)
 
 def _actionable_style_candidate(
     text: str,
@@ -118,7 +136,7 @@ def _actionable_style_candidate(
     return _candidate(
         "communication_style",
         "回复方式",
-        _shorten(_style_rule_value(stripped), 80),
+        _feature_rules._shorten(_style_rule_value(stripped), 80),
         0.8,
         "explicit",
         now,
@@ -149,7 +167,7 @@ def _extract_l1_candidates(
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     stripped = text.strip()
-    negative_values = _negative_preference_values(stripped)
+    negative_values = _profile_rules._negative_preference_values(stripped)
 
     birthday = re.search(
         r"(?:我的)?生日(?:是|在|：|:)?\s*((?:[0-9]{4}年)?[0-9]{1,2}月[0-9]{1,2}[日号]?|[0-9]{1,2}[./-][0-9]{1,2})",
@@ -171,7 +189,7 @@ def _extract_l1_candidates(
 
     nickname = re.search(r"(?:我叫|叫我|以后叫我|你可以叫我)\s*([^，。！？!?]{1,12})", stripped)
     if nickname:
-        value = _clean_value(nickname.group(1))
+        value = _affection_rules._clean_value(nickname.group(1))
         if value and "亚托莉" not in value:
             candidates.append(
                 _candidate(
@@ -193,8 +211,8 @@ def _extract_l1_candidates(
         (r"(?:我)?(?:真的|很|超|也|平时|经常|常常|一直|其实)*(?:不喜欢|不爱|讨厌|不喝|不吃)(?:吃|喝|看|玩|做)?\s*([^，。！？!?]{1,18})", "讨厌"),
     ):
         for match in re.finditer(pattern, stripped):
-            value = _clean_value(match.group(1))
-            if _valid_preference_value(value) and not _conflicts_with_values(
+            value = _affection_rules._clean_value(match.group(1))
+            if _affection_rules._valid_preference_value(value) and not _profile_rules._conflicts_with_values(
                 value, negative_values
             ):
                 candidates.append(
@@ -212,7 +230,7 @@ def _extract_l1_candidates(
 
     identity = re.search(r"(?:我是|我的专业是|我的职业是)\s*([^，。！？!?]{2,18})", stripped)
     if identity:
-        value = _clean_value(identity.group(1))
+        value = _affection_rules._clean_value(identity.group(1))
         if value and not any(noise in value for noise in ("机器人", "亚托莉")):
             candidates.append(
                 _candidate(
@@ -229,8 +247,8 @@ def _extract_l1_candidates(
 
     habit = re.search(r"我(?:平时|经常|常常|一般|每天|习惯|通常)\s*([^，。！？!?]{2,24})", stripped)
     if habit:
-        value = _clean_value(habit.group(1))
-        if _valid_preference_value(value):
+        value = _affection_rules._clean_value(habit.group(1))
+        if _affection_rules._valid_preference_value(value):
             candidates.append(
                 _candidate(
                     "habit",
@@ -244,12 +262,12 @@ def _extract_l1_candidates(
                 )
             )
 
-    if any(word in stripped for word in ("短句", "直接", "别绕", "不要套话", "有逻辑")) and not _contains_any(stripped, ACTIONABLE_STYLE_HINTS):
+    if any(word in stripped for word in ("短句", "直接", "别绕", "不要套话", "有逻辑")) and not _affection_rules._contains_any(stripped, ACTIONABLE_STYLE_HINTS):
         candidates.append(
             _candidate(
                 "communication_style",
                 "回复方式",
-                _shorten(stripped, 80),
+                _feature_rules._shorten(stripped, 80),
                 0.8,
                 "explicit",
                 now,
@@ -286,13 +304,13 @@ def _extract_l2_events(
         return []
     if not TIME_HINT_PATTERN.search(stripped) and "持续" not in stripped and "以后" not in stripped:
         return []
-    key = _event_key(stripped)
+    key = _affection_rules._event_key(stripped)
     events = [
         {
             "layer": "L2",
             "category": "event",
             "key": key,
-            "value": _shorten(stripped, 120),
+            "value": _feature_rules._shorten(stripped, 120),
             "activity": 1.0,
             "confidence": 0.8,
             "source": "user",
@@ -321,14 +339,14 @@ def _candidate(
     candidate = {
         "category": category,
         "key": key,
-        "value": _shorten(value, 120),
+        "value": _feature_rules._shorten(value, 120),
         "confidence": confidence,
         "source_type": source_type,
         "evidence_count": 1,
         "created_at": now,
         "updated_at": now,
         "last_mentioned_at": now,
-        "sources": [{"at": now, "text": _shorten(value, 120), "type": source_type}],
+        "sources": [{"at": now, "text": _feature_rules._shorten(value, 120), "type": source_type}],
         "visibility": visibility,
     }
     if source_context:
@@ -341,39 +359,39 @@ def _upsert_l1_candidate(
     now: float,
 ) -> str | None:
     key = f"{candidate['category']}:{candidate['key']}"
-    existing = _find_memory(memory["l1"], key)
+    existing = _profile_rules._find_memory(memory["l1"], key)
     if existing:
         if existing.get("locked"):
             existing["last_mentioned_at"] = now
-            _append_source(existing, candidate, now)
+            _profile_rules._append_source(existing, candidate, now)
             return existing["id"]
         existing["confidence"] = min(1.0, max(float(existing.get("confidence", 0.0)), float(candidate["confidence"])) + 0.05)
         existing["evidence_count"] = int(existing.get("evidence_count", 1)) + 1
         existing["updated_at"] = now
         existing["last_mentioned_at"] = now
-        _append_source(existing, candidate, now)
+        _profile_rules._append_source(existing, candidate, now)
         return existing["id"]
 
-    pending = _find_memory(memory["candidates"], key)
+    pending = _profile_rules._find_memory(memory["candidates"], key)
     if pending:
         if pending.get("locked"):
             pending["last_mentioned_at"] = now
-            _append_source(pending, candidate, now)
+            _profile_rules._append_source(pending, candidate, now)
             return pending["id"]
         pending["confidence"] = min(1.0, max(float(pending.get("confidence", 0.0)), float(candidate["confidence"])))
         pending["evidence_count"] = int(pending.get("evidence_count", 1)) + 1
         pending["updated_at"] = now
         pending["last_mentioned_at"] = now
-        _append_source(pending, candidate, now)
+        _profile_rules._append_source(pending, candidate, now)
     else:
         pending = dict(candidate)
-        pending["id"] = _memory_id("candidate", key)
+        pending["id"] = _profile_rules._memory_id("candidate", key)
         pending["memory_key"] = key
         memory["candidates"].append(pending)
 
     if int(pending.get("evidence_count", 1)) >= L1_CONFIRMATIONS_REQUIRED:
         promoted = {
-            "id": _memory_id("l1", key),
+            "id": _profile_rules._memory_id("l1", key),
             "layer": "L1",
             "category": pending["category"],
             "key": pending["key"],
@@ -408,7 +426,7 @@ def _upsert_l1_candidate(
 
 def _upsert_l2(memory: dict[str, Any], event: dict[str, Any], now: float) -> str | None:
     key = f"{event['category']}:{event['key']}"
-    existing = _find_memory(memory["l2"], key)
+    existing = _profile_rules._find_memory(memory["l2"], key)
     if existing:
         if existing.get("locked"):
             existing["last_mentioned_at"] = now
@@ -424,7 +442,7 @@ def _upsert_l2(memory: dict[str, Any], event: dict[str, Any], now: float) -> str
                 existing[meta_key] = event[meta_key]
         return existing["id"]
     event = dict(event)
-    event["id"] = _memory_id("l2", key)
+    event["id"] = _profile_rules._memory_id("l2", key)
     event["memory_key"] = key
     memory["l2"].append(event)
     memory["l2"] = list(memory["l2"])[-30:]
@@ -443,8 +461,8 @@ def apply_extraction_operation(
     """
     layer = str(operation.get("layer") or "").upper()
     category = str(operation.get("category") or "").strip()
-    key = _clean_value(str(operation.get("key") or ""))
-    value = _clean_value(str(operation.get("value") or ""))
+    key = _affection_rules._clean_value(str(operation.get("key") or ""))
+    value = _affection_rules._clean_value(str(operation.get("value") or ""))
     action = str(operation.get("operation") or "ADD").upper()
     if layer not in {"L1", "L2"} or not key or (action != "DELETE" and not value):
         return None
@@ -452,13 +470,13 @@ def apply_extraction_operation(
     bucket_name = "l1" if layer == "L1" else "l2"
     bucket = memory[bucket_name]
     memory_key = f"{category}:{key}"
-    existing = _find_memory(bucket, memory_key)
+    existing = _profile_rules._find_memory(bucket, memory_key)
     if action == "DELETE":
         if existing:
             existing["state"] = "expired"
             existing["valid_to"] = now
             existing["updated_at"] = now
-            _append_source(existing, operation, now)
+            _profile_rules._append_source(existing, operation, now)
             return existing.get("id")
         return None
 
@@ -484,7 +502,7 @@ def apply_extraction_operation(
         existing["updated_at"] = now
         existing["last_mentioned_at"] = now
         existing["state"] = "active"
-        _append_source(existing, operation, now)
+        _profile_rules._append_source(existing, operation, now)
         return existing.get("id")
 
     promote = bool(operation.get("promote")) or confidence >= 0.78
@@ -494,7 +512,7 @@ def apply_extraction_operation(
         return _upsert_l1_candidate(memory, candidate, now)
 
     entry = {
-        "id": _memory_id(layer.lower(), memory_key),
+        "id": _profile_rules._memory_id(layer.lower(), memory_key),
         "layer": layer,
         "category": category,
         "key": key,
@@ -504,7 +522,7 @@ def apply_extraction_operation(
         "evidence_count": 1,
         "source": "user",
         "source_type": operation.get("source_type", "model"),
-        "evidence": _shorten(str(operation.get("evidence") or value), 180),
+        "evidence": _feature_rules._shorten(str(operation.get("evidence") or value), 180),
         "created_at": operation.get("created_at", now),
         "updated_at": now,
         "last_mentioned_at": now,
@@ -515,7 +533,7 @@ def apply_extraction_operation(
     for meta_key in ("visibility", "source_context"):
         if operation.get(meta_key):
             entry[meta_key] = operation[meta_key]
-    _append_source(entry, operation, now)
+    _profile_rules._append_source(entry, operation, now)
     bucket.append(entry)
     if layer == "L1":
         memory["candidates"] = [

@@ -1,10 +1,33 @@
 from __future__ import annotations
 
-from . import _locked_mutation
-from .support import MemoryMixin
+import time
+from datetime import datetime, timedelta
+from typing import Any, Iterable
+
+from ..proactive import parse_hhmm, safe_zoneinfo
+from ..retrieval import ContextRetrievalPlanner, RetrievalSettings
+from .affection_rules import (
+    _affection_reset_text,
+    _affection_set_text,
+    _affection_summary_text,
+    _as_float,
+    _clamp,
+    _decay_group_activity,
+    _decay_private_affection_for_idle,
+    _initialize_affection,
+    _private_nudge_multiplier,
+)
+from .extraction_rules import _ensure_structured_memory
+from .file_lock import _locked_mutation
+from .helpers import _group_member_identity, _proactive_override, _trust_tier
+from .rule_common import (
+    DEFAULT_AFFECTION,
+    GROUP_ACTIVITY_DEFAULT,
+    PRIVATE_NUDGE_NORMAL_MULTIPLIER,
+)
 
 
-class MemoryProactiveMixin(MemoryMixin):
+class MemoryProactiveMixin:
     def update_retrieval_config(self, config: Any) -> None:
         """WebUI 热加载配置后重建轻量 Planner，不触碰 JSON 和记忆会话。"""
 

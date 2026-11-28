@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from .rule_common import *  # noqa: F403
+import re
+from datetime import datetime
+from typing import Any
+
+from . import (
+    affection_rules as _affection_rules,
+    extraction_rules as _extraction_rules,
+    feature_rules as _feature_rules,
+)
+from .rule_common import DEFAULT_AFFECTION, L2_DAILY_DECAY, L2_SLEEP_THRESHOLD
+
 
 def _find_memory(items: list[dict[str, Any]], memory_key: str) -> dict[str, Any] | None:
     for item in items:
@@ -12,7 +22,7 @@ def _append_source(entry: dict[str, Any], candidate: dict[str, Any], now: float)
     sources = list(entry.get("sources") or [])
     source = {
         "at": now,
-        "text": _shorten(str(candidate.get("value") or ""), 120),
+        "text": _feature_rules._shorten(str(candidate.get("value") or ""), 120),
         "type": candidate.get("source_type", "explicit"),
     }
     if candidate.get("source_context"):
@@ -39,9 +49,9 @@ def _link_related_memories(memory: dict[str, Any], memory_ids: list[str]) -> Non
 def _apply_user_corrections(memory: dict[str, Any], text: str, now: float) -> None:
     for value in _negative_preference_values(text):
         _remove_positive_preference_memory(memory, value)
-        _upsert_l1_candidate(
+        _extraction_rules._upsert_l1_candidate(
             memory,
-            _candidate("preference", f"讨厌:{value}", value, 0.85, "explicit", now),
+            _extraction_rules._candidate("preference", f"讨厌:{value}", value, 0.85, "explicit", now),
             now,
         )
 
@@ -62,7 +72,7 @@ def _negative_preference_values(text: str) -> list[str]:
         r"(?:吃|喝|看|玩|做)?\s*([^，。！？!?；;]{1,18})"
     )
     for match in pattern.finditer(stripped):
-        value = _clean_value(match.group(1))
+        value = _affection_rules._clean_value(match.group(1))
         value = re.sub(r"^成", "", value).strip()
         value = re.sub(
             r"^(?:我)?(?:真的|很|超|也|平时|经常|常常|一直|其实)*(?:爱|喜欢)(?:吃|喝|看|玩|做)?",
@@ -71,7 +81,7 @@ def _negative_preference_values(text: str) -> list[str]:
         ).strip()
         value = re.sub(r"^(?:我)?(?:喝|吃|看|玩|做)", "", value).strip()
         value = re.sub(r"(了|啦|呀|呢|吧)$", "", value).strip()
-        if _valid_preference_value(value) and value not in values:
+        if _affection_rules._valid_preference_value(value) and value not in values:
             values.append(value)
     return values
 
@@ -96,7 +106,7 @@ def _remove_positive_preference_memory(memory: dict[str, Any], value: str) -> No
         memory[bucket] = [entry for entry in memory.get(bucket, []) if not conflicts(entry)]
 
 def _decay_event_memories(item: dict[str, Any], now: float) -> bool:
-    memory = _ensure_structured_memory(item)
+    memory = _extraction_rules._ensure_structured_memory(item)
     today = datetime.fromtimestamp(now).date()
     last_decay = item.get("last_l2_decay_date")
     if last_decay == today.isoformat():
@@ -125,7 +135,7 @@ def _structured_memory_profile(
     item: dict[str, Any],
     session_l3: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    memory = _ensure_structured_memory(item)
+    memory = _extraction_rules._ensure_structured_memory(item)
     current_affection = float(item.get("affection_score", DEFAULT_AFFECTION))
     l1 = [
         entry
@@ -202,7 +212,7 @@ def _format_recall_context(profile: dict[str, Any], user_text: str) -> str:
     l3 = [
         entry
         for entry in list(structured.get("l3") or [])[-3:]
-        if not is_memory_pollution_text(str(entry.get("text") or ""))
+        if not _extraction_rules.is_memory_pollution_text(str(entry.get("text") or ""))
     ]
 
     known = [_natural_memory_line(entry) for entry in l1[-6:]]
@@ -218,7 +228,7 @@ def _format_recall_context(profile: dict[str, Any], user_text: str) -> str:
     ]
     if profile.get("affection_state"):
         lines.append("你现在对用户的自然感觉：" + str(profile["affection_state"]))
-    if profile.get("group_activity_state") and user_text and _is_group_conversation(str(profile.get("conversation_id", ""))):
+    if profile.get("group_activity_state") and user_text and _affection_rules._is_group_conversation(str(profile.get("conversation_id", ""))):
         lines.append("当前群聊气氛：" + str(profile["group_activity_state"]))
     if l1:
         lines.append("你知道的用户信息：" + "；".join(known))
@@ -276,7 +286,7 @@ def _memory_relevant(entry: dict[str, Any], user_text: str) -> bool:
         return True
     value = str(entry.get("value") or "")
     key = str(entry.get("key") or "")
-    words = set(_extract_topics(value) + _extract_topics(key))
+    words = set(_feature_rules._extract_topics(value) + _feature_rules._extract_topics(key))
     return any(word and word in text for word in words)
 
 def _personal_question_interval(score: float) -> str:
@@ -296,19 +306,19 @@ def _remember_important_interaction(
     # 只参与好感度计算；只有明确的重大互动才保留为长期事件。
     if not affection_event or affection_event.get("importance") != "major":
         return None
-    if _is_noisy_for_long_memory(text):
+    if _affection_rules._is_noisy_for_long_memory(text):
         return None
-    if _is_negative_quality_complaint(text):
+    if _affection_rules._is_negative_quality_complaint(text):
         return None
 
-    memory = _ensure_structured_memory(item)
+    memory = _extraction_rules._ensure_structured_memory(item)
     current_affection = float(item.get("affection_score", DEFAULT_AFFECTION))
     key = _important_interaction_key(text, affection_event)
     event = {
         "layer": "L2",
         "category": "important_interaction",
         "key": key,
-        "value": _shorten(text, 120),
+        "value": _feature_rules._shorten(text, 120),
         "activity": 1.0,
         "confidence": 0.8 if affection_event.get("importance") == "major" else 0.7,
         "source": "user",
@@ -318,11 +328,11 @@ def _remember_important_interaction(
         "state": "active",
         "associations": [],
     }
-    _attach_affection_metadata(event, affection_event, current_affection)
-    return _upsert_l2(memory, event, now)
+    _affection_rules._attach_affection_metadata(event, affection_event, current_affection)
+    return _extraction_rules._upsert_l2(memory, event, now)
 
 def _important_interaction_key(text: str, affection_event: dict[str, Any]) -> str:
-    compact = _shorten(text, 36)
+    compact = _feature_rules._shorten(text, 36)
     importance = str(affection_event.get("importance") or "interaction")
     sentiment = str(affection_event.get("sentiment") or "neutral")
     return f"{importance}:{sentiment}:{compact}"

@@ -1,10 +1,22 @@
 from __future__ import annotations
 
-from . import _locked_mutation
-from .support import MemoryMixin
+import time
+from typing import Any, Iterable
+
+from . import rules as _memory_core
+from .affection_rules import _as_float
+from .extraction_rules import _ensure_structured_memory, is_memory_pollution_text
+from .feature_rules import _shorten
+from .file_lock import _locked_mutation
+from .ingestion import (
+    MemoryExtractionRequest,
+    MemoryExtractionResult,
+    deterministic_operations as _memory_core_deterministic_operations,
+)
+from .rule_common import LOGGER, MAX_MEMORY_TEXT_CHARS, MEMORY_BACKFILL_VERSION
 
 
-class MemoryExtractionMixin(MemoryMixin):
+class MemoryExtractionMixin:
     def _enqueue_memory_extraction(
         self,
         conversation_id: str,
