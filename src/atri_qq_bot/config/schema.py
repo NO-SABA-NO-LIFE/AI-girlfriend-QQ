@@ -80,6 +80,7 @@ class BotConfig:
     sticker_capture_defer: bool = False
     sticker_hydration_enabled: bool = False
     sticker_hydration_token: str | None = None
+    sticker_gallery_password: str | None = None
     sticker_hydration_poll_seconds: float = 2.0
     sticker_hydration_max_attempts: int = 3
     sticker_hydration_stale_seconds: float = 60.0

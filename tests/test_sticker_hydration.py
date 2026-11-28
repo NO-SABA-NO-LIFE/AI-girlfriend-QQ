@@ -306,3 +306,20 @@ def test_worker_does_not_download_material_from_a_mismatched_lookup(tmp_path, ov
     assert failed.last_error
     assert not failed.output_name
     assert not list(manager.review_dir.glob("*.gif"))
+
+
+def test_image_reader_prefers_file_over_preview(monkeypatch):
+    calls: list[str] = []
+
+    async def fake_download(value, max_bytes):
+        calls.append(value)
+        if value == "full":
+            return _GIF, ".gif", "image/gif"
+        return None
+
+    monkeypatch.setattr(hydration, "_download_image", fake_download)
+    image = asyncio.run(
+        hydration._read_image({"file": "full", "preview": "thumb"}, 1000)
+    )
+    assert image is not None
+    assert calls == ["full"]

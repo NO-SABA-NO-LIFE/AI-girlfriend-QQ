@@ -503,7 +503,7 @@ async def _download_image(value: str, max_bytes: int) -> tuple[bytes, str, str] 
 
 
 async def _read_image(data: dict[str, Any], max_bytes: int) -> tuple[bytes, str, str] | None:
-    for key in ("url", "file_url", "origin_url", "preview", "file"):
+    for key in ("url", "file_url", "origin_url", "file", "preview"):
         value = data.get(key)
         if isinstance(value, str) and value:
             image = await _download_image(value, max_bytes)

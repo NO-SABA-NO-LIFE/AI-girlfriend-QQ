@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import base64
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from threading import Thread
@@ -158,6 +159,40 @@ def test_gallery_and_worker_agree_on_review_file_lifecycle(tmp_path, monkeypatch
             assert recovered is not None
             assert recovered.attempts == 1
             assert recovered.message_id == ("8946" if after_review == "resend" else "8945")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+def test_gallery_password_protects_browse_and_mutating_routes(tmp_path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), GalleryHandler)
+    server.sticker_dir = tmp_path
+    server.gallery_password = "gallery-secret"
+    thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+    thread.start()
+
+    def request(method, path, payload=None, password=None):
+        headers = {"Content-Type": "application/json"}
+        if password is not None:
+            encoded = base64.b64encode(f"owner:{password}".encode("utf-8")).decode("ascii")
+            headers["Authorization"] = f"Basic {encoded}"
+        connection = HTTPConnection(*server.server_address, timeout=3)
+        try:
+            body = json.dumps(payload) if payload is not None else None
+            connection.request(method, path, body, headers)
+            response = connection.getresponse()
+            return response.status, response.getheader("WWW-Authenticate")
+        finally:
+            connection.close()
+
+    try:
+        assert request("GET", "/") == (401, 'Basic realm="Sticker Gallery"')
+        assert request("GET", "/", password="gallery-secret")[0] == 200
+        assert request("POST", "/api/delete", {"path": "missing.png"})[0] == 401
+        assert request(
+            "POST", "/api/delete", {"path": "missing.png"}, password="gallery-secret"
+        )[0] != 401
     finally:
         server.shutdown()
         server.server_close()

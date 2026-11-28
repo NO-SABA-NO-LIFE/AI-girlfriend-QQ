@@ -10,7 +10,9 @@ adds a review workflow:
 * delete removes the image and its JSON sidecar (with browser confirmation).
 
 Uses the standard library plus the project's httpx for the vision call and
-binds to all interfaces so it works from the user's own browser.
+binds to all interfaces so it works from the user's own browser. Set
+STICKER_GALLERY_PASSWORD (or enable hydration with STICKER_HYDRATION_TOKEN)
+before exposing port 8788 beyond localhost.
 
 Usage:
     python deploy/sticker_gallery.py
@@ -154,14 +156,45 @@ class GalleryHandler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(payload).encode("utf-8"),
                    "application/json; charset=utf-8")
 
+    def _request_password(self) -> str:
+        header = str(self.headers.get("Authorization", "") or "")
+        if header.startswith("Bearer "):
+            return header[len("Bearer "):]
+        if header.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(
+                    header[len("Basic "):].strip(), validate=True
+                ).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                return ""
+            _, separator, password = decoded.partition(":")
+            return password if separator else ""
+        return ""
+
+    def _require_gallery_auth(self) -> bool:
+        expected = str(getattr(self.server, "gallery_password", "") or "")
+        if not expected:
+            return True
+        supplied = self._request_password()
+        if hmac.compare_digest(supplied, expected):
+            return True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Sticker Gallery"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return False
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/api/hydration":
+            self._handle_hydration(parsed.path)
+            return
+        if not self._require_gallery_auth():
+            return
         if parsed.path == "/":
             self._send_gallery()
         elif parsed.path == "/img":
             self._send_image(parse_qs(parsed.query))
-        elif parsed.path == "/api/hydration":
-            self._handle_hydration(parsed.path)
         else:
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
@@ -169,6 +202,8 @@ class GalleryHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path in ("/api/hydrate", "/api/hydrate-all"):
             self._handle_hydration(parsed.path)
+            return
+        if not self._require_gallery_auth():
             return
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length).decode("utf-8") if length else ""
@@ -659,11 +694,18 @@ def _configure_hydration(server: ThreadingHTTPServer, sticker_dir: Path) -> None
         config = _load_config()
     except Exception:
         return
+    server.gallery_password = str(
+        getattr(config, "sticker_gallery_password", "") or ""
+    )
     required_flags = (
         "sticker_capture_enabled", "sticker_review_enabled",
         "sticker_capture_defer", "sticker_hydration_enabled",
     )
     token = str(getattr(config, "sticker_hydration_token", "") or "")
+    if not getattr(server, "gallery_password", "") and token:
+        # 启用了补图时至少不要让同一套审核面裸奔；补图 token 只作为
+        # 未单独配置图库口令时的兜底，不替代补图请求的 Bearer 校验。
+        server.gallery_password = token
     if not token or not all(getattr(config, name, False) for name in required_flags):
         return
 
@@ -703,6 +745,14 @@ def main() -> int:
     server = ThreadingHTTPServer((args.host, args.port), GalleryHandler)
     server.sticker_dir = sticker_dir
     _configure_hydration(server, sticker_dir)
+    if (
+        not getattr(server, "gallery_password", "")
+        and args.host not in {"127.0.0.1", "localhost", "::1"}
+    ):
+        print(
+            "[gallery] WARNING: 8788 未设置 STICKER_GALLERY_PASSWORD，"
+            "且当前不是仅本机监听；请用防火墙/反向代理限制访问。"
+        )
     print(f"serving {sticker_dir}")
     print(f"review images auto-delete after {args.review_ttl}s")
     print(f"open http://<server-ip>:{args.port} in your local browser")

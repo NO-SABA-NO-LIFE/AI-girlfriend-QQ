@@ -204,6 +204,7 @@ def _build_config(root: Path) -> BotConfig:
         sticker_capture_defer=_env_bool("STICKER_CAPTURE_DEFER", False),
         sticker_hydration_enabled=_env_bool("STICKER_HYDRATION_ENABLED", False),
         sticker_hydration_token=_optional_env("STICKER_HYDRATION_TOKEN"),
+        sticker_gallery_password=_optional_env("STICKER_GALLERY_PASSWORD"),
         sticker_hydration_poll_seconds=max(0.25, _env_float("STICKER_HYDRATION_POLL_SECONDS", 2.0)),
         sticker_hydration_max_attempts=max(1, _env_int("STICKER_HYDRATION_MAX_ATTEMPTS", 3)),
         sticker_hydration_stale_seconds=max(26.0, _env_float("STICKER_HYDRATION_STALE_SECONDS", 60.0)),
