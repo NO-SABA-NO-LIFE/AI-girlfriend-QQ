@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from .support import InsightsStoreMixin
+import sqlite3
+import uuid
+from typing import Any
+
+from .common import _json, _loads, utc_now
 
 
-class SummariesMixin(InsightsStoreMixin):
+class SummariesMixin:
     def group_messages(self, group_id: str, start: str, end: str, limit: int) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute(

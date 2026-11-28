@@ -1,9 +1,15 @@
 from __future__ import annotations
 
-from .support import InsightsStoreMixin
+import hashlib
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from .common import utc_now
 
 
-class DeliveryMixin(InsightsStoreMixin):
+class DeliveryMixin:
     def record_delivery(
         self,
         *,

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from .support import InsightsStoreMixin
+import uuid
+from typing import Any
+
+from .common import _json, _loads, _trend_bucket, utc_now
 
 
-class EvaluationsMixin(InsightsStoreMixin):
+class EvaluationsMixin:
     def create_evaluation(
         self,
         *,

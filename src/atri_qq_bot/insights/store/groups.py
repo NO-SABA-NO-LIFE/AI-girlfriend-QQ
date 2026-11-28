@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from .support import InsightsStoreMixin
+from datetime import datetime, timedelta
+from typing import Any
+
+from .common import _json, utc_now
 
 
-class GroupsMixin(InsightsStoreMixin):
+class GroupsMixin:
     def add_group_message(
         self,
         *,

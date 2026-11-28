@@ -1,8 +1,16 @@
 from __future__ import annotations
 
-from . import *  # noqa: F403
-from ...prompting import load_prompt
+from typing import Any
 
+from ...prompting import load_prompt
+from .preprocessing import (
+    _activity_profile,
+    _activity_segments,
+    _important_messages,
+    _member_highlights,
+    _visible_text,
+)
+from .topics import _normalize_topics
 
 # 复用主聊天链路的人设文件作为群聊总结的角色基线，而不是自创一个弱化版文案口吻。
 _FALLBACK_PERSONA = (

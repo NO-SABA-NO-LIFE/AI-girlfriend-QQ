@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
-from .support import InsightsStoreMixin
 
-
-class StateMixin(InsightsStoreMixin):
+class StateMixin:
     def __init__(self, path: str | Path, log_root: str | Path | None = None) -> None:
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
