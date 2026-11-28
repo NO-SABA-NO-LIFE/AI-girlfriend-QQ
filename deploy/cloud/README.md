@@ -70,7 +70,7 @@ ws://127.0.0.1:8765/onebot
 
 升级前记录当前 Git SHA，并备份生产 `.env`、记忆和表情审核目录。配置值可参考 `.env.example`。P0 的 `IMAGE_ATTRIBUTION_ENABLED` 和 `TURN_BUDGET_ENABLED` 独立控制图片选择和回复预算，默认开启。视觉单图和材料阶段默认分别为 45 秒和 90 秒，进入回复处理后的预算为 120 秒。普通多段回复接近时限时会缩短拟人停顿。约 125 秒是材料桶最多 3 秒、处理 120 秒和临近截止时的 2 秒本地发送余量。会话排队、QQ 确认和语音合成的耗时需分别核对。
 
-P1 可分别开启 `MATERIAL_BUCKET_ENABLED` 和 `VISUAL_HISTORY_REFS_ENABLED`。开启审核补图前，先在测试环境确认 NapCat 能按原消息回取图片，并确认 8788 走本机、内网或有 TLS 的受保护入口。图库会校验 `STICKER_GALLERY_PASSWORD`（HTTP Basic/Bearer）；未单独设置时，若启用了补图则回落到 `STICKER_HYDRATION_TOKEN`。通过后设置 `STICKER_CAPTURE_DEFER=true`、`STICKER_HYDRATION_ENABLED=true` 和私密的 `STICKER_HYDRATION_TOKEN`，保留 `STICKER_REVIEW_ENABLED=true`。重启两个独立单元并检查状态。
+P1 可分别开启 `MATERIAL_BUCKET_ENABLED` 和 `VISUAL_HISTORY_REFS_ENABLED`。开启审核补图前，先在测试环境确认 NapCat 能按原消息回取图片，并确认 8788 走本机、内网或有 TLS 的受保护入口。图库会校验 `STICKER_GALLERY_PASSWORD`（HTTP Basic/Bearer）；未单独设置时，若启用了补图则回落到 `STICKER_HYDRATION_TOKEN`。8788 监听非本机地址时必须至少配置其中之一，否则图库拒绝启动，避免控制面裸奔。通过后设置 `STICKER_CAPTURE_DEFER=true`、`STICKER_HYDRATION_ENABLED=true` 和私密的 `STICKER_HYDRATION_TOKEN`，保留 `STICKER_REVIEW_ENABLED=true`。重启两个独立单元并检查状态。
 
 图库根据 `BOT_QQ` 选择审核账号。确认它与 NapCat 的实际登录号一致，并确认机器人和图库使用同一套表情目录。如果启用了账号独立表情目录，启动图库时用 `--dir` 指定该账号实际使用的目录。
 

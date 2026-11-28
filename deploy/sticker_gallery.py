@@ -750,9 +750,12 @@ def main() -> int:
         and args.host not in {"127.0.0.1", "localhost", "::1"}
     ):
         print(
-            "[gallery] WARNING: 8788 未设置 STICKER_GALLERY_PASSWORD，"
-            "且当前不是仅本机监听；请用防火墙/反向代理限制访问。"
+            "[gallery] ERROR: 8788 监听非本机地址时必须设置 "
+            "STICKER_GALLERY_PASSWORD（或启用 hydration 并提供 STICKER_HYDRATION_TOKEN）；"
+            "拒绝在无鉴权状态下启动。"
         )
+        server.server_close()
+        return 1
     print(f"serving {sticker_dir}")
     print(f"review images auto-delete after {args.review_ttl}s")
     print(f"open http://<server-ip>:{args.port} in your local browser")
