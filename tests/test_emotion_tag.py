@@ -101,41 +101,58 @@ def test_choose_accepts_evidence_backed_tag(tmp_path) -> None:
     assert choice.emotion == "pout"
 
 
-def test_choose_without_override_falls_back_to_keyword_detection(tmp_path) -> None:
+def test_choose_without_override_uses_reply_emotion(tmp_path) -> None:
     manager = _manager(tmp_path)
 
+    # 用户说“哈哈你好笨”不代表亚托莉也在开心；她回“哼哒”才是这轮
+    # 真正要配的表情，无标签兜底不能镜像用户情绪。
     choice = manager.choose(
         "哈哈你好笨",
-        "哼，谁笨了",
+        "哼哒，谁笨了",
         chance=1.0,
         cooldown_seconds=0,
     )
 
     assert choice is not None
-    assert choice.emotion == "happy"
+    assert choice.emotion == "pout"
 
 
-def test_choose_neutral_override_falls_back_to_detection(tmp_path) -> None:
+def test_choose_without_override_does_not_mirror_user_anger(tmp_path) -> None:
+    manager = _manager(tmp_path)
+
+    # 用户生气，但亚托莉在安抚和接活：这轮应配 comfort，而不是 angry。
+    choice = manager.choose(
+        "气死我了",
+        "别急，我帮你看看怎么回事。",
+        chance=1.0,
+        cooldown_seconds=0,
+    )
+
+    assert choice is not None
+    assert choice.emotion == "comfort"
+
+
+def test_choose_neutral_override_falls_back_to_reply_emotion(tmp_path) -> None:
     manager = _manager(tmp_path)
 
     choice = manager.choose(
         "哈哈你好笨",
-        "哼，谁笨了",
+        "哼哒，谁笨了",
         chance=1.0,
         cooldown_seconds=0,
         emotion_override="neutral",
     )
 
     assert choice is not None
-    assert choice.emotion == "happy"
+    assert choice.emotion == "pout"
 
 
-def test_choose_invalid_override_falls_back_to_detection(tmp_path) -> None:
+def test_choose_invalid_override_falls_back_to_reply_emotion(tmp_path) -> None:
     manager = _manager(tmp_path)
 
     choice = manager.choose(
-        "气死我了",
-        "哼，我站你这边",
+        "他们又欺负你了？",
+        "气死我了，我站你这边",
         chance=1.0,
         cooldown_seconds=0,
         emotion_override="not-a-real-emotion",
@@ -143,6 +160,68 @@ def test_choose_invalid_override_falls_back_to_detection(tmp_path) -> None:
 
     assert choice is not None
     assert choice.emotion == "angry"
+
+
+def test_choose_rejects_angry_tag_for_neutral_reply(tmp_path) -> None:
+    manager = _manager(tmp_path)
+
+    # 分享网站、确认需求时，回复本身没有任何生气证据；模型即使误报 angry
+    # 也不能直接拿去 angry 目录随机抽图。
+    choice = manager.choose(
+        "https://example.com 这个网站你可以看看",
+        "这个网站我认得，你发这个是打算让我帮你查点什么？",
+        chance=1.0,
+        cooldown_seconds=0,
+        emotion_override="angry",
+    )
+
+    assert choice is None
+    assert manager.validate_emotion_tag(
+        "angry",
+        "这个网站你可以看看",
+        "这个网站我认得，你发这个是打算让我帮你查点什么？",
+    ) == "neutral"
+
+
+def test_choose_does_not_mirror_user_anger(tmp_path) -> None:
+    manager = _manager(tmp_path)
+
+    # 用户生气不代表亚托莉也在生气；她这句是在安抚和接活。
+    choice = manager.choose(
+        "气死我了",
+        "别急，我帮你看看怎么回事。",
+        chance=1.0,
+        cooldown_seconds=0,
+        emotion_override="angry",
+    )
+
+    assert choice is None
+
+
+def test_choose_accepts_angry_tag_with_reply_evidence(tmp_path) -> None:
+    manager = _manager(tmp_path)
+
+    choice = manager.choose(
+        "他们又欺负你了？",
+        "气死我了，我帮你骂回去。",
+        chance=1.0,
+        cooldown_seconds=0,
+        emotion_override="angry",
+    )
+
+    assert choice is not None
+    assert choice.emotion == "angry"
+
+
+def test_validate_strong_tag_uses_reply_text_not_user_text(tmp_path) -> None:
+    manager = _manager(tmp_path)
+
+    assert manager.validate_emotion_tag(
+        "angry", "气死我了", "我帮你看看怎么回事。"
+    ) == "neutral"
+    assert manager.validate_emotion_tag(
+        "angry", "他们又欺负你了？", "气死我了，我帮你骂回去。"
+    ) == "angry"
 
 
 # --- build_outgoing_messages：透传标签 ---

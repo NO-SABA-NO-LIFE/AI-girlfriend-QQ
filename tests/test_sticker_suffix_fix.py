@@ -120,13 +120,24 @@ def test_negated_keyword_does_not_count(tmp_path: Path) -> None:
     assert manager.detect_emotion("你别喊救命", "好。") == "neutral"
 
 
-def test_uncontradicted_tag_without_evidence_is_trusted(tmp_path: Path) -> None:
+def test_strong_tag_without_reply_evidence_is_downgraded(tmp_path: Path) -> None:
     manager = StickerManager(tmp_path / "stickers")
 
-    # No keyword evidence anywhere, so nothing contradicts the model's tag.
+    # 强情绪标签必须能在亚托莉自己的回复里找到证据；“走，出发”没有
+    # pout 证据，不能因为用户文本没有别的情绪就默认采信。
     assert manager.validate_emotion_tag(
         "pout", "一起打游戏吧", "走，出发。"
-    ) == "pout"
+    ) == "neutral"
+
+
+def test_low_key_tag_without_evidence_is_still_trusted(tmp_path: Path) -> None:
+    manager = StickerManager(tmp_path / "stickers")
+
+    # thinking/confused 这类低强度语气词不强行要求关键词，模型可以表达
+    # 关键词表覆盖不到的细微语气。
+    assert manager.validate_emotion_tag(
+        "thinking", "一起打游戏吧", "走，出发。"
+    ) == "thinking"
 
 
 def test_mismatched_face_not_built_when_tag_contradicted(tmp_path: Path) -> None:

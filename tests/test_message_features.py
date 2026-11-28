@@ -493,7 +493,9 @@ def test_new_emotion_folder_can_send_manual_image(tmp_path) -> None:
     image.write_bytes(b"fake")
     manager = StickerManager(sticker_dir)
 
-    choice = manager.choose("气死我了", "哼，我站你这边", chance=1.0, cooldown_seconds=0)
+    choice = manager.choose(
+        "他们又欺负你了？", "气死我了，我站你这边", chance=1.0, cooldown_seconds=0
+    )
 
     assert choice is not None
     assert choice.emotion == "angry"
@@ -513,7 +515,9 @@ def test_speechless_and_teasing_folders_can_send_manual_images(tmp_path) -> None
     teasing_image.write_bytes(b"fake")
     manager = StickerManager(sticker_dir)
 
-    speechless = manager.choose("无语到麻了", "我先看你一眼", chance=1.0, cooldown_seconds=0)
+    speechless = manager.choose(
+        "无语到麻了", "无语，我先看你一眼", chance=1.0, cooldown_seconds=0
+    )
     teasing = manager.choose("我超怕的，才不是", "哼哼，逗你的", chance=1.0, cooldown_seconds=0)
 
     assert speechless is not None

@@ -23,6 +23,24 @@ DEFAULT_EMOTION_KEYWORDS = _sticker_core.DEFAULT_EMOTION_KEYWORDS
 DEFAULT_EMOJIS = _sticker_core.DEFAULT_EMOJIS
 DEFAULT_QQ_FACE_IDS = _sticker_core.DEFAULT_QQ_FACE_IDS
 
+# 这些情绪会显著改变表情的观感（开心、生气、难过、亲密、得意等）。
+# 模型自报标签只有在回复正文里找到对应情绪词时才采信；否则一律降回
+# neutral，宁可不发表情，也不让中性文本配上强烈情绪图。
+STRONG_SELF_EVIDENCE_TAGS = frozenset(
+    {
+        "happy",
+        "proud",
+        "celebrate",
+        "angry",
+        "sad",
+        "affection",
+        "shy",
+        "miss",
+        "pout",
+        "surprised",
+    }
+)
+
 _FILENAME_EMOTION_HINTS = {
     "happy": ("哈哈", "开心", "满意", "热情", "可爱"),
     "comfort": ("理解",),
@@ -175,22 +193,38 @@ class StickerManager:
                 bucket["weak"] += hits["weak"] * multiplier
         return merged
 
+    def _reply_evidence(self, reply_text: str) -> dict[str, dict[str, int]]:
+        """只统计亚托莉自己回复里的情绪证据。
+
+        用户文本只代表对方的状态，不能拿来证明“亚托莉这轮在生气/开心”。
+        表情选择必须以她自己的话为准，避免用户一生气就跟着配愤怒表情。
+        """
+        return _sticker_core.collect_emotion_evidence(
+            reply_text,
+            self._keyword_table(),
+        )
+
     def validate_emotion_tag(
         self,
         tag: str,
         user_text: str,
         reply_text: str,
     ) -> str:
-        """Check a model-reported tag against the words actually spoken.
+        """Check a model-reported tag against the reply actually spoken.
 
-        Returns the tag when strong keyword evidence supports it; returns
-        ``neutral`` when the tag is unsupported and other emotions have strong
-        contradicting evidence; when no emotion is evidenced anywhere, the tag
-        is trusted (the words may carry emotion beyond the keyword table).
+        ``user_text`` is kept in the signature for compatibility and context,
+        but it must not decide the speaker's emotion.  A strong-expression tag
+        (angry/happy/sad/affection/...) needs positive evidence in the reply
+        itself; without it the tag is downgraded to ``neutral``.  Low-key
+        conversational tags (thinking/confused/speechless/awkward/teasing) may
+        still be trusted when the reply contains no contradicting evidence.
         """
-        evidence = self._weighted_evidence(user_text, reply_text)
+        evidence = self._reply_evidence(reply_text)
         own = evidence.get(tag)
-        if own and own["strong"] > 0:
+        own_strong = int((own or {}).get("strong", 0))
+        if tag in STRONG_SELF_EVIDENCE_TAGS and own_strong <= 0:
+            return "neutral"
+        if own_strong > 0:
             return tag
         contradicting = {
             emotion: hits["strong"]
@@ -199,12 +233,9 @@ class StickerManager:
         }
         return "neutral" if contradicting else tag
 
-    def detect_emotion(self, user_text: str, reply_text: str = "") -> str:
-        matched = self._match_custom_trigger(user_text)
-        if matched:
-            return _normalize_emotion(matched[0])
-
-        evidence = self._weighted_evidence(user_text, reply_text)
+    def _dominant_emotion(
+        self, evidence: dict[str, dict[str, float]]
+    ) -> str:
         # Weak, single-char/punctuation hits can never decide an emotion.
         strong = {
             emotion: hits["strong"]
@@ -222,6 +253,24 @@ class StickerManager:
             winners,
             key=lambda emotion: EMOTION_PRIORITY.get(emotion, 0),
         )
+
+    def detect_emotion(self, user_text: str, reply_text: str = "") -> str:
+        matched = self._match_custom_trigger(user_text)
+        if matched:
+            return _normalize_emotion(matched[0])
+
+        return self._dominant_emotion(
+            self._weighted_evidence(user_text, reply_text)
+        )
+
+    def detect_reply_emotion(self, reply_text: str) -> str:
+        """Detect only the speaker's own emotion for the no-tag fallback.
+
+        ``detect_emotion`` is also used to classify user-sent stickers, so it
+        keeps the user-text weighting.  For choosing Atri's expression we must
+        not mirror the user's mood; only her reply is evidence.
+        """
+        return self._dominant_emotion(self._reply_evidence(reply_text))
 
     def choose(
         self,
@@ -260,10 +309,14 @@ class StickerManager:
                     override, user_text, reply_text
                 )
                 if validated == "neutral":
+                    print(
+                        f"[stickers] emotion tag rejected tag={override!r} "
+                        f"reply={reply_text[:60]!r}"
+                    )
                     return None
                 emotion = validated
             else:
-                emotion = self.detect_emotion(user_text, reply_text)
+                emotion = self.detect_reply_emotion(reply_text)
 
         if not triggered and _in_cooldown(profile, cooldown_seconds):
             return None
