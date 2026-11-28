@@ -503,13 +503,17 @@ def _has_current_visual_context(tool_context: Any | None) -> bool:
     return False
 
 
-def _visual_fail_safe_context(tool_context: Any | None) -> Any | None:
+def _visual_fail_safe_context(tool_context: Any | None, question: str = "") -> Any | None:
+    from ..toolbox_parts.analysis_result import ToolAnalysisResult
+
     context = tool_context
     visited: set[int] = set()
     while context is not None and id(context) not in visited:
         visited.add(id(context))
         fail_safe_check = getattr(context, "requires_visual_fail_safe", None)
-        if callable(fail_safe_check) and fail_safe_check():
-            return context
+        if callable(fail_safe_check):
+            args = (question,) if isinstance(context, ToolAnalysisResult) else ()
+            if fail_safe_check(*args):
+                return context
         context = getattr(context, "material_context", None)
     return None

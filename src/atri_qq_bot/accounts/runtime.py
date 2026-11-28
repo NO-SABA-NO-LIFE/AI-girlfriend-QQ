@@ -60,21 +60,11 @@ def _build_cognition_shadow(
 def _build_stickers(
     account: Account, config: Any, layout: AccountPaths, base_config: Any
 ) -> Any:
-    from ..stickers import StickerManager
-
     # Delayed import keeps the accounts layer free of the onebot dependency at
     # module import time while still enabling vision-based sticker emotion.
-    from ..onebot.server_parts.server_connection import (
-        _build_sticker_emotion_classifier,
-    )
+    from ..onebot.server_parts.server_connection import _build_sticker_manager
 
-    return StickerManager(
-        config.sticker_dir,
-        config.sticker_trigger_file,
-        config.sticker_capture_dir,
-        emotion_classifier=_build_sticker_emotion_classifier(config),
-        review_enabled=bool(getattr(config, "sticker_review_enabled", True)),
-    )
+    return _build_sticker_manager(config)
 
 
 def _build_tools(

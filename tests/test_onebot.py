@@ -544,6 +544,7 @@ def test_connection_lifecycle_publishes_real_napcat_state(monkeypatch) -> None:
     states: list[tuple[str, str]] = []
     server = object.__new__(OneBotServer)
     server._active_websockets = set()
+    server._verified_onebot_accounts = {}
 
     class EmptyWebSocket:
         remote_address = ("127.0.0.1", 50000)
@@ -623,6 +624,8 @@ def test_group_visual_can_be_bound_to_the_following_addressed_message() -> None:
 def test_server_retains_non_replied_group_visual_until_next_reply() -> None:
     server = object.__new__(OneBotServer)
     server._pending_group_visual_events = {}
+    server._recent_group_visuals = {}
+    server.config = SimpleNamespace(bot_qq=100000001)
     visual_event = {
         "message_type": "group",
         "group_id": 20001,

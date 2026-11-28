@@ -57,7 +57,6 @@ class ToolboxStateMixin:
                 float(getattr(config, "toolbox_vision_timeout_seconds", 55.0)),
             ),
         )
-        self._vision_attempt_timeout_seconds = self.vision_timeout_seconds
         self.vision_unload_other_ollama_models = bool(
             getattr(
                 config,

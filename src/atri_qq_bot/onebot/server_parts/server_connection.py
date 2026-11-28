@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import json
 import logging
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -31,8 +31,10 @@ from ...proactive import ProactivePlanner
 from ...runtime.paths import DATA_DIR, PROJECT_ROOT
 from ...stickers import StickerManager
 from ...toolbox import ToolAnalyzer
+from ...toolbox_parts.visual_origin import stamp_visual_segments
 from ...voice import VoiceCallStore, VoiceManager
 from .. import server as _server
+from ..material_bucket import material_wait_seconds
 from ..message_batch import _merge_message_batch
 from ..message_parser import (
     extract_plain_text,
@@ -42,8 +44,10 @@ from ..message_parser import (
     normalize_poke_event,
 )
 from ..reply_policy import _as_int
+from ..visual_followup import VisualFollowupCache
 from .helpers import (
     _conversation_id,
+    _event_has_visual_material,
     _message_queue_id,
     _onebot_action_error_detail,
     _onebot_status_is_healthy,
@@ -235,6 +239,29 @@ ACCOUNT_DRAIN_TIMEOUT_SECONDS = 5.0
 ACCOUNT_DRAIN_POLL_SECONDS = 0.05
 
 
+def _sticker_hydration_enabled(config: Any) -> bool:
+    return bool(
+        config.bot_qq
+        and getattr(config, "sticker_capture_enabled", True)
+        and getattr(config, "sticker_review_enabled", True)
+        and getattr(config, "sticker_capture_defer", False)
+        and getattr(config, "sticker_hydration_enabled", False)
+        and getattr(config, "sticker_hydration_token", None)
+    )
+
+
+def _build_sticker_manager(config: Any) -> StickerManager:
+    return StickerManager(
+        config.sticker_dir,
+        config.sticker_trigger_file,
+        config.sticker_capture_dir,
+        emotion_classifier=_build_sticker_emotion_classifier(config),
+        review_enabled=bool(getattr(config, "sticker_review_enabled", True)),
+        defer_capture=_sticker_hydration_enabled(config),
+        capture_account_id=config.bot_qq,
+    )
+
+
 def _build_sticker_emotion_classifier(config: Any):
     """Return an async vision classifier closure, or None when disabled.
 
@@ -350,17 +377,12 @@ class OneBotConnectionMixin:
             except Exception as exc:
                 # 扩展架构必须可降级：认知内核不可用时仍保留原有 QQ 回复能力。
                 LOGGER.warning("认知影子内核未启用，继续使用稳定回复链路：%s", exc)
-        self.stickers = StickerManager(
-            config.sticker_dir,
-            config.sticker_trigger_file,
-            config.sticker_capture_dir,
-            emotion_classifier=_build_sticker_emotion_classifier(config),
-            review_enabled=bool(getattr(config, "sticker_review_enabled", True)),
-        )
+        self.stickers = _build_sticker_manager(config)
         self.tools = ToolAnalyzer(config)
         self.voice = VoiceManager(config)
         self.voice_calls = VoiceCallStore()
         self._active_websockets: set[Any] = set()
+        self._verified_onebot_accounts: dict[Any, int] = {}
         self._pending_actions: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._onebot_probe_failures = 0
         # 限频初值用 -inf 而不是 0.0：进程可能在系统开机后 10 分钟内启动，
@@ -385,19 +407,16 @@ class OneBotConnectionMixin:
         self._recent_visual_contexts: dict[
             str, tuple[float, Any, str, str]
         ] = {}
+        self._visual_followup_cache = VisualFollowupCache()
         # 唱歌使用独立的确定性会话控制器；群聊按“群 + 点歌用户”隔离状态。
         self.singing = SingingConversationController()
         self._group_reply_focus = GroupReplyFocusStore(bot_qq=config.bot_qq)
         self._pending_group_visual_events: dict[
             str,
-            tuple[float, dict[str, Any]],
+            deque[tuple[float, dict[str, Any]]],
         ] = {}
-        # 群维度的近期视觉素材：key=群号，value=按时间排列的
-        # (时间戳, 图片段, 发送者QQ, 发送者昵称)。保留发送者归属，避免别人发的图
-        # 在合并时被当前触发者“认领”。只在机器人被 @ 回复时才合并分析，平时不调用视觉模型。
-        self._recent_group_visuals: dict[
-            str, list[tuple[float, dict[str, Any], str, str]]
-        ] = {}
+        # 默认按群和发送者隔离。关闭图片归属时保留旧索引供回滚。
+        self._recent_group_visuals: dict[Any, Any] = {}
         # 普通群聊偶尔搭话的上次时间记录：key=群号，用于冷却控制。
         # 只在真正发出后记账；判定/生成期间用 _ambient_group_not_before 占位防双发。
         self._last_ambient_group_reply_at: dict[str, float] = {}
@@ -734,6 +753,10 @@ class OneBotConnectionMixin:
         self.config = context.config
         for name in ACCOUNT_SCOPED_ATTRIBUTES:
             setattr(self, name, context.resources.get(name))
+        self._recent_visual_contexts = {}
+        self._visual_followup_cache = VisualFollowupCache()
+        self._pending_group_visual_events = {}
+        self._recent_group_visuals = {}
 
         # 下面这几个跟着 config / reply_engine 走，必须一起重建。
         # 重建失败时**置空而不是保留旧对象**：旧对象绑定的是上一个账号的记忆，
@@ -820,6 +843,7 @@ class OneBotConnectionMixin:
         self._active_websockets.add(websocket)
         _server.publish_napcat_runtime_state("probing", detail="NapCat 已连接，正在确认 QQ 登录状态")
         health_task = asyncio.create_task(self.onebot_health_loop(websocket))
+        hydration_task = asyncio.create_task(self._sticker_hydration_loop(websocket))
         try:
             async for raw_message in websocket:
                 await self.handle_payload(websocket, raw_message)
@@ -827,8 +851,9 @@ class OneBotConnectionMixin:
             LOGGER.warning("NapCat 连接关闭或异常：%s", exc)
         finally:
             health_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await health_task
+            hydration_task.cancel()
+            await asyncio.gather(health_task, hydration_task, return_exceptions=True)
+            self._verified_onebot_accounts.pop(websocket, None)
             self._active_websockets.discard(websocket)
             if not self._active_websockets:
                 _server.publish_napcat_runtime_state(
@@ -882,6 +907,7 @@ class OneBotConnectionMixin:
                 5.0,
             )
         except Exception as exc:
+            self._verified_onebot_accounts.pop(websocket, None)
             _server.publish_onebot_probe_result(False, detail=f"QQ 状态探测失败：{exc}")
             LOGGER.warning("QQ 状态探测失败：%s", exc)
             return False
@@ -907,7 +933,12 @@ class OneBotConnectionMixin:
             )
             # 账号系统开启时按 NapCat 实际登录号切换；未开启时是空操作。
             await self.follow_napcat_account(peer_uin)
+            if peer_uin is None:
+                self._verified_onebot_accounts.pop(websocket, None)
+            else:
+                self._verified_onebot_accounts[websocket] = peer_uin
             return True
+        self._verified_onebot_accounts.pop(websocket, None)
         detail = _onebot_action_error_detail(result, default="QQ 内核报告离线或异常")
         _server.publish_onebot_probe_result(
             False,
@@ -917,6 +948,42 @@ class OneBotConnectionMixin:
         )
         LOGGER.warning("QQ 状态异常：%s", detail)
         return False
+
+    async def _sticker_hydration_loop(self, websocket: Any) -> None:
+        while websocket in self._active_websockets:
+            config = self.config
+            stickers = self.stickers
+            if (
+                stickers is not None
+                and _sticker_hydration_enabled(config)
+                and self._verified_onebot_accounts.get(websocket) == config.bot_qq
+            ):
+                checked_account = False
+
+                async def call_action(action: str, params: dict[str, Any], timeout: float):
+                    nonlocal checked_account
+                    if not checked_account:
+                        checked_account = await self._napcat_login_uin(websocket) == config.bot_qq
+                    if (
+                        not checked_account
+                        or websocket not in self._active_websockets
+                        or self.config is not config
+                        or self._verified_onebot_accounts.get(websocket) != config.bot_qq
+                    ):
+                        raise RuntimeError("补图期间 QQ 连接或账号已变更")
+                    return await self.call_action_and_wait(websocket, action, params, timeout)
+
+                try:
+                    await stickers.hydrate_pending(
+                        call_action,
+                        max_bytes=config.sticker_capture_max_bytes,
+                        max_attempts=config.sticker_hydration_max_attempts,
+                        stale_seconds=config.sticker_hydration_stale_seconds,
+                        pending_ttl_seconds=config.sticker_pending_ttl_seconds,
+                    )
+                except Exception:
+                    LOGGER.exception("表情补图队列处理失败")
+            await asyncio.sleep(getattr(config, "sticker_hydration_poll_seconds", 2.0))
 
     async def _napcat_login_uin(self, websocket: Any) -> int | None:
         """读取 NapCat 实际登录的 QQ 号；失败返回 None（不影响健康判断）。"""
@@ -1090,7 +1157,7 @@ class OneBotConnectionMixin:
         )
 
     async def _conversation_worker(self, queue_id: str) -> None:
-        """在 1.2 秒窗口内合并同一会话的连续输入，再串行处理。"""
+        """合并同一发送者的连续输入，再串行处理。"""
         queue = self._conversation_queues[queue_id]
         try:
             while True:
@@ -1105,14 +1172,49 @@ class OneBotConnectionMixin:
                     continue
 
                 batch = [(websocket, event)]
-                await asyncio.sleep(_server.MESSAGE_DEBOUNCE_SECONDS)
+                config = getattr(self, "config", None)
+                base_wait = _server.MESSAGE_DEBOUNCE_SECONDS
+                wait_seconds = material_wait_seconds(event, config, base_wait)
+                started_waiting = asyncio.get_running_loop().time()
+                deadline = started_waiting + wait_seconds
+                await asyncio.sleep(base_wait)
                 while True:
                     try:
                         batch.append(queue.get_nowait())
                     except asyncio.QueueEmpty:
                         break
 
+                if wait_seconds > base_wait and not any(
+                    _event_has_visual_material(item) for _, item in batch
+                ):
+                    while asyncio.get_running_loop().time() < deadline:
+                        try:
+                            async with asyncio.timeout_at(deadline):
+                                item = await queue.get()
+                        except TimeoutError:
+                            break
+                        batch.append(item)
+                        if _event_has_visual_material(item[1]):
+                            while not queue.empty():
+                                batch.append(queue.get_nowait())
+                            break
+
+                if (
+                    getattr(config, "image_attribution_enabled", False)
+                    or getattr(config, "visual_history_refs_enabled", False)
+                    or getattr(config, "sticker_capture_defer", False)
+                ):
+                    batch = [
+                        (source, stamp_visual_segments(item, message_order=index))
+                        for index, (source, item) in enumerate(batch)
+                    ]
                 merged_websocket, merged_event = _merge_message_batch(batch)
+                merged_event = {
+                    **merged_event,
+                    "_atri_material_elapsed_ms": round(
+                        (asyncio.get_running_loop().time() - started_waiting) * 1000
+                    ),
+                }
                 await self._handle_event(merged_websocket, merged_event)
         finally:
             if queue.empty():

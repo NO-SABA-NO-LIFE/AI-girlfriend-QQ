@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import random
 import re
+import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,7 +14,20 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .runtime.media_observability import log_hydration
 from .sticker_parts import core as _sticker_core
+from .sticker_parts.hydration import (
+    ActionCaller,
+    StickerHydrationQueue,
+    build_capture,
+    fetch_captured_image,
+    onebot_id,
+)
+from .toolbox_parts.visual_origin import (
+    MESSAGE_ID_META_KEY,
+    SEGMENT_INDEX_META_KEY,
+    VISUAL_SEGMENT_TYPES,
+)
 
 
 IMAGE_EXTENSIONS = _sticker_core.IMAGE_EXTENSIONS
@@ -138,6 +153,9 @@ class StickerManager:
         capture_dir: Path | None = None,
         emotion_classifier: Any = None,
         review_enabled: bool = False,
+        *,
+        defer_capture: bool = False,
+        capture_account_id: int | None = None,
     ) -> None:
         self.sticker_dir = sticker_dir
         self.trigger_file = trigger_file or sticker_dir / "triggers.json"
@@ -151,6 +169,12 @@ class StickerManager:
         # New stickers wait here for review. The underscore prefix is ignored by
         # every sending/selection path, so pending images are never auto-sent.
         self.review_dir = self.sticker_dir / "_review"
+        self.capture_account_id = onebot_id(capture_account_id)
+        self.hydration_queue = (
+            StickerHydrationQueue(self.review_dir)
+            if self.review_enabled and defer_capture and self.capture_account_id
+            else None
+        )
         # Optional async callable (image_bytes, mime_type, hint_text) -> emotion
         # label. Injected by the server layer so this manager stays decoupled
         # from the vision client. None means text-only classification.
@@ -561,18 +585,55 @@ class StickerManager:
             return []
 
         review_enabled = bool(getattr(self, "review_enabled", False))
+        deferred: set[int] = set()
+        hydration_queue = getattr(self, "hydration_queue", None)
+        if review_enabled and hydration_queue is not None:
+            account_id = self.capture_account_id
+            receiver = onebot_id(event.get("self_id"))
+            if (receiver and receiver != account_id) or onebot_id(event.get("user_id")) == account_id:
+                return []
+            records = {}
+            for index, segment in enumerate(message):
+                if not isinstance(segment, dict) or segment.get("type") not in VISUAL_SEGMENT_TYPES:
+                    continue
+                data = segment.get("data")
+                if not isinstance(data, dict):
+                    continue
+                message_id = onebot_id(data.get(MESSAGE_ID_META_KEY, event.get("message_id")))
+                original_index = data.get(SEGMENT_INDEX_META_KEY, index)
+                if type(original_index) is not int or original_index < 0:
+                    continue
+                record = build_capture(event, account_id, message_id, original_index, segment["type"], data)
+                if record is not None:
+                    records[index] = record
+            if records:
+                try:
+                    await asyncio.to_thread(hydration_queue.register, list(records.values()))
+                except (OSError, sqlite3.Error) as exc:
+                    print(f"[stickers] deferred capture storage failed: {type(exc).__name__}")
+                else:
+                    deferred = set(records)
+                    for record in records.values():
+                        log_hydration(
+                            record.capture_id, record.message_id, record.account_id, status="registered",
+                        )
+            if len(deferred) == len(message):
+                return []
+
         # Text-based emotion is both the vision hint and the safe fallback.
         text_emotion = self.detect_emotion(context_text)
         if text_emotion == "neutral":
             text_emotion = "unsorted"
         saved: list[Path] = []
         for index, segment in enumerate(message):
-            if not isinstance(segment, dict):
+            if index in deferred or not isinstance(segment, dict):
                 continue
-            if segment.get("type") not in {"image", "mface", "marketface"}:
+            if segment.get("type") not in VISUAL_SEGMENT_TYPES:
                 continue
 
-            data = segment.get("data") or {}
+            data = segment.get("data")
+            if not isinstance(data, dict):
+                continue
             url = _first_url(data)
             if not url:
                 continue
@@ -598,6 +659,58 @@ class StickerManager:
                 saved.append(path)
 
         return saved
+
+    async def hydrate_pending(
+        self,
+        action_caller: ActionCaller,
+        *,
+        max_bytes: int = 3_000_000,
+        max_attempts: int = 3,
+        stale_seconds: float = 60,
+        pending_ttl_seconds: float = 172800,
+    ) -> bool:
+        """Process one owner-requested capture using a verified account connection."""
+        queue = self.hydration_queue
+        if queue is None:
+            return False
+        record = await asyncio.to_thread(
+            queue.claim,
+            self.capture_account_id,
+            max_attempts=max_attempts,
+            stale_seconds=stale_seconds,
+            max_age_seconds=pending_ttl_seconds,
+        )
+        if record is None:
+            return False
+        started_at = asyncio.get_running_loop().time()
+        try:
+            async with asyncio.timeout(25):
+                image, reason = await fetch_captured_image(record, action_caller, max_bytes)
+        except asyncio.CancelledError:
+            await asyncio.to_thread(queue.release, record)
+            raise
+        except TimeoutError:
+            image, reason = None, "download_timeout"
+        except Exception:
+            image, reason = None, "adapter_error"
+
+        status = None
+        if image is not None:
+            try:
+                if await asyncio.to_thread(queue.finish, record, *image):
+                    status = "hydrated"
+            except (OSError, sqlite3.Error):
+                reason = "storage_error"
+                status = await asyncio.to_thread(queue.fail, record, reason, max_attempts)
+        else:
+            status = await asyncio.to_thread(queue.fail, record, reason, max_attempts)
+        if status:
+            log_hydration(
+                record.capture_id, record.message_id, record.account_id,
+                status=status, attempts=record.attempts, reason=reason,
+                elapsed_ms=round((asyncio.get_running_loop().time() - started_at) * 1000),
+            )
+        return True
 
     def _write_review_bytes(
         self,

@@ -11,6 +11,7 @@ from ..voice import (
     load_voice_behavior,
 )
 from .input_helpers import (
+    ChatRequestBudget,
     _is_owner_id,
     _parse_affection_set_value,
     _user_id_from_profile_id,
@@ -52,6 +53,8 @@ class EngineReplyMixin:
         reply_focus: GroupReplyFocus | None = None,
         extra_system: str | None = None,
         hd2_nl_allowed: bool = False,
+        turn_deadline: float | None = None,
+        visual_question: str | None = None,
     ) -> str:
         # 主流程遵循“清洗输入 -> 记录记忆 -> 确定性分支/安全兜底
         # -> 组织模型上下文 -> 校验输出”，便于定位每个阶段的责任。
@@ -121,7 +124,9 @@ class EngineReplyMixin:
         if repair_mode:
             self._activate_serious_mode(conversation_id, profile_id)
 
-        visual_fail_safe_context = _visual_fail_safe_context(tool_context)
+        visual_fail_safe_context = _visual_fail_safe_context(
+            tool_context, clean_text if visual_question is None else visual_question,
+        )
         if visual_fail_safe_context is not None:
             self._register_reply_failure(
                 conversation_id,
@@ -156,7 +161,12 @@ class EngineReplyMixin:
                 # 本轮所有串行子调用（主生成、历史审校、现实/证据修复、重写）
                 # 共享同一个单调截止时刻，避免每个调用都按完整预算发起，
                 # 模型一慢就层层累积成 ReadTimeout。
-                chat_deadline = new_chat_deadline(self.config)
+                chat_deadline = new_chat_deadline(self.config, turn_deadline)
+                request_options = (
+                    {"request_budget": ChatRequestBudget(chat_deadline)}
+                    if turn_deadline is not None
+                    else {}
+                )
                 voice_policy = load_voice_behavior()
                 voice_profile = (
                     context_profile
@@ -207,6 +217,7 @@ class EngineReplyMixin:
                     allow_reply_voice=allow_reply_voice,
                     chat_deadline=chat_deadline,
                     hd2_nl_allowed=hd2_nl_allowed,
+                    **request_options,
                 )
                 human_pipeline = bool(
                     getattr(self.config, "human_reply_pipeline_enabled", True)
@@ -231,6 +242,7 @@ class EngineReplyMixin:
                         api_reply,
                         recent_messages,
                         chat_deadline=chat_deadline,
+                        **request_options,
                     )
                     if reviewed_reply:
                         api_reply = reviewed_reply
@@ -268,6 +280,7 @@ class EngineReplyMixin:
                         reply_focus=reply_focus,
                         allow_reply_voice=False,
                         chat_deadline=chat_deadline,
+                        **request_options,
                     )
                     if reality_reply and not _needs_hard_reality_repair(reality_reply):
                         api_reply = reality_reply
@@ -313,6 +326,7 @@ class EngineReplyMixin:
                         reply_focus=reply_focus,
                         allow_reply_voice=False,
                         chat_deadline=chat_deadline,
+                        **request_options,
                     )
                     if grounded_reply and not grounding_check(grounded_reply):
                         api_reply = grounded_reply
@@ -350,6 +364,7 @@ class EngineReplyMixin:
                             reply_focus=reply_focus,
                             allow_reply_voice=allow_reply_voice,
                             chat_deadline=chat_deadline,
+                            **request_options,
                         )
                         if rewritten:
                             api_reply = rewritten

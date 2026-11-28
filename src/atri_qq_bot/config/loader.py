@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 from typing import Any, Mapping
@@ -92,6 +93,26 @@ def _build_config(root: Path) -> BotConfig:
     )
     openai_api_key = _optional_env("OPENAI_API_KEY")
     bot_qq = _env_int("BOT_QQ", 0)
+    chat_request_timeout = max(
+        5.0, min(60.0, _env_float("CHAT_REQUEST_TIMEOUT_SECONDS", 25.0))
+    )
+    chat_min_attempt = _env_float("CHAT_MIN_ATTEMPT_SECONDS", 5.0)
+    turn_seconds = _env_float("TURN_BUDGET_SECONDS", 120.0)
+    chat_reserve = _env_float("TURN_MIN_CHAT_SECONDS", 30.0)
+    vision_stage_seconds = _env_float("TOOLBOX_VISION_STAGE_BUDGET_SECONDS", 90.0)
+    image_seconds = _env_float("TOOLBOX_VISION_IMAGE_BUDGET_SECONDS", 45.0)
+    if not (
+        all(math.isfinite(value) for value in (
+            chat_min_attempt, turn_seconds, chat_reserve, vision_stage_seconds, image_seconds
+        ))
+        and 0 < chat_min_attempt <= min(chat_request_timeout, chat_reserve)
+        and 0 < image_seconds <= vision_stage_seconds
+        and vision_stage_seconds + chat_reserve <= turn_seconds
+    ):
+        raise ValueError(
+            "Reply budgets require 0 < CHAT_MIN_ATTEMPT_SECONDS <= chat timeout and reserve, "
+            "0 < image budget <= vision stage budget, and vision stage + chat reserve <= turn budget"
+        )
     qq_records_root = _env_path(
         "QQ_RECORDS_ROOT",
         Path.home() / "Documents" / "Tencent Files",
@@ -132,9 +153,13 @@ def _build_config(root: Path) -> BotConfig:
         temperature=_env_float("TEMPERATURE", 0.8),
         frequency_penalty=_env_float("FREQUENCY_PENALTY", 0.25),
         max_tokens=_env_int("MAX_TOKENS", 350),
-        chat_request_timeout_seconds=max(
-            5.0, min(60.0, _env_float("CHAT_REQUEST_TIMEOUT_SECONDS", 25.0))
-        ),
+        chat_request_timeout_seconds=chat_request_timeout,
+        chat_min_attempt_seconds=chat_min_attempt,
+        turn_budget_enabled=_env_bool("TURN_BUDGET_ENABLED", True),
+        turn_budget_seconds=turn_seconds,
+        turn_min_chat_seconds=chat_reserve,
+        toolbox_vision_stage_budget_seconds=vision_stage_seconds,
+        toolbox_vision_image_budget_seconds=image_seconds,
         chat_resource_wait_seconds=max(
             5.0, min(60.0, _env_float("CHAT_RESOURCE_WAIT_SECONDS", 35.0))
         ),
@@ -176,10 +201,24 @@ def _build_config(root: Path) -> BotConfig:
             "STICKER_VISION_CLASSIFY_ENABLED", True
         ),
         sticker_review_enabled=_env_bool("STICKER_REVIEW_ENABLED", True),
+        sticker_capture_defer=_env_bool("STICKER_CAPTURE_DEFER", False),
+        sticker_hydration_enabled=_env_bool("STICKER_HYDRATION_ENABLED", False),
+        sticker_hydration_token=_optional_env("STICKER_HYDRATION_TOKEN"),
+        sticker_hydration_poll_seconds=max(0.25, _env_float("STICKER_HYDRATION_POLL_SECONDS", 2.0)),
+        sticker_hydration_max_attempts=max(1, _env_int("STICKER_HYDRATION_MAX_ATTEMPTS", 3)),
+        sticker_hydration_stale_seconds=max(26.0, _env_float("STICKER_HYDRATION_STALE_SECONDS", 60.0)),
+        sticker_pending_ttl_seconds=max(60.0, _env_float("STICKER_PENDING_TTL_SECONDS", 172800.0)),
         group_reply_quote_enabled=_env_bool("GROUP_REPLY_QUOTE_ENABLED", True),
+        image_attribution_enabled=_env_bool("IMAGE_ATTRIBUTION_ENABLED", True),
+        toolbox_image_refs_max=max(1, min(8, _env_int("TOOLBOX_IMAGE_REFS_MAX", 4))),
+        visual_history_refs_enabled=_env_bool("VISUAL_HISTORY_REFS_ENABLED", False),
+        material_bucket_enabled=_env_bool("MATERIAL_BUCKET_ENABLED", False),
+        material_bucket_at_seconds=max(1.2, min(3.0, _env_float("MATERIAL_BUCKET_AT_SECONDS", 2.0))),
+        material_bucket_group_seconds=max(1.2, min(3.0, _env_float("MATERIAL_BUCKET_GROUP_SECONDS", 3.0))),
+        material_bucket_private_seconds=max(1.2, min(3.0, _env_float("MATERIAL_BUCKET_PRIVATE_SECONDS", 3.0))),
         group_recent_visual_enabled=_env_bool("GROUP_RECENT_VISUAL_ENABLED", True),
         group_recent_visual_ttl_seconds=_env_int("GROUP_RECENT_VISUAL_TTL_SECONDS", 300),
-        group_recent_visual_max=_env_int("GROUP_RECENT_VISUAL_MAX", 3),
+        group_recent_visual_max=_env_int("GROUP_RECENT_VISUAL_MAX", 4),
         visual_history_window_seconds=max(
             60, _env_int("VISUAL_HISTORY_WINDOW_SECONDS", 1800)
         ),

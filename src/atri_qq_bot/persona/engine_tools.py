@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 from datetime import datetime
 from typing import Any
@@ -41,6 +43,7 @@ from ..voice import (
     voice_policy_prompt,
 )
 from .input_helpers import (
+    ChatRequestBudget,
     _chat_http_timeout,
     _is_local_ollama_endpoint,
     _shorten,
@@ -100,6 +103,7 @@ class EngineToolsMixin:
         allow_reply_voice: bool | None = None,
         request_timeout: float | None = None,
         hd2_nl_allowed: bool = False,
+        request_budget: ChatRequestBudget | None = None,
     ) -> str:
         import httpx
 
@@ -463,6 +467,13 @@ class EngineToolsMixin:
             if agent_protocol_enabled:
                 payload["max_tokens"] = max(int(payload["max_tokens"]), 700)
         headers = {"Authorization": f"Bearer {self.config.openai_api_key}"}
+        request_options = {"request_budget": request_budget} if request_budget else {}
+
+        async def execute_tool(name: str, arguments: Any, config: Any) -> str:
+            if request_budget and asyncio.get_running_loop().time() >= request_budget.deadline:
+                raise TimeoutError("聊天预算已用尽")
+            async with asyncio.timeout_at(request_budget.deadline if request_budget else None):
+                return await self._execute_context_tool(conversation_id, name, arguments, config)
 
         if not agent_protocol_enabled:
             async with httpx.AsyncClient(
@@ -478,14 +489,10 @@ class EngineToolsMixin:
                         client,
                         headers,
                         request_payload,
+                        **request_options,
                     ),
                     normalize_reply=_normalize_reply,
-                    tool_executor=lambda name, arguments, config: self._execute_context_tool(
-                        conversation_id,
-                        name,
-                        arguments,
-                        config,
-                    ),
+                    tool_executor=execute_tool,
                 )
                 result = await runner.run(
                     messages,
@@ -524,7 +531,7 @@ class EngineToolsMixin:
                         int(request_payload.get("max_tokens") or 0),
                         1200,
                     )
-                data = await self._post_chat_completion(client, headers, request_payload)
+                data = await self._post_chat_completion(client, headers, request_payload, **request_options)
                 message = data["choices"][0]["message"]
                 tool_calls = tool_calls_from_message(message)
                 if not tool_calls:
@@ -600,6 +607,7 @@ class EngineToolsMixin:
                             user_text,
                             candidate,
                             receipts,
+                            **request_options,
                         )
                     candidate = _fit_reply_with_sources(candidate, sources, limit=1200)
                     content = candidate
@@ -633,9 +641,7 @@ class EngineToolsMixin:
                     message,
                     [call],
                     self.config,
-                    executor=lambda name, arguments, config: self._execute_context_tool(
-                        conversation_id, name, arguments, config
-                    ),
+                    executor=execute_tool,
                     max_calls=1,
                     context_id=conversation_id,
                     receipts=round_receipts,
@@ -744,6 +750,7 @@ class EngineToolsMixin:
         user_text: str,
         candidate_reply: str,
         receipts: list[ToolExecutionReceipt],
+        request_budget: ChatRequestBudget | None = None,
     ) -> str:
         evidence_parts: list[str] = []
         remaining = 10_000
@@ -852,7 +859,8 @@ class EngineToolsMixin:
             )
         )
         try:
-            data = await self._post_chat_completion(client, headers, review_payload)
+            request_options = {"request_budget": request_budget} if request_budget else {}
+            data = await self._post_chat_completion(client, headers, review_payload, **request_options)
             reviewed = _normalize_reply(
                 str(data["choices"][0]["message"].get("content") or "")
             ).strip()
@@ -870,6 +878,7 @@ class EngineToolsMixin:
         candidate_reply: str,
         recent_messages: list[dict[str, str]],
         chat_deadline: float | None = None,
+        request_budget: ChatRequestBudget | None = None,
     ) -> str:
         import httpx
 
@@ -917,16 +926,16 @@ class EngineToolsMixin:
         ):
             payload["thinking"] = {"type": "enabled"}
         headers = {"Authorization": f"Bearer {self.config.openai_api_key}"}
-        review_timeout = chat_attempt_timeout(
-            self.config,
-            chat_deadline,
-            attempt_index=0,
-            total_attempts=1,
+        review_timeout = (
+            request_budget.deadline - asyncio.get_running_loop().time()
+            if request_budget
+            else chat_attempt_timeout(self.config, chat_deadline, attempt_index=0, total_attempts=1)
         )
         if review_timeout <= 0.0:
             return ""
         async with httpx.AsyncClient(timeout=review_timeout) as client:
-            data = await self._post_chat_completion(client, headers, payload)
+            request_options = {"request_budget": request_budget} if request_budget else {}
+            data = await self._post_chat_completion(client, headers, payload, **request_options)
         raw = str(data["choices"][0]["message"].get("content") or "").strip()
         match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
         if not match:
@@ -945,6 +954,7 @@ class EngineToolsMixin:
         client: Any,
         headers: dict[str, str],
         payload: dict[str, Any],
+        request_budget: ChatRequestBudget | None = None,
     ) -> dict[str, Any]:
         import time
 
@@ -1092,6 +1102,108 @@ class EngineToolsMixin:
                 raise last_exc
             raise RuntimeError("聊天请求在预算内未完成")
 
+        async def send_bounded_local(
+            request_payload: dict[str, Any],
+            model: str,
+            base_url: str,
+            deadline: float,
+        ) -> dict[str, Any]:
+            loop = asyncio.get_running_loop()
+            result: asyncio.Future[dict[str, Any]] = loop.create_future()
+
+            async def run() -> None:
+                try:
+                    async with inference_resource_lease(
+                        f"chat:{model}",
+                        timeout_seconds=min(
+                            float(getattr(self.config, "chat_resource_wait_seconds", 35.0)),
+                            max(0.0, deadline - loop.time()),
+                        ),
+                        priority=InferencePriority.CHAT,
+                    ):
+                        remaining = deadline - loop.time()
+                        if remaining <= 0 or not await ensure_ollama_service(
+                            timeout_seconds=min(15.0, remaining)
+                        ):
+                            raise TimeoutError("本地聊天服务未在本次预算内就绪")
+                        try:
+                            remaining = deadline - loop.time()
+                            if remaining <= 0:
+                                raise TimeoutError("本地聊天请求已耗尽本次预算")
+                            completion = await send_candidate(request_payload, model, base_url, remaining)
+                        except Exception as exc:
+                            if not result.done():
+                                result.set_exception(exc)
+                        else:
+                            if not result.done():
+                                result.set_result(completion)
+                        finally:
+                            # 释放完成前由本任务持有租约，避免换模请求和卸载并发。
+                            await release_ollama_model(model, base_url)
+                except asyncio.CancelledError:
+                    result.cancel()
+                    raise
+                except Exception as exc:
+                    if not result.done():
+                        result.set_exception(exc)
+                    else:
+                        logging.getLogger(__name__).warning("本地聊天模型清理失败：%s", exc)
+
+            task = asyncio.create_task(run())
+            try:
+                return await result
+            finally:
+                if result.cancelled():
+                    task.cancel()
+
+        async def post_bounded(
+            request_payload: dict[str, Any], budget: ChatRequestBudget
+        ) -> dict[str, Any]:
+            loop = asyncio.get_running_loop()
+            min_attempt = min(
+                per_model_budget,
+                max(0.001, float(getattr(self.config, "chat_min_attempt_seconds", 5.0))),
+            )
+            available_candidates = [
+                candidate for candidate in candidates
+                if per_model_budget - budget.model_elapsed.get(candidate, 0.0) >= min_attempt
+            ]
+            remaining = max(0.0, budget.deadline - loop.time())
+            available_candidates = available_candidates[: int(remaining / min_attempt)]
+            last_exc: Exception | None = None
+            for index, candidate in enumerate(available_candidates):
+                model, base_url = candidate
+                now = loop.time()
+                remaining = budget.deadline - now
+                model_remaining = per_model_budget - budget.model_elapsed.get(candidate, 0.0)
+                candidates_left = len(available_candidates) - index
+                model_seconds = min(model_remaining, remaining / candidates_left)
+                if model_seconds <= 0:
+                    break
+                model_deadline = min(budget.deadline, now + model_seconds)
+                attempts = min(per_model_attempts, max(1, int(model_seconds / min_attempt)))
+                for attempt in range(attempts):
+                    started = loop.time()
+                    remaining = model_deadline - started
+                    if remaining <= 0:
+                        break
+                    attempt_seconds = remaining / (attempts - attempt)
+                    attempt_deadline = min(model_deadline, started + attempt_seconds)
+                    try:
+                        async with asyncio.timeout_at(attempt_deadline):
+                            if _is_local_ollama_endpoint(base_url):
+                                return await send_bounded_local(request_payload, model, base_url, attempt_deadline)
+                            return await send_candidate(request_payload, model, base_url, attempt_seconds)
+                    except (TimeoutError, httpx.TransportError) as exc:
+                        last_exc = exc
+                    finally:
+                        budget.model_elapsed[candidate] = (
+                            budget.model_elapsed.get(candidate, 0.0) + (loop.time() - started)
+                        )
+            if last_exc is not None:
+                raise last_exc
+            raise TimeoutError("聊天请求在剩余预算内未发起")
+
         async def post_local(request_payload: dict[str, Any]) -> dict[str, Any]:
             async with inference_resource_lease(
                 f"chat:{self.config.openai_model}",
@@ -1111,6 +1223,8 @@ class EngineToolsMixin:
                     )
 
         try:
+            if request_budget is not None:
+                return await post_bounded(payload, request_budget)
             if _is_local_ollama_endpoint(self.config.openai_base_url):
                 return await post_local(payload)
             return await post_once(payload)
@@ -1136,6 +1250,8 @@ class EngineToolsMixin:
                 }
             )
             retry_payload["messages"] = retry_messages
+            if request_budget is not None:
+                return await post_bounded(retry_payload, request_budget)
             if _is_local_ollama_endpoint(self.config.openai_base_url):
                 return await post_local(retry_payload)
             return await post_once(retry_payload)
@@ -1197,6 +1313,7 @@ class EngineToolsMixin:
         allow_reply_voice: bool | None = None,
         chat_deadline: float | None = None,
         hd2_nl_allowed: bool = False,
+        request_budget: ChatRequestBudget | None = None,
     ) -> str:
         last_reply = ""
         visual_temperature = (
@@ -1210,14 +1327,19 @@ class EngineToolsMixin:
             0.30,
         )[: 1 + max(0, min(2, int(getattr(self.config, "chat_quality_retries", 1))))]
         total_attempts = len(retry_temperatures)
+        request_options = {"request_budget": request_budget} if request_budget else {}
         for attempt, temperature in enumerate(retry_temperatures):
             # 把本轮剩余预算在尚未执行的 attempt 间均分；deadline 已耗尽就
             # 不再发起注定超时的请求，直接落到循环末尾的失败处理。
-            request_timeout = chat_attempt_timeout(
-                self.config,
-                chat_deadline,
-                attempt_index=attempt,
-                total_attempts=total_attempts,
+            request_timeout = (
+                request_budget.deadline - asyncio.get_running_loop().time()
+                if request_budget
+                else chat_attempt_timeout(
+                    self.config,
+                    chat_deadline,
+                    attempt_index=attempt,
+                    total_attempts=total_attempts,
+                )
             )
             if request_timeout <= 0.0:
                 break
@@ -1257,6 +1379,7 @@ class EngineToolsMixin:
                 ),
                 request_timeout=request_timeout,
                 hd2_nl_allowed=hd2_nl_allowed,
+                **request_options,
             )
             last_reply = reply
             if (

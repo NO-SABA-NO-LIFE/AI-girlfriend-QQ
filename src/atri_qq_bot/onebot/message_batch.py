@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 
@@ -27,7 +28,7 @@ def _merge_message_batch(
 
 def _message_to_segments(message: Any) -> list[dict[str, Any]]:
     if isinstance(message, list):
-        return [dict(segment) for segment in message if isinstance(segment, dict)]
+        return [deepcopy(segment) for segment in message if isinstance(segment, dict)]
     if message is None:
         return []
     return [{"type": "text", "data": {"text": str(message)}}]

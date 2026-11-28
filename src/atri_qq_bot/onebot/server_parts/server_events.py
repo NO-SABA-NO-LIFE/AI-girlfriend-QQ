@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import logging
@@ -17,8 +18,10 @@ from ...group_reply_focus import (  # type: ignore[import-not-found]
 )
 from ...insights import EvaluationSample, context_from_tool_context
 from ...llm_tools.hd2_intent import detect_hd2_command_hint
+from ...memory.image_history import build_image_refs
 from ...message_plan import OutgoingMessage, build_outgoing_messages
 from ...persona.reply_rules import _group_speaker_label
+from ...runtime.media_observability import log_attribution, log_visual_budget, message_key
 from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
     ReplyDecision,
     evaluate_reply,
@@ -27,6 +30,8 @@ from ...runtime.reply_strategy import (  # type: ignore[import-not-found]
     object_requires_mention,
     record_reply,
 )
+from ...toolbox_parts.analysis_result import ToolAnalysisResult, _image_numbers
+from ...toolbox_parts.visual_origin import ImageOrigin, is_visual_segment
 from ...voice import (
     VoicePromptContext,
     build_autonomous_voice_fallback,
@@ -39,7 +44,6 @@ from ...voice import (
 from .. import server as _server
 from ..message_parser import (  # type: ignore[import-not-found]
     extract_plain_text,
-    extract_reply_message_id,
     group_increase_text,
 )
 from ..reply_policy import (  # type: ignore[import-not-found]
@@ -51,13 +55,16 @@ from ..reply_policy import (  # type: ignore[import-not-found]
     poke_command_target,
     should_reply,
 )
+from ..reply_budget import ReplyBudget, reply_phase
+from ..visual_followup import CachedImage, referenced_message_id
 from .helpers import (
     _compose_model_input,
     _conversation_id,
     _event_has_visual_material,
     _nickname,
-    _pending_visual_key,
     _profile_id,
+    _quoted_payload_matches,
+    _quoted_response_data,
     _should_reuse_cached_visual,
 )
 from .server_connection import _note_hd2_turn_text, _record_hd2_msg_ids
@@ -134,6 +141,7 @@ class OneBotEventMixin:
 
     async def _handle_event(self, websocket: Any, event: dict[str, Any]) -> None:
         """执行一次完整的入站消息决策和回复流程。"""
+        started_at = asyncio.get_running_loop().time()
         # 排队期间可能已切号。先复核身份，再进入确定性指令和普通回复。
         event_self_id = _as_int(event.get("self_id"))
         if event_self_id is not None and event_self_id != self.config.bot_qq:
@@ -184,6 +192,21 @@ class OneBotEventMixin:
             and _as_int(event.get("user_id")) != self.config.bot_qq
             and _as_int(event.get("self_id")) in {None, self.config.bot_qq}
         )
+        budget = None
+        if (
+            is_message
+            and not (push_event or poke_command_hit)
+            and getattr(self.config, "turn_budget_enabled", False)
+        ):
+            budget = ReplyBudget.create(
+                started_at,
+                self.config.turn_budget_seconds,
+                self.config.toolbox_vision_stage_budget_seconds,
+                self.config.turn_min_chat_seconds,
+            )
+        analysis_deadline = budget.analysis_deadline if budget is not None else None
+        image_attribution = getattr(self.config, "image_attribution_enabled", True)
+        visual_history = getattr(self.config, "visual_history_refs_enabled", False)
 
         # 被戳时先回戳对方（再走下面的文字回复），像真人互相戳着玩。
         # 回戳用独立短冷却：连续戳都能回戳，只防秒级狂戳。
@@ -205,7 +228,7 @@ class OneBotEventMixin:
         # 触发判断前先确定被引用者：能补齐 event.reply 时，后续"引用了谁"的
         # 判断就是确定值，而不是在信息缺失时盲目抢答。
         if is_message and _has_reply_segment(event):
-            await self._ensure_quoted_sender_id(websocket, event)
+            await self._ensure_quoted_sender_id(websocket, event, deadline=analysis_deadline)
 
         # 群里有人明确表示“不聊了”：结束该成员会话，回一句确定性俏皮话后直接
         # 收尾，不再打开/续期会话，也不走模型与随机搭话，避免对方已经想停却还在接话。
@@ -280,11 +303,15 @@ class OneBotEventMixin:
                 ):
                     continuation_gate_checked = True
                     group_context = self._format_ambient_group_context(event)
-                    if await self._llm_ambient_gate_should_reply(
-                        plain_text,
-                        group_context,
-                        speaker_name=_nickname(event) or "",
-                    ):
+                    confirmed = False
+                    with contextlib.suppress(TimeoutError):
+                        async with reply_phase(analysis_deadline):
+                            confirmed = await self._llm_ambient_gate_should_reply(
+                                plain_text,
+                                group_context,
+                                speaker_name=_nickname(event) or "",
+                            )
+                    if confirmed:
                         self._group_reply_focus.renew_continuation(event)
                         active_group_continuation = True
                 preliminary_reply = preliminary_reply or active_group_continuation
@@ -295,9 +322,11 @@ class OneBotEventMixin:
                     and not continuation_gate_checked
                     and not self._group_reply_focus.is_suppressed(event)
                 ):
-                    proactive_ambient = await self._maybe_ambient_group_reply(
-                        event, plain_text
-                    )
+                    with contextlib.suppress(TimeoutError):
+                        async with reply_phase(analysis_deadline):
+                            proactive_ambient = await self._maybe_ambient_group_reply(
+                                event, plain_text
+                            )
                     preliminary_reply = preliminary_reply or proactive_ambient
         # 休眠期内只放行 @ 或引用机器人：关键词、续聊、随机搭话一律不回。
         if group_suppressed:
@@ -315,15 +344,16 @@ class OneBotEventMixin:
         voice_error: Exception | None = None
         if is_message and (event.get("message_type") == "private" or preliminary_reply):
             try:
-                voice_transcript = await self.voice.transcribe_event(
-                    event,
-                    lambda action, params: self.call_action_and_wait(
-                        websocket,
-                        action,
-                        params,
-                        self.config.voice_service_timeout_seconds,
-                    ),
-                )
+                async with reply_phase(analysis_deadline):
+                    voice_transcript = await self.voice.transcribe_event(
+                        event,
+                        lambda action, params: self.call_action_and_wait(
+                            websocket,
+                            action,
+                            params,
+                            self.config.voice_service_timeout_seconds,
+                        ),
+                    )
             except Exception as exc:
                 voice_error = exc
                 print(f"[onebot] Voice transcription skipped: {exc}")
@@ -332,12 +362,13 @@ class OneBotEventMixin:
 
         if is_message:
             with contextlib.suppress(Exception):
-                await self.stickers.capture_from_event(
-                    event,
-                    plain_text,
-                    self.config.sticker_capture_enabled,
-                    self.config.sticker_capture_max_bytes,
-                )
+                async with reply_phase(analysis_deadline):
+                    await self.stickers.capture_from_event(
+                        event,
+                        plain_text,
+                        self.config.sticker_capture_enabled,
+                        self.config.sticker_capture_max_bytes,
+                    )
 
         should_send_reply = preliminary_reply
         conversation_id = _conversation_id(event)
@@ -464,7 +495,13 @@ class OneBotEventMixin:
             )
 
         if is_message:
+            message_id = str(event.get("message_id") or "") or None
+            history_options: dict[str, Any] = (
+                {"image_refs": build_image_refs(event)} if visual_history else {}
+            )
             if event.get("message_type") == "group":
+                if visual_history:
+                    history_options["event_id"] = message_id
                 self.reply_engine.observe_group_incoming(
                     event.get("group_id"),
                     event.get("user_id"),
@@ -476,6 +513,7 @@ class OneBotEventMixin:
                     addressed_to_bot=addressed_to_bot,
                     is_owner=is_owner,
                     remember_targets=True,
+                    **history_options,
                 )
             else:
                 self.reply_engine.remember_target(conversation_id, event)
@@ -488,7 +526,8 @@ class OneBotEventMixin:
                     actor_id=event.get("user_id"),
                     runtime_context=False,
                     profile_id=profile_id,
-                    event_id=str(event.get("message_id") or "") or None,
+                    event_id=message_id,
+                    **history_options,
                 )
 
         if not should_send_reply:
@@ -580,14 +619,23 @@ class OneBotEventMixin:
                 self._finish_ambient_claim(event, delivered=True)
             return
 
-        if group_reply_focus is not None and group_reply_focus.source == "previous_same_sender":
-            analysis_event = group_reply_focus.analysis_event
-            self._pending_group_visual_events.pop(_pending_visual_key(event), None)
+        requested_quote_id = referenced_message_id(event)
+        if (image_attribution or visual_history) and requested_quote_id:
+            # An explicit reference fixes the target. Unrelated pending and
+            # recent images must not stand in for a missing quoted message.
+            analysis_event = event
+        elif group_reply_focus is not None and group_reply_focus.source == "previous_same_sender":
+            analysis_event = self._event_with_pending_group_visual(
+                event, focus_event=group_reply_focus.analysis_event
+            )
         else:
             analysis_event = self._event_with_pending_group_visual(event)
-        # 被 @ 回复时，顺带把群里近期图片/表情合并进本次分析（平时不主动分析）。
-        analysis_event = self._event_with_recent_group_visuals(analysis_event)
-
+        vision_allowed = _server.is_event_modality_allowed(event, "vision")
+        history_quote_refs = []
+        if visual_history and vision_allowed and requested_quote_id:
+            history_quote_refs = self.reply_engine.memory.history_image_refs(
+                conversation_id, requested_quote_id
+            )
         (
             quoted_message_id,
             quoted_text,
@@ -595,15 +643,82 @@ class OneBotEventMixin:
             quoted_sender_name,
             quoted_sender_id,
             quoted_sent_at,
-        ) = await self._resolve_quoted_message(
-            websocket,
-            event,
+        ) = await self._resolve_quoted_message(websocket, event, deadline=analysis_deadline)
+
+        cached_images: list[CachedImage] = []
+        cache = getattr(self, "_visual_followup_cache", None) if visual_history else None
+        user_image_followup = _should_reuse_cached_visual(analysis_event, plain_text)
+        incoming_segments = event.get("message")
+        has_other_material = isinstance(incoming_segments, list) and any(
+            isinstance(item, dict) and item.get("type") in {"file", "video"}
+            for item in incoming_segments
         )
+        if (
+            cache is not None
+            and vision_allowed
+            and not _event_has_visual_material(analysis_event)
+            and not has_other_material
+            and "://" not in plain_text
+            and "://" not in quoted_text
+            and (user_image_followup or quoted_message_id)
+        ):
+            if quoted_message_id:
+                matched = cache.find_message(conversation_id, quoted_message_id, now=started_at)
+                if any(item.result is not None for item in matched):
+                    by_index = {item.origin.segment_index: item for item in matched}
+                    if quoted_segments:
+                        live_indices = [
+                            index for index, item in enumerate(quoted_segments) if is_visual_segment(item)
+                        ]
+                        targets = _image_numbers(plain_text, len(live_indices))
+                        needed = live_indices if not targets else [
+                            index for number, index in enumerate(live_indices, 1) if number in targets
+                        ]
+                        if needed and (not targets or len(needed) == len(targets)) and all(
+                            index in by_index and by_index[index].result is not None for index in needed
+                        ):
+                            cached_images = [
+                                by_index.get(index) or CachedImage(ImageOrigin(
+                                    message_id=quoted_message_id, segment_index=index,
+                                    sender_id=quoted_sender_id, sender_name=quoted_sender_name,
+                                    origin="quoted",
+                                ), None)
+                                for index in live_indices
+                            ]
+                    else:
+                        for ref in history_quote_refs:
+                            index = ref["segment_index"]
+                            by_index.setdefault(index, CachedImage(ImageOrigin(
+                                message_id=quoted_message_id, segment_index=index,
+                                sender_id=ref["sender_id"], sender_name=ref["sender_name"],
+                                origin="quoted", reason="download_failed",
+                            ), None))
+                        cached_images = [by_index[index] for index in sorted(by_index)]
+            else:
+                latest = cache.find(
+                    conversation_id,
+                    sender_id=str(event.get("user_id") or ""),
+                    message_id="",
+                    now=started_at,
+                )
+                if latest is not None:
+                    cached_images = [latest]
+        if not cached_images and not ((image_attribution or visual_history) and quoted_message_id):
+            analysis_event = self._event_with_recent_group_visuals(analysis_event)
         if quoted_segments:
+            quote_origin = (
+                {
+                    "quoted_message_id": quoted_message_id,
+                    "quoted_sender_id": quoted_sender_id,
+                    "quoted_sent_at": quoted_sent_at,
+                }
+                if image_attribution else {}
+            )
             analysis_event = self._event_with_quoted_message(
                 analysis_event,
                 quoted_segments,
                 quoted_sender_name,
+                **quote_origin,
             )
         # 给模型补上引用的客观来源（谁发的、多久以前、什么类型、是不是刚发的
         # 情报图）。模型据此判断“这是我自己刚发的战线图”，不必每次重查。
@@ -656,6 +771,18 @@ class OneBotEventMixin:
                 model_type="voice",
                 model_name=self._delivery_model_name("voice"),
             )
+            if budget is not None and isinstance(voice_error, TimeoutError):
+                try:
+                    await self.send_reply(
+                        websocket,
+                        event,
+                        "唔……这条语音我没能及时听清。你再说一遍，或者发文字给我？",
+                        model_type="chat",
+                        first_delay=False,
+                        group_quote=False,
+                    )
+                except Exception as exc:
+                    LOGGER.warning("语音识别超时的文字兜底未发送：%s", exc)
             if proactive_ambient:
                 self._finish_ambient_claim(event, delivered=False)
             return
@@ -665,22 +792,56 @@ class OneBotEventMixin:
             self._recent_visual_contexts.pop(conversation_id, None)
 
         tool_context = None
-        vision_allowed = _server.is_event_modality_allowed(event, "vision")
+        analyze_options: dict[str, Any] = {"allow_vision": vision_allowed}
+        if budget is not None:
+            analyze_options["deadline"] = analysis_deadline
+        if image_attribution:
+            analyze_options["image_refs_max"] = getattr(self.config, "toolbox_image_refs_max", 4)
+            analyze_options["visual_question"] = plain_text
         try:
-            tool_context = await self.tools.analyze(
-                analysis_event,
-                model_input_text,
-                lambda action, params: self.call_action_and_wait(
-                    websocket,
-                    action,
-                    params,
-                    self.config.toolbox_timeout_seconds,
-                ),
-                allow_vision=vision_allowed,
-            )
+            async with reply_phase(budget.hard_deadline if budget is not None else None):
+                if cached_images:
+                    tool_context = await self._analyze_cached_images(
+                        cached_images, plain_text, bool(quoted_message_id), analysis_deadline
+                    )
+                if tool_context is None:
+                    tool_context = await self.tools.analyze(
+                        analysis_event,
+                        model_input_text,
+                        lambda action, params: self.call_action_and_wait(
+                            websocket,
+                            action,
+                            params,
+                            self.config.toolbox_timeout_seconds,
+                        ),
+                        **analyze_options,
+                    )
         except Exception as exc:
             LOGGER.warning("多模态/工具分析跳过：conversation=%s error=%s", conversation_id, exc)
-        if tool_context is not None and conversation_id.startswith("private:"):
+        if (
+            tool_context is None and history_quote_refs
+            and not _event_has_visual_material(event)
+        ):
+            tool_context = ToolAnalysisResult(
+                category="image",
+                style="direct",
+                read_level="metadata_only",
+                visual_kind="image",
+                visual_status="unavailable",
+                image_origins=[
+                    ImageOrigin(
+                        message_id=ref["message_id"],
+                        segment_index=ref["segment_index"],
+                        sender_id=ref["sender_id"],
+                        sender_name=ref["sender_name"],
+                        origin="quoted",
+                        label=f"图{index}",
+                        reason="download_failed",
+                    )
+                    for index, ref in enumerate(history_quote_refs, 1)
+                ],
+            )
+        if tool_context is not None and not cached_images and conversation_id.startswith("private:"):
             try:
                 from ...knowledge.ingestion import archive_analysis
 
@@ -690,11 +851,19 @@ class OneBotEventMixin:
                                      event_id=str(event.get("message_id") or ""), occurred_at=event.get("time"))
             except Exception as exc:
                 LOGGER.warning("资料存档失败：conversation=%s error=%s", conversation_id, exc)
-        if vision_allowed and tool_context is None and _should_reuse_cached_visual(
-            analysis_event,
-            model_input_text,
+        if (
+            vision_allowed
+            and tool_context is None
+            and not ((image_attribution or visual_history) and quoted_message_id)
+            and _should_reuse_cached_visual(analysis_event, model_input_text)
         ):
             cached = self._recent_visual_contexts.get(conversation_id)
+            if (
+                cached and (image_attribution or visual_history)
+                and event.get("message_type") == "group"
+                and (len(cached) < 3 or cached[2] != str(event.get("user_id") or ""))
+            ):
+                cached = None
             if cached and time.time() - cached[0] <= _server.VISUAL_CONTEXT_TTL_SECONDS:
                 # 兼容旧的 2 元组缓存：缺失发送者时留空，按“非本人”处理而不猜测。
                 cached_context = cached[1]
@@ -704,11 +873,16 @@ class OneBotEventMixin:
                 )
                 try:
                     if getattr(cached_context, "visual_data", None):
-                        followup = await self.tools.analyze_visual_followup(
-                            cached_context,
-                            model_input_text,
-                            allow_vision=vision_allowed,
-                        )
+                        async with reply_phase(analysis_deadline):
+                            followup = await self.tools.analyze_visual_followup(
+                                cached_context,
+                                model_input_text,
+                                **(
+                                    {"deadline": analysis_deadline}
+                                    if analysis_deadline is not None else {}
+                                ),
+                                allow_vision=vision_allowed,
+                            )
                         if followup is not None and origin_name:
                             # 追问生成的是新结果，用 replace 补上归属字段。
                             tool_context = dataclasses.replace(
@@ -729,7 +903,20 @@ class OneBotEventMixin:
                     )
             elif cached:
                 self._recent_visual_contexts.pop(conversation_id, None)
-        if tool_context is not None and (
+        if cache is not None and not cached_images and isinstance(tool_context, ToolAnalysisResult):
+            cache.remember(
+                conversation_id,
+                tool_context,
+                now=asyncio.get_running_loop().time(),
+                max_bytes=getattr(self.config, "toolbox_vision_max_bytes", 8_000_000),
+            )
+        attributed_images = getattr(tool_context, "image_origins", ())
+        dropped_images = getattr(tool_context, "dropped_images", ())
+        legacy_cache_safe = not attributed_images or (
+            len(attributed_images) == 1
+            and attributed_images[0].sender_id == str(event.get("user_id") or "")
+        )
+        if tool_context is not None and not cached_images and legacy_cache_safe and (
             has_current_visual or getattr(tool_context, "visual_data", None)
         ):
             # 确定图片真实发送者：当前事件带图则是当前人；复用别人图的结果
@@ -801,18 +988,33 @@ class OneBotEventMixin:
                     "情报，请直接调用该工具；与游戏无关则正常对话。"
                 )
 
+        generation_deadline = budget.hard_deadline if budget is not None else None
+        generation_options = (
+            {"turn_deadline": generation_deadline} if budget is not None else {}
+        )
+        if attributed_images:
+            generation_options["visual_question"] = plain_text
+        chat_started_at = asyncio.get_running_loop().time()
+        chat_expired = False
         try:
-            reply_text = await self.reply_engine.reply(
-                conversation_id,
-                model_input_text,
-                nickname,
-                profile_id=profile_id,
-                observed=True,
-                tool_context=tool_context,
-                reply_focus=group_reply_focus,
-                extra_system=extra_system,
-                hd2_nl_allowed=hd2_nl_allowed,
-            )
+            async with reply_phase(generation_deadline):
+                reply_text = await self.reply_engine.reply(
+                    conversation_id,
+                    model_input_text,
+                    nickname,
+                    profile_id=profile_id,
+                    observed=True,
+                    tool_context=tool_context,
+                    reply_focus=group_reply_focus,
+                    extra_system=extra_system,
+                    hd2_nl_allowed=hd2_nl_allowed,
+                    **generation_options,
+                )
+        except TimeoutError:
+            LOGGER.warning("对话处理预算耗尽：scope=%s", event.get("message_type"))
+            reply_text = ""
+            failure_reason = "对话处理截止时间已到"
+            chat_expired = True
         except Exception as exc:
             LOGGER.exception("回复引擎异常：conversation=%s", conversation_id)
             reply_text = ""
@@ -824,6 +1026,36 @@ class OneBotEventMixin:
                 if callable(consume_failure)
                 else ""
             )
+        generated_at = asyncio.get_running_loop().time()
+
+        def record_media_turn() -> None:
+            directory = self._event_log.parent
+            log_attribution(directory, conversation_id, attributed_images, dropped_images)
+            if budget is None:
+                return
+            end = asyncio.get_running_loop().time()
+            material_ms = max(0, _as_int(event.get("_atri_material_elapsed_ms")) or 0)
+            processing_ms = round((generated_at - budget.started_at) * 1000)
+            phase = ""
+            if chat_expired or generated_at >= budget.hard_deadline or "TimeoutError" in failure_reason:
+                phase = "chat"
+            elif chat_started_at >= budget.analysis_deadline:
+                phase = "analysis"
+            log_visual_budget(directory, {
+                "message_id": message_key(event.get("message_id")),
+                "images_total": len(attributed_images) + len(dropped_images),
+                "images_analyzed": sum(image.evidence_level != "none" for image in attributed_images),
+                "images_unavailable": sum(image.status == "unavailable" for image in attributed_images),
+                "images_skipped": sum(image.status == "skipped" for image in attributed_images),
+                "analysis_elapsed_ms": round((chat_started_at - budget.started_at) * 1000),
+                "chat_elapsed_ms": round((generated_at - chat_started_at) * 1000),
+                "processing_elapsed_ms": processing_ms,
+                "material_elapsed_ms": material_ms,
+                "delivery_elapsed_ms": round((end - generated_at) * 1000),
+                "turn_elapsed_ms": material_ms + round((end - budget.started_at) * 1000),
+                "budget_exhausted_stage": phase,
+                "chat_deadline_source": "turn_deadline",
+            })
         if not str(reply_text or "").strip():
             reason = failure_reason or "回复引擎返回空结果"
             self._record_reply_failure(
@@ -860,6 +1092,7 @@ class OneBotEventMixin:
                 )
             except Exception as send_exc:  # noqa: BLE001
                 LOGGER.warning("失败兜底消息发送失败：%s", send_exc)
+            record_media_turn()
             # 即使文字回复为空，HD2 工具可能已成功取到情报，仍把情报发出，避免白查。
             await self._send_pending_hd2_nl(websocket, event, conversation_id)
             if self.cognition_shadow is not None:
@@ -1019,6 +1252,7 @@ class OneBotEventMixin:
             or light_emoji_sent
         )
         if not voice_streamed:
+            delivery_options = {"delivery_deadline": budget.delivery_deadline} if budget is not None else {}
             delivered_text = await self.send_reply(
                 websocket,
                 event,
@@ -1026,7 +1260,9 @@ class OneBotEventMixin:
                 fallback_text=spoken_text or None,
                 model_type=delivery_model_type,
                 model_name=delivery_model_name,
+                **delivery_options,
             )
+        record_media_turn()
         if (voice_streamed or outgoing) and not delivered_text:
             self._record_reply_failure(
                 event,
@@ -1120,10 +1356,58 @@ class OneBotEventMixin:
                 )
             )
 
+    async def _analyze_cached_images(
+        self, images: list[CachedImage], question: str, quoted: bool, deadline: float | None
+    ) -> ToolAnalysisResult:
+        targets = _image_numbers(question, len(images)) or ({1} if len(images) == 1 else set())
+        origins = []
+        results = []
+        for number, cached in enumerate(images, 1):
+            result = cached.result
+            origin = replace(cached.origin, origin="quoted" if quoted else "same_sender_recent", label=f"图{number}")
+            if result is not None:
+                fresh = None
+                if number in targets and result.visual_data:
+                    image_deadline = deadline
+                    if deadline is not None:
+                        image_deadline = min(
+                            deadline, asyncio.get_running_loop().time()
+                            + getattr(self.config, "toolbox_vision_image_budget_seconds", 45.0)
+                        )
+                    with contextlib.suppress(TimeoutError):
+                        async with reply_phase(image_deadline):
+                            fresh = await self.tools.analyze_visual_followup(result, question, deadline=image_deadline)
+                if fresh is not None and fresh.visual_status in {"verified", "ocr_only", "metadata_only"}:
+                    result = fresh
+                    origin = replace(origin, evidence_level=fresh.visual_status,
+                                     status="metadata_only" if fresh.visual_status == "metadata_only" else "analyzed")
+                else:
+                    result = replace(
+                        result,
+                        limitations=[*result.limitations, "只使用先前保存的分析，未重新读取这张图片。"],
+                    )
+            else:
+                origin = replace(origin, evidence_level="none", status="unavailable")
+            origins.append(origin)
+            results.append(result)
+        first = next(result for result in results if result is not None)
+        levels = {origin.evidence_level for origin in origins}
+        return replace(
+            first,
+            findings=[text for result in results if result is not None for text in result.findings],
+            visual_status="partial" if len(levels) > 1 else next(iter(levels)),
+            read_level=first.read_level if len(levels) == 1 else "partial_content",
+            image_origins=origins,
+            image_results=results,
+            full_text_requested=any(result and result.full_text_requested for result in results),
+        )
+
     async def _ensure_quoted_sender_id(
         self,
         websocket: Any,
         event: dict[str, Any],
+        *,
+        deadline: float | None = None,
     ) -> str | None:
         """在触发判断前确定被引用消息的发送者 QQ。
 
@@ -1131,28 +1415,34 @@ class OneBotEventMixin:
         ID 调 get_msg 拉取，并把 sender 回填到 event["reply"]，让后续判断函数
         读到确定值。任何失败都返回 None，绝不根据 ID 猜测。
         """
+        message_id = referenced_message_id(event)
+        bot_qq = getattr(getattr(self, "config", None), "bot_qq", None)
         existing = event.get("reply")
         if isinstance(existing, dict):
-            sender = existing.get("sender")
-            if isinstance(sender, dict) and sender.get("user_id") not in (None, ""):
-                return str(sender.get("user_id"))
+            if _quoted_payload_matches(event, message_id, existing, bot_qq):
+                sender = existing.get("sender")
+                if isinstance(sender, dict) and sender.get("user_id") not in (None, ""):
+                    return str(sender.get("user_id"))
+            else:
+                event.pop("reply")
+                existing = None
 
-        message_id = extract_reply_message_id(event.get("message"))
         if not message_id:
             return None
         request_id = int(message_id) if str(message_id).isdigit() else message_id
         try:
-            result = await self.call_action_and_wait(
-                websocket,
-                "get_msg",
-                {"message_id": request_id},
-                3.0,
-            )
+            async with reply_phase(deadline):
+                result = await self.call_action_and_wait(
+                    websocket,
+                    "get_msg",
+                    {"message_id": request_id},
+                    3.0,
+                )
         except Exception:
             LOGGER.debug("get_msg 拉取被引用消息失败", exc_info=True)
             return None
-        data = result.get("data") if isinstance(result, dict) else None
-        if not isinstance(data, dict):
+        data = _quoted_response_data(event, message_id, result, bot_qq)
+        if data is None:
             return None
         sender = data.get("sender")
         if not isinstance(sender, dict) or sender.get("user_id") in (None, ""):
@@ -1160,6 +1450,10 @@ class OneBotEventMixin:
         # 回填 event["reply"]，让现有 _quoted_sender_is_bot 逻辑复用确定值。
         reply_obj = dict(existing) if isinstance(existing, dict) else {}
         reply_obj["sender"] = sender
+        reply_obj["message_id"] = message_id
+        for key in ("message_type", "group_id", "self_id", "peer_id", "target_id", "time"):
+            if key in data:
+                reply_obj[key] = data[key]
         if data.get("message") is not None:
             reply_obj["message"] = data.get("message")
         event["reply"] = reply_obj

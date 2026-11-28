@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hmac
 import html
 import json
 import mimetypes
+import sqlite3
 import sys
 import threading
 import time
@@ -137,10 +139,14 @@ class GalleryHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003
         sys.stderr.write("[gallery] %s\n" % (fmt % args))
 
-    def _send(self, status: int, body: bytes, content_type: str) -> None:
+    def _send(
+        self, status: int, body: bytes, content_type: str, *, private: bool = False,
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if private:
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -154,13 +160,18 @@ class GalleryHandler(BaseHTTPRequestHandler):
             self._send_gallery()
         elif parsed.path == "/img":
             self._send_image(parse_qs(parsed.query))
+        elif parsed.path == "/api/hydration":
+            self._handle_hydration(parsed.path)
         else:
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        if parsed.path in ("/api/hydrate", "/api/hydrate-all"):
+            self._handle_hydration(parsed.path)
+            return
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length).decode("utf-8") if length else ""
-        parsed = urlparse(self.path)
         try:
             if parsed.path == "/api/batch-delete":
                 # JSON body: {"paths": ["rel1", "rel2", ...]}
@@ -179,6 +190,70 @@ class GalleryHandler(BaseHTTPRequestHandler):
                     self._send_json(404, {"ok": False, "error": "not found"})
         except Exception as exc:  # never leak a traceback to the browser
             self._send_json(500, {"ok": False, "error": str(exc)})
+
+    def _send_hydration_json(self, status: int, payload: dict) -> None:
+        self._send(
+            status, json.dumps(payload).encode("utf-8"),
+            "application/json; charset=utf-8", private=True,
+        )
+
+    def _handle_hydration(self, path: str) -> None:
+        queue = getattr(self.server, "hydration_queue", None)
+        token = getattr(self.server, "hydration_token", "")
+        if queue is None or not token:
+            self._send_hydration_json(404, {"ok": False, "error": "补图未启用"})
+            return
+        received = self.headers.get("Authorization", "").encode("utf-8")
+        if not hmac.compare_digest(received, f"Bearer {token}".encode("utf-8")):
+            self._send_hydration_json(401, {"ok": False, "error": "补图口令无效"})
+            return
+
+        account_id = self.server.hydration_account_id
+        max_age = self.server.hydration_pending_ttl
+        try:
+            if path == "/api/hydration":
+                records = queue.list_records(account_id, max_age)
+                self._send_hydration_json(200, {"ok": True, "records": [
+                    {
+                        "capture_id": record.capture_id,
+                        "message_id": record.message_id,
+                        "segment_index": record.segment_index,
+                        "kind": record.kind,
+                        "status": record.status,
+                        "attempts": record.attempts,
+                        "last_error": record.last_error,
+                    }
+                    for record in records
+                ]})
+                return
+
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 4096:
+                raise ValueError("invalid length")
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict):
+                raise ValueError("invalid payload")
+            if path == "/api/hydrate-all" and not payload:
+                count = queue.enqueue_all(account_id, max_age_seconds=max_age)
+                self._send_hydration_json(200, {"ok": True, "queued": count})
+                return
+            if path != "/api/hydrate" or payload.keys() != {"capture_id"}:
+                raise ValueError("invalid fields")
+            capture_id = payload["capture_id"]
+            if not isinstance(capture_id, str):
+                raise ValueError("invalid capture id")
+            task = queue.enqueue(
+                account_id, capture_id, max_attempts=self.server.hydration_max_attempts,
+                max_age_seconds=max_age,
+            )
+            if task is None:
+                self._send_hydration_json(404, {"ok": False, "error": "审核记录不存在或已过期"})
+                return
+            self._send_hydration_json(200, {"ok": True, "status": task.status})
+        except (ValueError, UnicodeError):
+            self._send_hydration_json(400, {"ok": False, "error": "补图请求格式错误"})
+        except (OSError, sqlite3.Error):
+            self._send_hydration_json(503, {"ok": False, "error": "补图队列暂不可用"})
 
     def _resolve_inside_root(self, rel: str) -> Path | None:
         if not rel:
@@ -240,7 +315,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
         emotion = self._vision_emotion(image)
         target_dir = self.server.sticker_dir / emotion
         target = _unique_target(target_dir, image.name)
-        _move_with_sidecar(image, target)
+        self._move_approved_image(image, target)
         self._send_json(200, {"ok": True, "emotion": emotion})
 
     def _handle_manual(self, form: dict) -> None:
@@ -249,8 +324,23 @@ class GalleryHandler(BaseHTTPRequestHandler):
         if emotion not in MANUAL_EMOTIONS:
             raise ValueError("invalid emotion")
         target = _unique_target(self.server.sticker_dir / emotion, image.name)
-        _move_with_sidecar(image, target)
+        self._move_approved_image(image, target)
         self._send_json(200, {"ok": True, "emotion": emotion})
+
+    def _move_approved_image(self, source: Path, target: Path) -> None:
+        if not source.name.startswith("hydrate_"):
+            _move_with_sidecar(source, target)
+            return
+        from atri_qq_bot.sticker_parts.hydration import StickerHydrationQueue
+
+        queue = StickerHydrationQueue(source.parent)
+        with queue.approving_review_image(source.name):
+            try:
+                _move_with_sidecar(source, target)
+            except OSError:
+                if not source.exists() and target.is_file():
+                    target.rename(source)
+                raise
 
     def _handle_reclassify(self, form: dict) -> None:
         image = self._resolve_inside_root(form.get("path", ""))
@@ -388,6 +478,16 @@ class GalleryHandler(BaseHTTPRequestHandler):
             for g in sorted(groups)
         )
         nav = " ".join(nav_parts)
+        hydration_panel = ""
+        if getattr(self.server, "hydration_queue", None) is not None:
+            hydration_panel = (
+                '<section id="hydrate-panel"><h2>待下载的表情</h2>'
+                '<label for="hydrate-token">补图口令</label> '
+                '<input id="hydrate-token" type="password" autocomplete="off"> '
+                '<button onclick="refreshHydration()">查看状态</button> '
+                '<button class="ghost" onclick="queueHydration(null)">全部补图</button>'
+                '<div id="hydrate-results" aria-live="polite"></div></section>'
+            )
 
         body = f"""<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
@@ -429,7 +529,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
   #batchbar .spacer {{ flex:1; }}
 </style></head><body>
 <header><h1>Sticker Gallery — {total} images</h1><nav>{nav}</nav></header>
-<main>{''.join(cards)}</main>
+<main>{hydration_panel}{''.join(cards)}</main>
 <div id="batchbar">
   <span id="batchcount">已选 0 张</span>
   <button class="ghost" onclick="toggleAll()">全选/取消全选</button>
@@ -496,8 +596,86 @@ function batchDelete() {{
       }} else alert(res.error);
     }}).catch(alert);
 }}
+async function hydrationRequest(path, payload) {{
+  if (!window.isSecureContext) throw new Error('请通过 HTTPS 或本机访问补图审核');
+  const token = document.getElementById('hydrate-token').value;
+  if (!token) throw new Error('请输入补图口令');
+  const options = {{
+    cache: 'no-store', credentials: 'omit',
+    headers: {{Authorization: 'Bearer ' + token}},
+  }};
+  if (payload !== undefined) {{
+    options.method = 'POST';
+    options.headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(payload);
+  }}
+  const response = await fetch(path, options);
+  const result = await response.json();
+  if (!result.ok) throw new Error(result.error);
+  return result;
+}}
+async function refreshHydration() {{
+  const output = document.getElementById('hydrate-results');
+  try {{
+    const {{records}} = await hydrationRequest('/api/hydration');
+    output.textContent = records.length ? '' : '没有待下载记录';
+    const labels = {{
+      pending: '待下载', queued: '已排队', hydrating: '下载中', hydrated: '已下载',
+      failed: '失败，可重试', unavailable: '已达尝试上限，可手动重新排队',
+      expired: '审核图已过期，可重新补图', approved: '已通过审核',
+    }};
+    for (const record of records) {{
+      const row = document.createElement('p');
+      row.textContent = '消息 ' + record.message_id + ' · 第 ' + (record.segment_index + 1)
+        + ' 段 · ' + labels[record.status] + ' · 已尝试 ' + record.attempts + ' 次';
+      if (record.last_error) row.textContent += ' · ' + record.last_error;
+      if (['pending', 'failed', 'unavailable', 'expired'].includes(record.status)) {{
+        const button = document.createElement('button');
+        button.textContent = record.status === 'pending' ? '补图' : '重试';
+        button.onclick = () => queueHydration(record.capture_id);
+        row.append(' ', button);
+      }}
+      output.append(row);
+    }}
+  }} catch (error) {{
+    output.textContent = error.message;
+  }}
+}}
+async function queueHydration(captureId) {{
+  try {{
+    if (captureId === null) await hydrationRequest('/api/hydrate-all', {{}});
+    else await hydrationRequest('/api/hydrate', {{capture_id: captureId}});
+    await refreshHydration();
+  }} catch (error) {{
+    document.getElementById('hydrate-results').textContent = error.message;
+  }}
+}}
 </script></body></html>"""
         self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+
+
+def _configure_hydration(server: ThreadingHTTPServer, sticker_dir: Path) -> None:
+    try:
+        config = _load_config()
+    except Exception:
+        return
+    required_flags = (
+        "sticker_capture_enabled", "sticker_review_enabled",
+        "sticker_capture_defer", "sticker_hydration_enabled",
+    )
+    token = str(getattr(config, "sticker_hydration_token", "") or "")
+    if not token or not all(getattr(config, name, False) for name in required_flags):
+        return
+
+    from atri_qq_bot.sticker_parts.hydration import StickerHydrationQueue, onebot_id
+
+    account_id = onebot_id(config.bot_qq)
+    if account_id:
+        server.hydration_queue = StickerHydrationQueue(sticker_dir / REVIEW_DIR)
+        server.hydration_account_id = account_id
+        server.hydration_token = token
+        server.hydration_pending_ttl = config.sticker_pending_ttl_seconds
+        server.hydration_max_attempts = config.sticker_hydration_max_attempts
 
 
 def main() -> int:
@@ -524,6 +702,7 @@ def main() -> int:
 
     server = ThreadingHTTPServer((args.host, args.port), GalleryHandler)
     server.sticker_dir = sticker_dir
+    _configure_hydration(server, sticker_dir)
     print(f"serving {sticker_dir}")
     print(f"review images auto-delete after {args.review_ttl}s")
     print(f"open http://<server-ip>:{args.port} in your local browser")

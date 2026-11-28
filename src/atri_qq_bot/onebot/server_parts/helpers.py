@@ -4,6 +4,7 @@ import random
 from datetime import datetime
 from typing import Any
 
+from ...toolbox_parts.visual_origin import is_visual_segment, stamp_visual_segments
 from ..message_batch import _message_to_segments
 
 def _voice_remaining_text(
@@ -43,6 +44,54 @@ def _onebot_status_is_healthy(result: dict[str, Any] | None) -> bool:
     )
 
 
+def _quoted_payload_matches(
+    event: dict[str, Any], message_id: str, payload: dict[str, Any], bot_qq: Any = None,
+) -> bool:
+    """Reject conflicting quote identities, including in OneBot's inline reply."""
+    for key in ("message_id", "id"):
+        supplied_id = payload.get(key)
+        if message_id and supplied_id not in (None, "") and str(supplied_id) != message_id:
+            return False
+    current_type = event.get("message_type")
+    if current_type and payload.get("message_type") not in (None, "", current_type):
+        return False
+
+    receiver = str(event.get("self_id") or bot_qq or "")
+    fetched_receiver = str(payload.get("self_id") or "")
+    if receiver and fetched_receiver and receiver != fetched_receiver:
+        return False
+
+    group = str(payload.get("group_id") or "")
+    if group not in ("", "0") and group != str(event.get("group_id") or ""):
+        return False
+    if current_type == "private":
+        peer = str(event.get("user_id") or "")
+        if peer:
+            sender = payload.get("sender")
+            sender_id = sender.get("user_id") if isinstance(sender, dict) else None
+            participants = {peer, receiver}
+            for participant in (sender_id, payload.get("user_id"), payload.get("target_id")):
+                if participant not in (None, "", 0, "0") and str(participant) not in participants:
+                    return False
+            peer_id = payload.get("peer_id")
+            if peer_id not in (None, "", 0, "0") and str(peer_id) != peer:
+                return False
+    return True
+
+
+def _quoted_response_data(
+    event: dict[str, Any], message_id: str, response: Any, bot_qq: Any = None,
+) -> dict[str, Any] | None:
+    if not isinstance(response, dict) or response.get("retcode", 0) not in (0, "0"):
+        return None
+    if str(response.get("status") or "ok").lower() != "ok":
+        return None
+    data = response.get("data")
+    if isinstance(data, dict) and _quoted_payload_matches(event, message_id, data, bot_qq):
+        return data
+    return None
+
+
 def _is_visual_followup(text: str) -> bool:
     normalized = "".join(str(text or "").split()).lower()
     return any(
@@ -73,13 +122,7 @@ def _is_visual_followup(text: str) -> bool:
 
 def _event_has_visual_material(event: dict[str, Any]) -> bool:
     message = event.get("message")
-    if not isinstance(message, list):
-        return False
-    return any(
-        isinstance(segment, dict)
-        and str(segment.get("type") or "").lower() in {"image", "mface", "marketface"}
-        for segment in message
-    )
+    return isinstance(message, list) and any(is_visual_segment(segment) for segment in message)
 
 
 def _should_reuse_cached_visual(event: dict[str, Any], text: str) -> bool:
@@ -96,23 +139,30 @@ def _personal_event_message(event: dict[str, Any]) -> str:
 
 
 def _pending_visual_key(event: dict[str, Any]) -> str:
-    if event.get("message_type") != "group":
-        return ""
-    group_id = event.get("group_id")
     user_id = event.get("user_id")
-    if group_id is None or user_id is None:
+    message_type = event.get("message_type")
+    if user_id in (None, ""):
         return ""
-    return f"group:{group_id}:user:{user_id}"
+    if message_type == "private":
+        return f"private:{user_id}"
+    group_id = event.get("group_id")
+    if message_type == "group" and group_id not in (None, ""):
+        return f"group:{group_id}:user:{user_id}"
+    return ""
 
 
 def _merge_pending_visual_event(
     visual_event: dict[str, Any],
     current_event: dict[str, Any],
+    *,
+    image_attribution: bool = True,
 ) -> dict[str, Any]:
+    if image_attribution:
+        visual_event = stamp_visual_segments(visual_event, origin="pending")
     visual_segments = [
         dict(segment)
         for segment in _message_to_segments(visual_event.get("message"))
-        if str(segment.get("type") or "").lower() in {"image", "mface", "marketface"}
+        if is_visual_segment(segment)
     ]
     if not visual_segments:
         return current_event

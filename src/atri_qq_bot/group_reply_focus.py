@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from .toolbox_parts.visual_origin import is_visual_segment, stamp_visual_segments
+
 
 DEFAULT_GROUP_REPLY_FOCUS_TTL_SECONDS = 120.0
 # 会话每一段（开窗和每次续期）统一 1 分钟，不再随段数递减。
@@ -405,12 +407,16 @@ def _merge_previous_event(
     current_event: dict[str, Any],
 ) -> dict[str, Any]:
     merged = dict(current_event)
+    previous_event = stamp_visual_segments(previous_event, origin="same_sender_recent")
     previous_segments = [
         dict(segment)
         for segment in _message_to_segments(previous_event.get("message"))
         if str(segment.get("type") or "").lower() != "at"
     ]
-    merged["message"] = previous_segments + _message_to_segments(current_event.get("message"))
+    current_segments = _message_to_segments(current_event.get("message"))
+    if any(is_visual_segment(segment) for segment in current_segments):
+        previous_segments = [segment for segment in previous_segments if not is_visual_segment(segment)]
+    merged["message"] = previous_segments + current_segments
     return merged
 
 

@@ -18,6 +18,7 @@ def _image_event(user_id: str, nickname: str, file_name: str) -> dict:
         "message_type": "group",
         "group_id": GROUP,
         "user_id": user_id,
+        "message_id": file_name,
         "sender": {"card": nickname, "nickname": nickname},
         "message": [
             {
@@ -57,9 +58,17 @@ def _server() -> OneBotServer:
     return server
 
 
-def test_other_sender_image_is_marked_and_origin_hint_generated() -> None:
-    """栞栞发图、天心随后戳一戳：图必须标注成栞栞发的，不能被天心认领。"""
+def test_other_senders_images_are_not_borrowed_by_default() -> None:
     server = _server()
+    server._remember_pending_group_visual(_image_event(SHIORI_ID, "栞栞", "other.png"))
+    event = _poke_event(TIANXIN_ID, "天心")
+    event["message"] = [{"type": "text", "data": {"text": "刚才那张图里是谁？"}}]
+    assert server._event_with_recent_group_visuals(event) is event
+
+
+def test_legacy_mode_keeps_cross_sender_image_and_hint() -> None:
+    server = _server()
+    server.config.image_attribution_enabled = False
 
     # 栞栞发了一张“何伊薇”表情图。
     server._remember_pending_group_visual(
@@ -77,28 +86,30 @@ def test_other_sender_image_is_marked_and_origin_hint_generated() -> None:
     assert image_segments[0]["data"][SENDER_NAME_META_KEY] == "栞栞"
 
     # 下游收集请求时生成明确的归属提示。
-    request = _collect_request(merged, "[用户戳了戳亚托莉]")
+    request = _collect_request(merged, "[用户戳了戳亚托莉]", image_attribution=False)
     assert any("图片归属" in hint and "栞栞" in hint for hint in request.share_hints)
     assert request.image_refs, "别人发的图仍作为视觉材料保留"
 
 
-def test_own_sender_image_is_not_marked() -> None:
-    """本人发的图、本人随后触发：归属天然正确，不加来源标注。"""
+def test_same_sender_followup_keeps_origin_of_earlier_image() -> None:
     server = _server()
 
     server._remember_pending_group_visual(
         _image_event(TIANXIN_ID, "天心", "own.png")
     )
     poke = _poke_event(TIANXIN_ID, "天心")
+    poke["message"] = [{"type": "text", "data": {"text": "刚才那张图里是谁？"}}]
     merged = server._event_with_recent_group_visuals(poke)
 
     image_segments = [
         seg for seg in merged["message"] if seg.get("type") == "image"
     ]
     assert len(image_segments) == 1
-    assert SENDER_NAME_META_KEY not in image_segments[0]["data"]
-
-    request = _collect_request(merged, "[用户戳了戳亚托莉]")
+    request = _collect_request(merged, "刚才那张图里是谁？")
+    origin = request.image_refs[0].image_origin
+    assert origin.origin == "same_sender_recent"
+    assert origin.sender_id == TIANXIN_ID
+    assert origin.message_id == "own.png"
     assert not any("图片归属" in hint for hint in request.share_hints)
 
 
@@ -110,7 +121,8 @@ def test_disabled_feature_keeps_event_unchanged() -> None:
     server._remember_pending_group_visual(
         _image_event(SHIORI_ID, "栞栞", "heyiwei.png")
     )
-    poke = _poke_event(TIANXIN_ID, "天心")
+    poke = _poke_event(SHIORI_ID, "栞栞")
+    poke["message"] = [{"type": "text", "data": {"text": "刚才那张图里是谁？"}}]
     merged = server._event_with_recent_group_visuals(poke)
 
     assert merged is poke
@@ -131,7 +143,7 @@ def test_quoted_message_image_is_marked_with_quoted_sender() -> None:
     ]
 
     merged = server._event_with_quoted_message(
-        current, quoted_segments, "栞栞"
+        current, quoted_segments, "栞栞", quoted_message_id="42", quoted_sender_id=SHIORI_ID
     )
     quoted_image = [
         seg for seg in merged["message"] if seg.get("type") == "image"
@@ -143,7 +155,35 @@ def test_quoted_message_image_is_marked_with_quoted_sender() -> None:
     assert SENDER_NAME_META_KEY not in quoted_segments[0]["data"]
 
     request = _collect_request(merged, "[用户戳了戳亚托莉]")
-    assert any("图片归属" in hint and "栞栞" in hint for hint in request.share_hints)
+    origin = request.image_refs[0].image_origin
+    assert origin.origin == "quoted"
+    assert origin.message_id == "42"
+    assert origin.segment_index == 0
+    assert origin.sender_id == SHIORI_ID
+
+
+def test_bare_mention_does_not_read_consumed_pending_image_twice() -> None:
+    server = _server()
+    server._remember_pending_group_visual(_image_event(TIANXIN_ID, "天心", "first.png"))
+    mention = {**_poke_event(TIANXIN_ID, "天心"), "message": [{"type": "at", "data": {"qq": "10001"}}]}
+    first = server._event_with_pending_group_visual(mention)
+    assert _collect_request(first, "").image_refs[0].image_origin.origin == "pending"
+
+    second = server._event_with_pending_group_visual(mention)
+    assert server._event_with_recent_group_visuals(second) is mention
+
+
+def test_image_from_robot_is_not_added_to_recent_or_pending() -> None:
+    server = _server()
+    server.config.bot_qq = int(TIANXIN_ID)
+    event = {**_image_event(TIANXIN_ID, "亚托莉", "robot.png"), "self_id": int(TIANXIN_ID)}
+    server._remember_pending_group_visual(event)
+    assert not server._pending_group_visual_events
+    assert not server._recent_group_visuals
+
+    event = {**_image_event(SHIORI_ID, "栞栞", "user.png"), "self_id": int(TIANXIN_ID)}
+    server._remember_pending_group_visual(event)
+    assert set(server._recent_group_visuals[GROUP]) == {SHIORI_ID}
 
 
 def test_cached_origin_name_helper_distinguishes_sender() -> None:

@@ -4,6 +4,25 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .visual_origin import ImageOrigin
+
+
+_IMAGE_NUMBER = re.compile(r"(?:第\s*([0-9一二三四五六七八九十]+)\s*张|图\s*([0-9一二三四五六七八九十]+))")
+_CHINESE_IMAGE_NUMBERS = dict(zip("一二三四五六七八九十", range(1, 11)))
+
+
+def _image_numbers(text: str, image_count: int) -> set[int]:
+    numbers = set()
+    for ordinal, label in _IMAGE_NUMBER.findall(text):
+        value = ordinal or label
+        if value.isascii() and value.isdigit() and len(value) <= 4:
+            numbers.add(int(value))
+        elif value in _CHINESE_IMAGE_NUMBERS:
+            numbers.add(_CHINESE_IMAGE_NUMBERS[value])
+    if "最后一张" in text and image_count:
+        numbers.add(image_count)
+    return numbers
+
 
 @dataclass(frozen=True)
 class _VisionModelResponse:
@@ -42,10 +61,32 @@ class ToolAnalysisResult:
     full_text_requested: bool = False
     # Archival evidence is deliberately excluded from prompt_context and repr.
     knowledge_materials: list[dict[str, Any]] = field(default_factory=list, repr=False, compare=False)
+    image_origins: list[ImageOrigin] = field(default_factory=list)
+    dropped_images: list[ImageOrigin] = field(default_factory=list)
+    image_results: list[ToolAnalysisResult | None] = field(default_factory=list, repr=False, compare=False)
+
+    @property
+    def image_evidence(self) -> dict[tuple[str, int], ToolAnalysisResult]:
+        return {
+            origin.key: result
+            for origin, result in zip(self.image_origins, self.image_results)
+            if origin.message_id and origin.segment_index >= 0 and result is not None
+            and origin.evidence_level != "none"
+        }
 
     # visual_data/visual_source 保存原始证据，status/limitations 描述证据边界；
     # 回复层据此区分“看到了画面”和“只识别到文字”，避免视觉失败后产生幻觉。
-    def requires_visual_fail_safe(self) -> bool:
+    def requires_visual_fail_safe(self, question: str = "") -> bool:
+        if self.image_origins:
+            images = [*self.image_origins, *self.dropped_images]
+            targets = _image_numbers(question, len(images))
+            if targets:
+                return all(1 <= number <= len(images) for number in targets) and all(
+                    images[number - 1].evidence_level == "none" for number in targets
+                )
+            return not self.visual_fallback_available and all(
+                origin.evidence_level == "none" for origin in self.image_origins
+            )
         return bool(
             self.visual_kind
             and self.visual_status in {"partial", "ocr_only", "metadata_only", "unavailable"}
@@ -58,6 +99,24 @@ class ToolAnalysisResult:
 
     def needs_grounding_repair(self, reply_text: str) -> bool:
         text = re.sub(r"\s+", "", str(reply_text or ""))
+        if self.image_origins:
+            images = [*self.image_origins, *self.dropped_images]
+            for sentence in re.split(r"[。！？；\n]", str(reply_text or "")):
+                for number in _image_numbers(sentence, len(images)):
+                    if not 1 <= number <= len(images):
+                        continue
+                    evidence = images[number - 1].evidence_level
+                    if evidence == "verified" or re.search(r"(?:未|没|无法|不能|看不清|读不到|不确定)", sentence):
+                        continue
+                    if re.search(r"(?:画面|场景|人物|颜色|动作|表情|图中|图里|清楚|可以看到)", sentence):
+                        return True
+                    if evidence == "none" and re.search(r"(?:显示|写着|内容是|说的是)", sentence):
+                        return True
+            # Global media claims cannot determine which of several attributed
+            # images they describe. Apply the existing text checks below only to
+            # turns with no usable image evidence.
+            if any(origin.evidence_level != "none" for origin in self.image_origins):
+                return False
         if not text or self.read_level == "full_content":
             return False
         if self.requires_visual_fail_safe():
@@ -115,7 +174,9 @@ class ToolAnalysisResult:
 
     def prompt_context(self) -> str:
         source_text = "；".join(self.sources[:6]) or "用户消息"
-        finding_text = "\n".join(f"- {item}" for item in self.findings[:8]) or "- 暂无可用正文"
+        image_findings = {item for result in self.image_results if result for item in result.findings}
+        other_findings = [item for item in self.findings if item not in image_findings]
+        finding_text = "\n".join(f"- {item}" for item in other_findings[:8]) or "- 暂无可用正文"
         limitation_text = "\n".join(f"- {item}" for item in self.limitations[:5]) or "- 无明显限制"
         visibility_rule = ""
         if self.read_level == "metadata_only":
@@ -131,7 +192,43 @@ class ToolAnalysisResult:
                 "可以基于可见部分分析，但必须避免断言完整视频/全文的未读细节。"
             )
         visual_rule = ""
-        if self.visual_kind or any(
+        image_blocks = ""
+        image_style_rule = (
+            "\n图片/表情是用户此刻情绪和状态的表达，不是要你点评的对象。"
+            "要把读到的用户情绪当成他的一句潜台词，直接对“他这个人、他此刻的状态”做出自然反应："
+            "他懵逼没看懂就解释或询问，他无语就接梗，他开心就一起高兴，他撒娇就顺着回应。"
+            "禁止描述画面长什么样、禁止评价这张图或表情本身好不好、像什么。"
+        )
+        if self.image_origins:
+            evidence_descriptions = {
+                "verified": "已读取画面，可按本图证据回答",
+                "ocr_only": "只读到文字，可转述 OCR，不描述画面",
+                "metadata_only": "只读到 QQ 摘要或资料信息，不描述画面",
+                "none": "未读到可靠证据，不描述内容",
+            }
+            lines = ["\n逐图证据（图片内容和归属必须对应，禁止用其他图或聊天历史补全）："]
+            for index, origin in enumerate(self.image_origins):
+                evidence = evidence_descriptions[origin.evidence_level]
+                lines.append(f"- {origin.label}｜{origin.origin_text()}；{evidence}。")
+                if index < len(self.image_results) and (result := self.image_results[index]) is not None:
+                    for finding in result.findings[:8]:
+                        lines.append(f"  {origin.label}｜{finding}")
+                    for limitation in result.limitations[:3]:
+                        lines.append(f"  {origin.label}｜限制：{limitation}")
+            if self.dropped_images:
+                lines.append("未纳入本轮分析的图片（不可描述）：")
+                lines.extend(f"- {origin.label}｜{origin.origin_text()}；超过本轮图片上限。" for origin in self.dropped_images)
+            image_blocks = "\n".join(lines)
+            visual_rule = (
+                "\n逐图证据优先于用户画像、兴趣、旧图片和旧助手回复。"
+                "用户明确询问某张图片时，只以该图为依据；没有该编号或该图没有证据时，如实说明。"
+                "引用图或以前的图只用于回答对该图的提问，不代表当前说话人的情绪。"
+            )
+            image_style_rule = (
+                "\n结合文字理解说话人的情绪时，只考虑他本轮发的图，以及和本条合并处理的本人图片。"
+                "普通发表情时自然接话。用户明确问某张图的内容时，直接根据那张图的可见证据回答。"
+            )
+        elif self.visual_kind or any(
             item.startswith(("图片内容分析", "表情包情绪分析", "图片信息", "表情包信息"))
             for item in self.findings
         ):
@@ -163,7 +260,7 @@ class ToolAnalysisResult:
                 )
         # 图片是别人发的、当前用户只是在追问时，明确归属，避免张冠李戴。
         origin_rule = ""
-        if self.sender_origin_name:
+        if self.sender_origin_name and not self.image_origins:
             origin_rule = (
                 "\n图片归属：这张图是群友“"
                 f"{self.sender_origin_name}”发的，不是当前说话的人发的；"
@@ -183,14 +280,12 @@ class ToolAnalysisResult:
             f"\n分类：{self.category}。"
             f"\n回复风格：{self.style}。"
             "\n风格要求：日常生活乐趣=轻松、有趣、可以短短吐槽；生活学术研究=准确、严谨、先给结论和依据。"
-            "\n图片/表情是用户此刻情绪和状态的表达，不是要你点评的对象。"
-            "要把读到的用户情绪当成他的一句潜台词，直接对“他这个人、他此刻的状态”做出自然反应："
-            "他懵逼没看懂就解释或询问，他无语就接梗，他开心就一起高兴，他撒娇就顺着回应。"
-            "禁止描述画面长什么样、禁止评价这张图或表情本身好不好、像什么。"
+            f"{image_style_rule}"
             "如果用户明确要求深度分析、总结、数据分析或报告，才按结论、依据、风险/建议组织。"
             "\n禁止把没有读取到的内容编造成事实；不确定就说明只能基于当前可见信息判断。"
             f"{visibility_rule}"
             f"{visual_rule}"
+            f"{image_blocks}"
             f"{origin_rule}"
             f"{full_text_rule}"
             f"\n来源：{source_text}"

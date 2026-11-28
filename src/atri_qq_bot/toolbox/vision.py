@@ -93,21 +93,30 @@ class ToolboxVisionMixin:
         image_ref: _SegmentRef,
         action_caller: OneBotActionCaller | None,
         user_question: str = "",
+        *,
+        deadline: float | None = None,
     ) -> ToolAnalysisResult:
         visual_kind = _classify_visual_material(None, image_ref.label, image_ref)
-        material = await self._resolve_ref_material(image_ref, action_caller)
+        if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError("图片下载预算已用尽")
+        async with asyncio.timeout_at(deadline):
+            material = await self._resolve_ref_material(image_ref, action_caller)
         if material:
             data, source, _ = material
             full_text = _requests_full_text_transcription(user_question)
+            origin = image_ref.image_origin
+            reference_image = origin is not None and origin.origin not in {"current", "pending"}
+            budget_options = {"deadline": deadline} if deadline is not None else {}
             return await self._analyze_image_bytes(
                 data,
                 source,
                 visual_kind=visual_kind,
                 image_ref=image_ref,
                 vision_prompt=_visual_prompt_for_kind(
-                    visual_kind, user_question, full_text=full_text
+                    visual_kind, user_question, full_text=full_text, reference_image=reference_image,
                 ),
                 full_text=full_text,
+                **budget_options,
             )
 
         if visual_kind == "sticker":
@@ -236,13 +245,17 @@ class ToolboxVisionMixin:
         image_ref: _SegmentRef | None = None,
         vision_prompt: str | None = None,
         full_text: bool = False,
+        deadline: float | None = None,
     ) -> ToolAnalysisResult:
+        if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError("图片分析预算已用尽")
         info = _image_info(data)
         kind_hint = visual_kind if visual_kind in {"image", "sticker"} else _classify_visual_material(data, source, image_ref)
         prompt = vision_prompt or _visual_prompt_for_kind(kind_hint)
         # 全文模式放宽 OCR 截断，普通模式保持精简上限。
         ocr_char_limit = _FULL_TEXT_CHAR_LIMIT if full_text else 1200
-        ocr_result = await self._extract_image_ocr(data)
+        async with asyncio.timeout_at(deadline):
+            ocr_result = await self._extract_image_ocr(data)
         if ocr_result.text:
             prompt += (
                 "\n\n独立 OCR 结果（文字证据）：\n"
@@ -251,7 +264,10 @@ class ToolboxVisionMixin:
                 "图中文字必须以这份独立 OCR 结果为优先证据；"
                 "可纠正明显断行，但不得改写、补字或凭空增加文字。"
             )
-        vision_text, vision_limitation = await self._analyze_image_with_vision(data, source, prompt)
+        budget_options = {"deadline": deadline} if deadline is not None else {}
+        vision_text, vision_limitation = await self._analyze_image_with_vision(
+            data, source, prompt, **budget_options
+        )
         vision_text = _sanitize_vision_text(vision_text)
         if vision_text and ocr_result.text:
             vision_text = _replace_visual_visible_text(
@@ -333,12 +349,25 @@ class ToolboxVisionMixin:
         *,
         prepared_images: list[bytes] | None = None,
         sequence_description: str = "",
+        deadline: float | None = None,
     ) -> tuple[str, str]:
         if not self.vision_enabled:
             return "", "当前只读取到图片元信息；未配置视觉模型时，不会臆测图片里具体画面。"
         if not self.vision_model or not self.vision_base_url:
             return "", "视觉模型配置不完整，暂时只能基于图片元信息判断。"
-        vision_images = prepared_images or _prepare_images_for_vision(data)
+        loop = asyncio.get_running_loop()
+        if deadline is not None and loop.time() >= deadline:
+            return "", "图片分析预算已用尽，只能使用已经取得的证据。"
+        if prepared_images:
+            vision_images = prepared_images
+        elif deadline is None:
+            vision_images = _prepare_images_for_vision(data)
+        else:
+            try:
+                async with asyncio.timeout_at(deadline):
+                    vision_images = await asyncio.to_thread(_prepare_images_for_vision, data)
+            except TimeoutError:
+                return "", "图片预处理超时，只能使用已经取得的证据。"
         if sum(len(image) for image in vision_images) > self.vision_max_bytes:
             return "", f"图片超过视觉分析上限 {self.vision_max_bytes} 字节，暂时只读取元信息。"
 
@@ -366,84 +395,91 @@ class ToolboxVisionMixin:
             if self.vision_fallback_model and self.vision_fallback_model != self.vision_model
             else ""
         )
-        fallback_base_url = self._resolve_vision_fallback_base_url(fallback_model)
+        fallback_base_url = (
+            self._resolve_vision_fallback_base_url(fallback_model) or self.vision_base_url
+        ) if fallback_model else ""
         retry_count = max(
             self.vision_retry_count,
             1 if fallback_model and fallback_base_url else 0,
         )
-        deadline = time.monotonic() + self.vision_timeout_seconds
+        bounded = deadline is not None
+        model_deadline = loop.time() + self.vision_timeout_seconds
+        if deadline is not None:
+            model_deadline = min(deadline, model_deadline)
+        minimum_remaining = 0.0 if bounded else 1.0
+
+        async def release_failed_model(model: str, base_url: str) -> None:
+            if bounded and not _ollama_native_base_url(base_url):
+                return
+            now = loop.time()
+            if bounded and now >= model_deadline:
+                return
+            # 给本地失败模型卸载留少量时间，不能占尽备用模型的预算。
+            cleanup_deadline = now + (model_deadline - now) / 4 if bounded else None
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout_at(cleanup_deadline):
+                    if base_url == self.vision_base_url:
+                        await self._release_vision_model_after_failure(model)
+                    else:
+                        await self._release_vision_model_after_failure(model, base_url)
+
         for attempt in range(retry_count + 1):
-            remaining = deadline - time.monotonic()
-            if remaining <= 1.0:
+            now = loop.time()
+            remaining = model_deadline - now
+            if remaining <= minimum_remaining:
                 break
-            # 把剩余预算均分给包括本轮在内的剩余尝试次数，为后续重试留出时间。
-            # 否则单次超时会占满整个 deadline，首次 ReadTimeout 后剩余轮次因
-            # remaining<=1 直接 break，重试在慢超时场景下名存实亡。
             attempts_left = retry_count + 1 - attempt
-            self._vision_attempt_timeout_seconds = max(
-                1.0, remaining / max(1, attempts_left)
+            attempt_deadline = min(
+                model_deadline, now + max(minimum_remaining, remaining / attempts_left)
+            )
+            active_base_url = (
+                self.vision_base_url if active_model == self.vision_model else fallback_base_url
             )
             try:
-                active_base_url = (
-                    self.vision_base_url
-                    if active_model == self.vision_model
-                    else fallback_base_url
-                )
-                async with self._vision_lock:
-                    if _ollama_native_base_url(active_base_url):
-                        async with inference_resource_lease(
-                            f"vision:{active_model}",
-                            timeout_seconds=min(
-                                self.vision_resource_wait_seconds,
-                                max(1.0, remaining),
-                            ),
-                            priority=InferencePriority.VISION,
-                        ):
-                            # 先独占推理租约再拉起 Ollama，避免后台记忆在线程间隙
-                            # 抢先加载另一个 4B 模型。保留热 GPT-SoVITS；视觉
-                            # 请求自身 keep_alive=0，会在完成后释放 Ollama 模型。
-                            ollama_ready = await ensure_ollama_service(
-                                timeout_seconds=min(
-                                    10.0,
-                                    max(1.0, remaining),
-                                ),
-                            )
-                            if not ollama_ready:
-                                raise RuntimeError(
-                                    "本地 Ollama 视觉服务按需启动失败；未继续加载模型以保护系统资源"
+                async with asyncio.timeout_at(attempt_deadline):
+                    async with self._vision_lock:
+                        remaining = attempt_deadline - loop.time()
+                        if remaining <= 0:
+                            raise TimeoutError("视觉请求排队超时")
+                        request_options = {"model": active_model}
+                        if active_base_url != self.vision_base_url:
+                            request_options["base_url"] = active_base_url
+                        if _ollama_native_base_url(active_base_url):
+                            async with inference_resource_lease(
+                                f"vision:{active_model}",
+                                timeout_seconds=min(self.vision_resource_wait_seconds, remaining),
+                                priority=InferencePriority.VISION,
+                            ):
+                                remaining = attempt_deadline - loop.time()
+                                if remaining <= 0 or not await ensure_ollama_service(
+                                    timeout_seconds=min(10.0, remaining)
+                                ):
+                                    raise RuntimeError(
+                                        "本地 Ollama 视觉服务按需启动失败；未继续加载模型以保护系统资源"
+                                    )
+                                if active_base_url == self.vision_base_url:
+                                    await self._release_chat_model_for_vision(active_model)
+                                else:
+                                    await self._release_chat_model_for_vision(active_model, active_base_url)
+                                remaining = attempt_deadline - loop.time()
+                                if remaining <= 0:
+                                    raise TimeoutError("视觉请求预算已用尽")
+                                model_response = await self._analyze_image_with_ollama_native(
+                                    encoded_images,
+                                    system_prompt,
+                                    user_prompt,
+                                    request_timeout=remaining,
+                                    **request_options,
                                 )
-                            release_base_url = (
-                                active_base_url
-                                if active_base_url != self.vision_base_url
-                                else None
-                            )
-                            if release_base_url:
-                                await self._release_chat_model_for_vision(
-                                    active_model,
-                                    release_base_url,
-                                )
-                            else:
-                                await self._release_chat_model_for_vision(active_model)
-                            native_kwargs = {"model": active_model}
-                            if active_base_url != self.vision_base_url:
-                                native_kwargs["base_url"] = active_base_url
-                            model_response = await self._analyze_image_with_ollama_native(
+                        else:
+                            model_response = await self._analyze_image_with_openai_compatible(
                                 encoded_images,
+                                [_image_mime_type(image) for image in vision_images],
                                 system_prompt,
                                 user_prompt,
-                                **native_kwargs,
+                                request_timeout=remaining,
+                                **request_options,
                             )
-                    else:
-                        openai_kwargs = {"model": active_model}
-                        if active_base_url != self.vision_base_url:
-                            openai_kwargs["base_url"] = active_base_url
-                        model_response = await self._analyze_image_with_openai_compatible(
-                            encoded_images,
-                            [_image_mime_type(image) for image in vision_images],
-                            system_prompt,
-                            user_prompt,
-                            **openai_kwargs,
-                        )
                 raw_content = model_response.content
                 response_metrics = {
                     **model_response.metrics,
@@ -483,19 +519,9 @@ class ToolboxVisionMixin:
                         error=f"视觉输出无效：{invalid_reason}",
                         model=active_model,
                     )
-                    release_base_url = (
-                        active_base_url
-                        if active_base_url != self.vision_base_url
-                        else None
-                    )
-                    if release_base_url:
-                        await self._release_vision_model_after_failure(
-                            active_model,
-                            release_base_url,
-                        )
-                    else:
-                        await self._release_vision_model_after_failure(active_model)
+                    await release_failed_model(active_model, active_base_url)
                     active_model = next_model
+                    cleaned = ""
                     continue
                 self._log_vision_event(
                     source=source,
@@ -514,10 +540,20 @@ class ToolboxVisionMixin:
                     "这次没有稳定读到图片具体内容，只能基于独立 OCR、"
                     "图片类型和尺寸判断；不要臆测画面细节。"
                 )
+            except asyncio.CancelledError:
+                self._log_vision_event(
+                    source=source,
+                    original_data=data,
+                    prepared_images=vision_images,
+                    prompt=user_prompt,
+                    status="visual_cancelled",
+                    elapsed_seconds=time.perf_counter() - started_at,
+                    model=active_model,
+                )
+                raise
             except Exception as exc:
-                can_retry = (
-                    attempt < retry_count
-                    and _is_retryable_vision_resource_error(exc)
+                can_retry = attempt < retry_count and (
+                    isinstance(exc, TimeoutError) or _is_retryable_vision_resource_error(exc)
                 )
                 if can_retry:
                     next_model = (
@@ -539,22 +575,15 @@ class ToolboxVisionMixin:
                         error=_exception_summary(exc),
                         model=active_model,
                     )
-                    release_base_url = (
-                        active_base_url
-                        if active_base_url != self.vision_base_url
-                        else None
-                    )
-                    if release_base_url:
-                        await self._release_vision_model_after_failure(
-                            active_model,
-                            release_base_url,
-                        )
-                    else:
-                        await self._release_vision_model_after_failure(active_model)
+                    await release_failed_model(active_model, active_base_url)
                     switched_model = next_model != active_model
                     active_model = next_model
                     if not switched_model:
-                        await asyncio.sleep(min(8.0, 2.0 * (attempt + 1)))
+                        pause = min(8.0, 2.0 * (attempt + 1))
+                        if bounded:
+                            pause = min(pause, max(0.0, (model_deadline - loop.time()) / 4))
+                        if pause:
+                            await asyncio.sleep(pause)
                     continue
                 print(f"[toolbox] vision analysis failed for {source}: {_exception_summary(exc)}")
                 self._log_vision_event(
@@ -600,6 +629,7 @@ class ToolboxVisionMixin:
         *,
         model: str | None = None,
         base_url: str | None = None,
+        request_timeout: float | None = None,
     ) -> _VisionModelResponse:
         import httpx
 
@@ -645,7 +675,7 @@ class ToolboxVisionMixin:
             payload["thinking"] = {"type": "disabled"}
         headers = {"Authorization": f"Bearer {self.vision_api_key or 'ollama'}"}
         async with httpx.AsyncClient(
-            timeout=min(self.vision_timeout_seconds, self._vision_attempt_timeout_seconds),
+            timeout=(request_timeout if request_timeout is not None else self.vision_timeout_seconds),
             headers=headers,
         ) as client:
             response = await client.post(
@@ -676,6 +706,7 @@ class ToolboxVisionMixin:
         user_prompt: str,
         model: str | None = None,
         base_url: str | None = None,
+        request_timeout: float | None = None,
     ) -> _VisionModelResponse:
         import httpx
 
@@ -704,7 +735,7 @@ class ToolboxVisionMixin:
             },
         }
         async with httpx.AsyncClient(
-            timeout=min(self.vision_timeout_seconds, self._vision_attempt_timeout_seconds)
+            timeout=(request_timeout if request_timeout is not None else self.vision_timeout_seconds)
         ) as client:
             response = await client.post(
                 f"{_ollama_native_base_url(base_url or self.vision_base_url)}/api/chat",

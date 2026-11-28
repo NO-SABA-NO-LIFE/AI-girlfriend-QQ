@@ -452,7 +452,7 @@ def test_server_routes_previous_share_and_focus_to_same_reply(monkeypatch, tmp_p
     server._voice_event_log = tmp_path / "voice-events.log"
     captured: dict[str, object] = {}
 
-    async def fake_analyze(event, plain_text, call_action, *, allow_vision=True):
+    async def fake_analyze(event, plain_text, call_action, *, allow_vision=True, **kwargs):
         del plain_text, call_action, allow_vision
         captured["analysis_event"] = event
         return None
@@ -636,7 +636,7 @@ def test_poke_command_timeout_sends_poke_done_fallback(monkeypatch, tmp_path) ->
     async def fake_reply(*args, **kwargs):
         raise RuntimeError("ReadTimeout")
 
-    async def fake_analyze(event, plain_text, call_action, *, allow_vision=True):
+    async def fake_analyze(event, plain_text, call_action, *, allow_vision=True, **kwargs):
         return None
 
     sent: list[str] = []
@@ -669,7 +669,7 @@ def test_non_poke_timeout_still_sends_generic_fallback(monkeypatch, tmp_path) ->
     async def fake_reply(*args, **kwargs):
         raise RuntimeError("ReadTimeout")
 
-    async def fake_analyze(event, plain_text, call_action, *, allow_vision=True):
+    async def fake_analyze(event, plain_text, call_action, *, allow_vision=True, **kwargs):
         return None
 
     sent: list[str] = []

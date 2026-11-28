@@ -44,6 +44,7 @@ STRUCTURED_EXTRA_KEY = "__structured_extra__"
 # 必要性：``l3`` / ``history`` **缺失**与"显式为空列表"看起来一样，但只有前者能通过
 # 相等性检查。无条件补出四层与 history 会让 421 条会话对不上（实测）。
 _LAYOUT_KEY = "__layout__"
+_HISTORY_IMAGE_FIELDS = "history_image_fields"
 
 # 只有这两项会拆成行；其余字段**原样**进 state_json。
 # 列（message_count / last_user_at / …）是为了查询与排序而做的**派生副本**，
@@ -264,9 +265,13 @@ def conversation_to_rows(
     history = record.get("history")
     history_rows: list[dict[str, Any]] = []
     if isinstance(history, list):
+        image_fields = {}
         for seq, item in enumerate(history):
             if not isinstance(item, dict):
                 continue
+            metadata = {key: item[key] for key in ("message_id", "image_refs") if key in item}
+            if metadata:
+                image_fields[str(seq)] = metadata
             history_rows.append(
                 {
                     "conversation_id": conversation_id,
@@ -279,6 +284,10 @@ def conversation_to_rows(
                     "source_conversation": _optional_text(item.get("source_conversation")),
                 }
             )
+        if image_fields:
+            # The history row schema predates image locators. Keep the optional
+            # fields in the same transaction and key them by the row sequence.
+            state[_LAYOUT_KEY][_HISTORY_IMAGE_FIELDS] = image_fields
 
     target = record.get("target")
     return {
@@ -354,7 +363,7 @@ def rows_to_conversation(
 
     if had_history:
         record["history"] = [
-            _history_item(row)
+            _history_item(row, layout)
             for row in sorted(history_rows, key=lambda item: item["seq"])
         ]
 
@@ -363,11 +372,13 @@ def rows_to_conversation(
     return record
 
 
-def _history_item(row: dict[str, Any]) -> dict[str, Any]:
+def _history_item(row: dict[str, Any], layout: dict[str, Any] | None) -> dict[str, Any]:
     item: dict[str, Any] = {"at": row["at"], "role": row["role"], "text": row["text"]}
     for column in ("actor_id", "nickname", "source_conversation"):
         if row[column] is not None:
             item[column] = row[column]
+    if layout and _HISTORY_IMAGE_FIELDS in layout:
+        item.update(layout[_HISTORY_IMAGE_FIELDS].get(str(row["seq"]), {}))
     return item
 
 
@@ -551,6 +562,7 @@ class MemorySqliteStore:
         self, conversation_id: str, *, account_id: str = ""
     ) -> dict[str, Any] | None:
         with self._connect() as connection:
+            connection.execute("BEGIN")
             return self._read_conversation(connection, conversation_id, account_id)
 
     def _read_conversation(
@@ -581,6 +593,7 @@ class MemorySqliteStore:
         """还原整棵记忆树（形状与 ``users.json`` 的 ``conversations`` 一致）。"""
         result: dict[str, dict[str, Any]] = {}
         with self._connect() as connection:
+            connection.execute("BEGIN")
             for conversation_id in self.conversation_ids(account_id=account_id):
                 record = self._read_conversation(connection, conversation_id, account_id)
                 if record is not None:
@@ -590,31 +603,23 @@ class MemorySqliteStore:
     def history(self, conversation_id: str, *, account_id: str = "", limit: int = 80) -> list[dict[str, Any]]:
         """取最近 ``limit`` 条历史，按时间正序返回。"""
         with self._connect() as connection:
+            connection.execute("BEGIN")
+            conversation = connection.execute(
+                "SELECT state_json FROM conversations WHERE account_id=? AND conversation_id=?",
+                (account_id, conversation_id),
+            ).fetchone()
             rows = connection.execute(
                 "SELECT * FROM history WHERE account_id=? AND conversation_id=? "
                 "ORDER BY seq DESC LIMIT ?",
                 (account_id, conversation_id, max(1, int(limit))),
             ).fetchall()
+        layout = (
+            json.loads(conversation["state_json"] or "{}").get(_LAYOUT_KEY)
+            if conversation is not None
+            else None
+        )
         ordered = sorted((dict(row) for row in rows), key=lambda item: item["seq"])
-        return [
-            {
-                "at": row["at"],
-                "role": row["role"],
-                "text": row["text"],
-                **(
-                    {"actor_id": row["actor_id"]}
-                    if row["actor_id"] is not None
-                    else {}
-                ),
-                **({"nickname": row["nickname"]} if row["nickname"] is not None else {}),
-                **(
-                    {"source_conversation": row["source_conversation"]}
-                    if row["source_conversation"] is not None
-                    else {}
-                ),
-            }
-            for row in ordered
-        ]
+        return [_history_item(row, layout) for row in ordered]
 
     # ---- 维护 -----------------------------------------------------------
 

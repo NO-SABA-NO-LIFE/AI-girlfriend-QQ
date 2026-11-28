@@ -4,6 +4,7 @@ import re
 from typing import Any, Iterable
 
 from . import extraction_rules as _extraction_rules
+from .image_history import history_message_id, normalize_image_refs
 from .rule_common import (
     ABSTRACT_HINTS,
     COMFORT_HINTS,
@@ -92,6 +93,9 @@ def _append_history(
     now: float,
     actor_id: int | str | None = None,
     nickname: str | None = None,
+    *,
+    message_id: str | None = None,
+    image_refs: list[dict[str, Any]] | None = None,
 ) -> None:
     if _extraction_rules.is_memory_pollution_text(text):
         return
@@ -105,6 +109,13 @@ def _append_history(
         entry["actor_id"] = str(actor_id)
     if nickname:
         entry["nickname"] = str(nickname)
+    normalized_id = history_message_id(message_id)
+    if normalized_id:
+        entry["message_id"] = normalized_id
+    if image_refs:
+        refs = normalize_image_refs(image_refs)
+        if refs:
+            entry["image_refs"] = refs
     history.append(entry)
     item["history"] = history[-HISTORY_LIMIT:]
 

@@ -5,8 +5,10 @@ import contextlib
 import copy
 import json
 import logging
+import math
 import time
 import uuid
+from collections import deque
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +20,16 @@ from ...message_plan import (
     outgoing_to_segments,  # type: ignore[import-not-found]
 )
 from ...music import SingingDecision
+from ...toolbox_parts.visual_origin import (
+    MESSAGE_ID_META_KEY,
+    MESSAGE_ORDER_META_KEY,
+    ORIGIN_META_KEY,
+    SEGMENT_INDEX_META_KEY,
+    SENDER_NAME_META_KEY as SENDER_NAME_META_KEY,
+    is_visual_segment,
+    segment_data,
+    stamp_visual_segments,
+)
 from ...voice import VoiceRequest, split_spoken_text
 from .. import server as _server
 from ..message_batch import _message_to_segments
@@ -26,15 +38,20 @@ from ..message_parser import (
     extract_reply_inline_message,
     extract_reply_message_id,
 )
+from ..reply_budget import reply_phase
 from ..reply_policy import is_bot_mentioned, normalize_dedup_key
+from ..visual_followup import referenced_message_id
 from .helpers import (
     _conversation_id,
     _event_has_visual_material,
+    _is_visual_followup,
     _merge_pending_visual_event,
     _message_queue_id,
     _nickname,
     _onebot_action_error_detail,
     _pending_visual_key,
+    _quoted_payload_matches,
+    _quoted_response_data,
     _require_onebot_action_success,
     _send_delay,
     _typing_delay,
@@ -48,12 +65,6 @@ GROUP_DEDUP_WINDOW_SECONDS = 120.0
 
 # 引用图片与“最近一次情报生成时间”的最大偏差：超出说明引用的是别的图。
 _HD2_QUOTED_MATCH_SECONDS = 180.0
-
-# 内部约定字段：合并“别人发的群图”时，把真实发送者昵称写进图片段的 data 里。
-# 命名以下划线开头，避免与 OneBot 原始字段冲突；toolbox 读取后转成归属提示。
-# 注意：toolbox_parts/request_collection.py 用同名字符串读取，修改需两处同步。
-SENDER_NAME_META_KEY = "_atri_sender_name"
-
 
 def cached_origin_name(cached: Any, current_person_id: str) -> str:
     """从视觉缓存条目计算需要标注的发送者名（空串表示无需标注）。
@@ -109,7 +120,7 @@ def _coerce_message_time(value: Any) -> float:
         seconds = float(value)
     except (TypeError, ValueError):
         return 0.0
-    return seconds if seconds > 0 else 0.0
+    return seconds if math.isfinite(seconds) and seconds > 0 else 0.0
 
 
 def _format_relative_age(at: float) -> str:
@@ -269,6 +280,8 @@ class OneBotDeliveryMixin:
         self,
         websocket: Any,
         event: dict[str, Any],
+        *,
+        deadline: float | None = None,
     ) -> tuple[str, str, list[dict[str, Any]], str, str, float]:
         """解析用户引用的消息，供本轮模型和多模态工具共同使用。
 
@@ -281,62 +294,47 @@ class OneBotDeliveryMixin:
         让它在评论旧情报时不必重新查询一次；拿不到时为空串 / 0。
         """
 
-        message_id = extract_reply_message_id(event.get("message"))
-        if not message_id:
-            reply_payload = event.get("reply")
-            if isinstance(reply_payload, dict):
-                value = reply_payload.get("id") or reply_payload.get("message_id")
-                if value not in (None, ""):
-                    message_id = str(value)
+        message_id = referenced_message_id(event)
         if not message_id:
             return "", "", [], "", "", 0.0
 
-        inline_message = extract_reply_inline_message(event)
+        bot_qq = getattr(getattr(self, "config", None), "bot_qq", None)
+        reply_payload = event.get("reply")
+        inline_message = None
+        if isinstance(reply_payload, dict) and _quoted_payload_matches(event, message_id, reply_payload, bot_qq):
+            inline_message = extract_reply_inline_message(event)
         if inline_message is not None:
-            reply_payload = event.get("reply")
-            inline_sender = (
-                reply_payload.get("sender")
-                if isinstance(reply_payload, dict)
-                else None
-            )
+            inline_sender = reply_payload.get("sender")
             return (
                 message_id,
                 extract_plain_text(inline_message),
                 _message_to_segments(inline_message),
                 _sender_display_name(inline_sender),
                 _sender_user_id(inline_sender),
-                _coerce_message_time(
-                    reply_payload.get("time")
-                    if isinstance(reply_payload, dict)
-                    else None
-                ),
+                _coerce_message_time(reply_payload.get("time")),
             )
 
         request_id: int | str = int(message_id) if message_id.isdigit() else message_id
         try:
-            result = await self.call_action_and_wait(
-                websocket,
-                "get_msg",
-                {"message_id": request_id},
-                3.0,
-            )
-            data = result.get("data") if isinstance(result, dict) else None
-            quoted_message = data.get("message") if isinstance(data, dict) else None
-            if quoted_message is not None:
+            async with reply_phase(deadline):
+                result = await self.call_action_and_wait(
+                    websocket,
+                    "get_msg",
+                    {"message_id": request_id},
+                    3.0,
+                )
+            data = _quoted_response_data(event, message_id, result, bot_qq)
+            if data is not None and (quoted_message := data.get("message")) is not None:
                 return (
                     message_id,
                     extract_plain_text(quoted_message),
                     _message_to_segments(quoted_message),
-                    _sender_display_name(
-                        data.get("sender") if isinstance(data, dict) else None
-                    ),
-                    _sender_user_id(
-                        data.get("sender") if isinstance(data, dict) else None
-                    ),
-                    _coerce_message_time(
-                        data.get("time") if isinstance(data, dict) else None
-                    ),
+                    _sender_display_name(data.get("sender")),
+                    _sender_user_id(data.get("sender")),
+                    _coerce_message_time(data.get("time")),
                 )
+        except TimeoutError:
+            LOGGER.debug("引用消息读取到达时限：message_id=%s", message_id)
         except Exception as exc:
             LOGGER.warning("引用消息读取失败：message_id=%s error=%s", message_id, exc)
 
@@ -347,6 +345,10 @@ class OneBotDeliveryMixin:
         event: dict[str, Any],
         quoted_segments: list[dict[str, Any]],
         quoted_sender_name: str = "",
+        *,
+        quoted_message_id: str = "",
+        quoted_sender_id: str = "",
+        quoted_sent_at: float = 0.0,
     ) -> dict[str, Any]:
         """把引用消息的媒体段合并到本轮分析事件，不改变原始事件。
 
@@ -356,20 +358,11 @@ class OneBotDeliveryMixin:
 
         if not quoted_segments:
             return event
-        # 给引用消息里的图片段标注发送者（深拷贝，不污染原始 segment）。
-        marked_segments: list[dict[str, Any]] = []
-        for segment in quoted_segments:
-            copied = copy.deepcopy(segment)
-            if (
-                quoted_sender_name
-                and isinstance(copied, dict)
-                and str(copied.get("type") or "").lower()
-                in {"image", "mface", "marketface"}
-            ):
-                copied.setdefault("data", {})[SENDER_NAME_META_KEY] = (
-                    quoted_sender_name
-                )
-            marked_segments.append(copied)
+        marked_segments = stamp_visual_segments(
+            {"message": quoted_segments}, origin="quoted",
+            message_id=quoted_message_id, sender_id=quoted_sender_id,
+            sender_name=quoted_sender_name, sent_at=quoted_sent_at,
+        )["message"]
         merged = dict(event)
         current_segments = _message_to_segments(event.get("message"))
         merged["message"] = (
@@ -489,12 +482,37 @@ class OneBotDeliveryMixin:
         key = _pending_visual_key(event)
         if not key or not _event_has_visual_material(event):
             return
+        user_id = str(event.get("user_id") or "")
+        if user_id == str(getattr(self.config, "bot_qq", "")):
+            return
         now = time.time()
-        self._pending_group_visual_events[key] = (now, event)
+        pending = self._pending_group_visual_events
+        if not getattr(self.config, "image_attribution_enabled", True):
+            pending[key] = deque([(now, event)], maxlen=1)
+        else:
+            bucket = pending.get(key)
+            if bucket is None or bucket.maxlen != 8:
+                bucket = pending[key] = deque(maxlen=8)
+            cutoff = now - _server.PENDING_GROUP_VISUAL_TTL_SECONDS
+            while bucket and bucket[0][0] < cutoff:
+                bucket.popleft()
+            stored = {
+                (data.get(MESSAGE_ID_META_KEY), data.get(SEGMENT_INDEX_META_KEY))
+                for _, previous in bucket if (data := segment_data(previous))
+            }
+            marked = stamp_visual_segments(event, origin="pending")
+            for segment in marked["message"]:
+                if is_visual_segment(segment):
+                    data = segment_data(segment)
+                    identity = (data.get(MESSAGE_ID_META_KEY), data.get(SEGMENT_INDEX_META_KEY))
+                    if identity[0] and identity in stored:
+                        continue
+                    bucket.append((now, segment))
+                    stored.add(identity)
         if len(self._pending_group_visual_events) > 256:
             oldest_key = min(
                 self._pending_group_visual_events,
-                key=lambda item: self._pending_group_visual_events[item][0],
+                key=lambda item: self._pending_group_visual_events[item][-1][0],
             )
             self._pending_group_visual_events.pop(oldest_key, None)
         # 同时记入群维度的近期图片队列，供被 @ 回复时顺带理解。
@@ -503,13 +521,92 @@ class OneBotDeliveryMixin:
     def _remember_recent_group_visual(
         self, event: dict[str, Any], now: float
     ) -> None:
-        group_id = event.get("group_id")
+        if not getattr(self.config, "group_recent_visual_enabled", True):
+            return
+        group_id = str(event.get("group_id") or "")
         message = event.get("message")
-        if group_id is None or not isinstance(message, list):
+        if event.get("message_type") != "group" or not group_id or not isinstance(message, list):
+            return
+        if not getattr(self.config, "image_attribution_enabled", True):
+            self._remember_legacy_group_visual(event, now)
+            return
+        sender_id = str(event.get("user_id") or "")
+        if not sender_id or sender_id == str(getattr(self.config, "bot_qq", "")):
+            return
+
+        ttl = max(30, int(getattr(self.config, "group_recent_visual_ttl_seconds", 300)))
+        max_count = max(1, int(getattr(self.config, "group_recent_visual_max", 4)))
+        group_bucket = self._recent_group_visuals.get(group_id)
+        if not isinstance(group_bucket, dict):
+            group_bucket = {}
+            self._recent_group_visuals[group_id] = group_bucket
+        sender_bucket = group_bucket.get(sender_id)
+        if sender_bucket is None or sender_bucket.maxlen != max_count:
+            sender_bucket = deque(sender_bucket or (), maxlen=max_count)
+            group_bucket[sender_id] = sender_bucket
+
+        marked = stamp_visual_segments(event, origin="same_sender_recent")
+        while sender_bucket and now - sender_bucket[0][0] > ttl:
+            sender_bucket.popleft()
+        sender_bucket.extend(
+            (now, segment) for segment in marked["message"] if is_visual_segment(segment)
+        )
+        buckets = [
+            (items[-1][0], group, sender)
+            for group, members in self._recent_group_visuals.items()
+            if isinstance(members, dict)
+            for sender, items in members.items() if items
+        ]
+        if len(buckets) > 256:
+            _, oldest_group, oldest_sender = min(buckets)
+            oldest_members = self._recent_group_visuals[oldest_group]
+            del oldest_members[oldest_sender]
+            if not oldest_members:
+                del self._recent_group_visuals[oldest_group]
+
+    def _event_with_recent_group_visuals(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Bring the same speaker's earlier images into an explicit visual follow-up."""
+        if not getattr(self.config, "group_recent_visual_enabled", True) or event.get("message_type") != "group":
+            return event
+        if not getattr(self.config, "image_attribution_enabled", True):
+            return self._event_with_legacy_group_visuals(event)
+        if _event_has_visual_material(event) or extract_reply_message_id(event.get("message")) or event.get("reply"):
+            return event
+        if not _is_visual_followup(extract_plain_text(event.get("message"))):
+            return event
+
+        group_id = str(event.get("group_id") or "")
+        sender_id = str(event.get("user_id") or "")
+        group_bucket = self._recent_group_visuals.get(group_id)
+        if not isinstance(group_bucket, dict) or not sender_id:
+            return event
+        sender_bucket = group_bucket.get(sender_id)
+        if not sender_bucket:
+            return event
+        now = time.time()
+        ttl = max(30, int(getattr(self.config, "group_recent_visual_ttl_seconds", 300)))
+        while sender_bucket and now - sender_bucket[0][0] > ttl:
+            sender_bucket.popleft()
+        if not sender_bucket:
+            del group_bucket[sender_id]
+            if not group_bucket:
+                del self._recent_group_visuals[group_id]
+            return event
+        return {
+            **event,
+            "message": _message_to_segments(event.get("message")) + [copy.deepcopy(segment) for _, segment in sender_bucket],
+        }
+
+    def _remember_legacy_group_visual(self, event: dict[str, Any], now: float) -> None:
+        group_id = str(event.get("group_id") or "")
+        message = event.get("message")
+        if not group_id or not isinstance(message, list):
             return
         ttl = max(30, int(getattr(self.config, "group_recent_visual_ttl_seconds", 300)))
         max_count = max(1, int(getattr(self.config, "group_recent_visual_max", 3)))
-        bucket = self._recent_group_visuals.setdefault(str(group_id), [])
+        bucket = self._recent_group_visuals.setdefault(group_id, [])
+        if not isinstance(bucket, list):
+            bucket = []
         # 记录图片真实发送者：昵称拿不到时退回 QQ 号，保证归属始终有值。
         sender_id = str(event.get("user_id") or "")
         sender_name = str(_nickname(event) or sender_id or "群友")
@@ -529,7 +626,7 @@ class OneBotDeliveryMixin:
             fresh = fresh[-max_count:]
         self._recent_group_visuals[str(group_id)] = fresh
 
-    def _event_with_recent_group_visuals(
+    def _event_with_legacy_group_visuals(
         self, event: dict[str, Any]
     ) -> dict[str, Any]:
         """被 @ 回复时，把群里近期图片段合并到本次 event，供本次分析顺带读懂。"""
@@ -579,6 +676,7 @@ class OneBotDeliveryMixin:
                 copied.setdefault("data", {})[SENDER_NAME_META_KEY] = (
                     sender_name or sender_id
                 )
+                copied["data"][ORIGIN_META_KEY] = "legacy_other"
             extra.append(copied)
         if not extra:
             return event
@@ -589,20 +687,36 @@ class OneBotDeliveryMixin:
     def _event_with_pending_group_visual(
         self,
         event: dict[str, Any],
+        *,
+        focus_event: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        analysis_event = focus_event or event
         key = _pending_visual_key(event)
         if not key:
-            return event
-        if _event_has_visual_material(event):
-            self._pending_group_visual_events.pop(key, None)
-            return event
+            return analysis_event
         pending = self._pending_group_visual_events.pop(key, None)
-        if (
-            not pending
-            or time.time() - pending[0] > _server.PENDING_GROUP_VISUAL_TTL_SECONDS
-        ):
-            return event
-        return _merge_pending_visual_event(pending[1], event)
+        if not pending or _event_has_visual_material(event):
+            return analysis_event
+        cutoff = time.time() - _server.PENDING_GROUP_VISUAL_TTL_SECONDS
+        if not getattr(self.config, "image_attribution_enabled", True):
+            at, previous = pending[-1]
+            if pending.maxlen == 1 and focus_event is None and at >= cutoff:
+                return _merge_pending_visual_event(previous, event, image_attribution=False)
+            return analysis_event
+        if pending.maxlen != 8:
+            return analysis_event
+        visual_segments = []
+        for order, (at, segment) in enumerate(pending):
+            if at >= cutoff:
+                data = {**segment_data(segment), MESSAGE_ORDER_META_KEY: order}
+                visual_segments.append({**segment, "data": data})
+        return {
+            **analysis_event,
+            "message": visual_segments + [
+                segment for segment in _message_to_segments(analysis_event.get("message"))
+                if not is_visual_segment(segment)
+            ],
+        }
 
     async def _send_streamed_speech_reply(
         self,
@@ -745,6 +859,7 @@ class OneBotDeliveryMixin:
         first_delay: bool = True,
         group_quote: bool = True,
         collect_ids: list[str] | None = None,
+        delivery_deadline: float | None = None,
     ) -> str:
         """发送一组消息并返回已送达的文本。
 
@@ -756,13 +871,22 @@ class OneBotDeliveryMixin:
         if normalized_model_type not in {"chat", "vision", "voice"}:
             normalized_model_type = "voice" if any(item.kind == "record" for item in outgoing) else "chat"
         delivered_parts: list[str] = []
+
+        async def pause(delay: float, pauses_left: int) -> None:
+            if delivery_deadline is not None:
+                remaining = delivery_deadline - asyncio.get_running_loop().time()
+                delay = min(delay, remaining / pauses_left)
+            if delay > 0:
+                await asyncio.sleep(delay)
+
         if outgoing and first_delay:
             # 真人不会在消息到达的同一瞬间发出回复：先停顿"看到消息 + 起手打字"。
             # 语音分段逐段调用本方法，由调用方用 first_delay=False 关掉重复停顿。
-            await asyncio.sleep(
+            await pause(
                 _server._first_reply_delay(
                     self.config, _outgoing_delay_text(outgoing, fallback_text)
-                )
+                ),
+                len(outgoing),
             )
         # 指令返图合并：开关开启且这一组里含图片时，把文字和图片拼成一条消息
         # 整体发送。普通对话（无图片或只有一条）不进入此分支，保持逐条流式。
@@ -832,8 +956,9 @@ class OneBotDeliveryMixin:
 
             if index < len(outgoing) - 1:
                 # 下一条要等"把这一条打完"的时间，长消息等得久、短句更干脆。
-                await asyncio.sleep(
-                    _typing_delay(self.config, _outgoing_delay_text([message], fallback_text))
+                await pause(
+                    _typing_delay(self.config, _outgoing_delay_text([message], fallback_text)),
+                    len(outgoing) - index - 1,
                 )
         return "\n".join(part for part in delivered_parts if part).strip()
 

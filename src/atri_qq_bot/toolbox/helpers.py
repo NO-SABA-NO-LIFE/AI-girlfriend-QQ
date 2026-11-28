@@ -270,6 +270,7 @@ def _visual_prompt_for_kind(
     user_question: str = "",
     *,
     full_text: bool | None = None,
+    reference_image: bool = False,
 ) -> str:
     question = re.sub(
         r"\[(?:表情包/图片|动画表情|图片):.*?\]\]?",
@@ -293,39 +294,57 @@ def _visual_prompt_for_kind(
             "你只用一两句摘录与用户问题最相关的关键文字，控制在 60 字以内。"
             "没有就写“无明显文字”，看不清的字不要编。\n"
         )
-    return (
+    image_rule = (
         "【最关键的定位】用户发来的图片/表情不是让你分析或点评的“作品”，"
         "而是用户此刻情绪、状态、态度的表达，等同于一个语气、一句潜台词。"
         "例如发懵逼表情，意思是“我现在懵了/没看懂”；发无语表情，意思是“我很无语”；"
         "发开心表情，意思是“我现在很高兴”。你要读懂的是“用户此刻是什么状态、想表达什么”，"
         "而不是画面里有什么、图片好不好笑。\n"
-        "只分析本次请求附带的当前图片，不得引用或猜测上一张图片。\n"
-        f"当前用户问题：{question}\n"
-        "字段要求：\n"
+    )
+    image_fields = (
         "direct_answer：用一句话点出“用户此刻的状态/情绪，以及他想借此表达什么”，"
         "站在理解用户的角度写；禁止描述画面构图、颜色、人物长相、衣着，"
         "禁止评价这张图或表情本身怎么样。\n"
         "emotion：用户当前的情绪/状态，例如困惑懵逼、无语、开心、生气、害羞、无奈、得意。\n"
         "social_intent：用户借这张图在对话里想做什么，例如表示没听懂、缓和气氛、吐槽、撒娇、回应对方。\n"
+    )
+    if reference_image:
+        image_rule = (
+            "这张图来自引用、较早消息或另一位群友。围绕当前的问题读图，"
+            "只依据图中可见内容和文字；不得用这张图推断当前说话人的情绪或意图。\n"
+        )
+        image_fields = (
+            "direct_answer：根据该图的可见证据回答当前问题；证据不足时明确说明。\n"
+            "emotion：只描述图中可辨认的表情或画面氛围。\n"
+            "social_intent：当前说话人的意图无法由这张图确认。\n"
+        )
+    return (
+        f"{image_rule}"
+        "只分析本次请求附带的图片，不得引用或猜测其他图片。\n"
+        f"当前用户问题：{question}\n"
+        "字段要求：\n"
+        f"{image_fields}"
         f"{visible_text_rule}"
         "subjects、identity：仅当画面确实包含可识别的具体人物/作品时才填写，"
         "不确定写“未确认”；不要为了凑字段去罗列画面元素。"
         "一旦给出具体人物名或作品名，needs_web_verification 必须为 true，"
         "search_keywords 要包含候选名、作品名和画面特征；联网结果不支持时身份保持“未确认”。\n"
-        "evidence：只列能支撑“用户状态判断”的可见依据；"
+        "evidence：只列支持上述判断的可见依据；"
         "confidence 只能为 high、medium、low；"
         "不需要核验身份时 needs_web_verification 为 false、search_keywords 为空数组。\n"
         "只输出简体中文 JSON，不输出思考过程或 Markdown。"
     )
 
 
+def _visual_identity_needs_verification(analysis_text: str) -> bool:
+    return bool(
+        re.search(r"(?:需要联网核验\s*[:：]\s*是|置信度\s*[:：]\s*低)", analysis_text or "")
+    )
+
+
 def _visual_search_query(analysis_text: str) -> str:
     text = str(analysis_text or "")
-    needs_search = bool(
-        re.search(r"需要联网核验\s*[:：]\s*是", text)
-        or re.search(r"置信度\s*[:：]\s*低", text)
-    )
-    if not needs_search:
+    if not _visual_identity_needs_verification(text):
         return ""
     match = re.search(
         r"检索关键词\s*[:：]\s*([^；;\r\n]+)",
@@ -640,9 +659,15 @@ def _ensure_visual_identity_requires_verification(analysis_text: str) -> str:
 
 def _demote_unverified_visual_identity(analysis_text: str) -> str:
     demoted = re.sub(
+        r"(直接回答\s*[:：])[^；;\r\n]*",
+        r"\1人物身份尚未确认，可依据下文可见细节回答",
+        str(analysis_text or ""),
+        count=1,
+    )
+    demoted = re.sub(
         r"(身份/出处\s*[:：])[^；;\r\n]*",
         r"\1未确认（视觉模型候选未获得联网证据，不作为事实）",
-        str(analysis_text or ""),
+        demoted,
         count=1,
     )
     demoted = re.sub(

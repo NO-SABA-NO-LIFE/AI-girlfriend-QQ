@@ -3,19 +3,24 @@ from __future__ import annotations
 import html
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
 from .formatting import _clean_html_text, _shorten
-
-
-# 内部约定字段：onebot 层合并“别人发的群图”时写入真实发送者昵称。
-# 与 onebot/server_parts/server_delivery.py 的 SENDER_NAME_META_KEY 保持一致。
-SENDER_NAME_META_KEY = "_atri_sender_name"
+from .visual_origin import (
+    IMAGE_ORIGIN_PRIORITY,
+    ORIGIN_META_KEY,
+    SENDER_NAME_META_KEY as SENDER_NAME_META_KEY,
+    ImageOrigin,
+    image_origin_from_segment,
+    is_visual_segment,
+    segment_data,
+)
 
 URL_RE = re.compile(r"https?://[^\s<>\]）)\"']+", re.IGNORECASE)
+IMAGE_PLACEHOLDER_RE = re.compile(r"\[(?:表情包/图片|动画表情)(?::[^\]\n]*)?\]")
 WINDOWS_PATH_RE = re.compile(r"(?:[A-Za-z]:\\[^\r\n\"'<>]+)")
 TEXT_EXTENSIONS = {".txt", ".md", ".log", ".csv", ".tsv", ".json"}
 DOC_EXTENSIONS = {".docx", ".pdf"}
@@ -48,6 +53,7 @@ class _SegmentRef:
     size: int | None = None
     group_id: str = ""
     busid: Any = None
+    image_origin: ImageOrigin | None = None
 
     @property
     def label(self) -> str:
@@ -60,6 +66,7 @@ class _MaterialRequest:
     paths: list[Path] = field(default_factory=list)
     file_refs: list[_SegmentRef] = field(default_factory=list)
     image_refs: list[_SegmentRef] = field(default_factory=list)
+    dropped_images: list[ImageOrigin] = field(default_factory=list)
     video_refs: list[_SegmentRef] = field(default_factory=list)
     share_hints: list[str] = field(default_factory=list)
     segment_limitations: list[str] = field(default_factory=list)
@@ -94,27 +101,48 @@ def _append_sender_origin_hint(request: "_MaterialRequest", data: dict[str, Any]
     )
 
 
-def _collect_request(event: dict[str, Any], plain_text: str) -> _MaterialRequest:
+def _collect_request(
+    event: dict[str, Any],
+    plain_text: str,
+    *,
+    image_refs_max: int | None = None,
+    image_attribution: bool = True,
+) -> _MaterialRequest:
     request = _MaterialRequest()
-    request.urls.extend(_extract_urls(plain_text))
-    request.paths.extend(_extract_paths(plain_text))
+    message = event.get("message")
+    material_text = plain_text
+    if image_attribution and isinstance(message, list) and any(is_visual_segment(segment) for segment in message):
+        # OneBot's plain-text projection embeds some image URLs in placeholders.
+        # Those refs belong exclusively to their attributed image segments.
+        material_text = IMAGE_PLACEHOLDER_RE.sub("", plain_text)
+    request.urls.extend(_extract_urls(material_text))
+    request.paths.extend(_extract_paths(material_text))
     for url in request.urls:
         title = _plain_share_title(plain_text, url)
         if title:
             request.share_hints.append(f"用户分享标题：{title}")
 
-    message = event.get("message")
     if isinstance(message, list):
-        for segment in message:
+        for index, segment in enumerate(message):
             if not isinstance(segment, dict):
                 continue
-            data = segment.get("data") or {}
-            segment_type = segment.get("type")
-            if segment_type == "image":
-                request.has_image_only = True
-                image_ref = _segment_ref("image", data, event)
-                request.image_refs.append(image_ref)
-                _append_sender_origin_hint(request, data)
+            data = segment_data(segment)
+            segment_type = str(segment.get("type") or "").lower()
+            if segment_type in {"image", "mface", "marketface"}:
+                is_image = segment_type == "image"
+                request.has_image_only = request.has_image_only or is_image
+                ref = _segment_ref("image" if is_image else "sticker", data, event)
+                if is_image or ref.url or ref.file or ref.file_id or ref.summary or ref.name:
+                    if image_attribution:
+                        ref = replace(ref, image_origin=image_origin_from_segment(segment, index=index))
+                    request.image_refs.append(ref)
+                if not is_image and (ref.summary or ref.name):
+                    if not image_attribution or not data.get(ORIGIN_META_KEY):
+                        request.share_hints.append(f"动画表情摘要：{ref.summary or ref.name}")
+                if data.get(ORIGIN_META_KEY) is None or (
+                    not image_attribution and data.get(ORIGIN_META_KEY) in {"quoted", "legacy_other"}
+                ):
+                    _append_sender_origin_hint(request, data)
             elif segment_type == "file":
                 request.file_refs.append(_segment_ref("file", data, event))
             elif segment_type == "video":
@@ -125,13 +153,6 @@ def _collect_request(event: dict[str, Any], plain_text: str) -> _MaterialRequest
             elif segment_type == "face":
                 face_id = _first_text(data, "id", "face_id")
                 request.share_hints.append(f"QQ表情：{face_id}" if face_id else "QQ表情：用户发了一个普通 QQ 表情")
-            elif segment_type in {"mface", "marketface"}:
-                face_ref = _segment_ref("sticker", data, event)
-                if face_ref.url or face_ref.file or face_ref.summary or face_ref.name:
-                    request.image_refs.append(face_ref)
-                if face_ref.summary or face_ref.name:
-                    request.share_hints.append(f"动画表情摘要：{face_ref.summary or face_ref.name}")
-                _append_sender_origin_hint(request, data)
             elif segment_type in {"json", "xml", "share"}:
                 _collect_share_segment(request, data)
             else:
@@ -139,12 +160,46 @@ def _collect_request(event: dict[str, Any], plain_text: str) -> _MaterialRequest
 
     request.urls = _dedupe(request.urls)
     request.paths = [path for path in _dedupe(request.paths) if str(path)]
-    request.image_refs = _dedupe(request.image_refs)
+    if image_attribution:
+        request.image_refs, request.dropped_images = _select_images(request.image_refs, image_refs_max)
+    else:
+        request.image_refs = _dedupe(request.image_refs)[:image_refs_max]
     request.file_refs = _dedupe(request.file_refs)
     request.video_refs = _dedupe(request.video_refs)
     request.share_hints = _dedupe(request.share_hints)
     request.segment_limitations = _dedupe(request.segment_limitations)
     return request
+
+
+def _select_images(
+    image_refs: list[_SegmentRef], maximum: int | None
+) -> tuple[list[_SegmentRef], list[ImageOrigin]]:
+    def sort_key(ref: _SegmentRef) -> tuple[int, float, int, int]:
+        origin = ref.image_origin or ImageOrigin()
+        # Only the current batch has a common event-order counter. Older batches
+        # each start that counter at zero and are ordered by message time first.
+        timestamp = 0.0 if origin.origin == "current" else origin.sent_at
+        return (IMAGE_ORIGIN_PRIORITY[origin.origin], timestamp, origin.message_order, origin.segment_index)
+
+    selected: list[_SegmentRef] = []
+    dropped: list[ImageOrigin] = []
+    seen: set[tuple[str, str]] = set()
+    for ref in sorted(image_refs, key=sort_key):
+        asset = (
+            ("file_id", ref.file_id) if ref.file_id else
+            ("file", ref.file) if ref.file else
+            ("url", ref.url) if ref.url else None
+        )
+        if asset is not None:
+            if asset in seen:
+                continue
+            seen.add(asset)
+        origin = replace(ref.image_origin or ImageOrigin(), label=f"图{len(selected) + len(dropped) + 1}")
+        if maximum is None or len(selected) < maximum:
+            selected.append(replace(ref, image_origin=origin))
+        else:
+            dropped.append(replace(origin, status="dropped_limit", reason="limit"))
+    return selected, dropped
 
 
 def _plain_share_title(text: str, url: str) -> str:

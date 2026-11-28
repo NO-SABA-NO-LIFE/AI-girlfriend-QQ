@@ -33,6 +33,12 @@ class BotConfig:
     chat_request_timeout_seconds: float = 25.0
     chat_resource_wait_seconds: float = 35.0
     chat_quality_retries: int = 1
+    chat_min_attempt_seconds: float = 5.0
+    turn_budget_enabled: bool = True
+    turn_budget_seconds: float = 120.0
+    turn_min_chat_seconds: float = 30.0
+    toolbox_vision_stage_budget_seconds: float = 90.0
+    toolbox_vision_image_budget_seconds: float = 45.0
     # 上游非流式长请求会按 max_tokens 缓冲并挂起，改用 SSE 流式并在本地重组。
     chat_stream_enabled: bool = True
     # 聊天备用模型链：主模型传输失败时按顺序逐个切换（同视觉兜底机制）。
@@ -71,12 +77,26 @@ class BotConfig:
     sticker_vision_classify_enabled: bool = True
     # Hold new stickers in the review area until the owner approves them.
     sticker_review_enabled: bool = True
+    sticker_capture_defer: bool = False
+    sticker_hydration_enabled: bool = False
+    sticker_hydration_token: str | None = None
+    sticker_hydration_poll_seconds: float = 2.0
+    sticker_hydration_max_attempts: int = 3
+    sticker_hydration_stale_seconds: float = 60.0
+    sticker_pending_ttl_seconds: float = 172800.0
     # 群聊回复时引用原消息并 @ 对方（reply + at 段）。
     group_reply_quote_enabled: bool = True
-    # 被 @ 回复时，顺带把群里近期图片/表情合并进本次分析（平时不主动分析）。
+    image_attribution_enabled: bool = True
+    toolbox_image_refs_max: int = 4
+    visual_history_refs_enabled: bool = False
+    material_bucket_enabled: bool = False
+    material_bucket_at_seconds: float = 2.0
+    material_bucket_group_seconds: float = 3.0
+    material_bucket_private_seconds: float = 3.0
+    # 群聊追问可补用当前发送者的近期视觉素材。
     group_recent_visual_enabled: bool = True
     group_recent_visual_ttl_seconds: int = 300
-    group_recent_visual_max: int = 3
+    group_recent_visual_max: int = 4
     # 视觉轮只把最近该窗口内的对话成对（user+assistant）带入，更早的旧话题整体
     # 剔除，避免识图被数小时前的无关情绪带偏，同时保留连续识图追问所需上下文。
     visual_history_window_seconds: int = 1800

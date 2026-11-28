@@ -42,6 +42,7 @@ from .helpers import (
     _merge_group_safe_structured_memory,
     _remember_personal_event,
 )
+from .image_history import find_history_image_refs
 from .ingestion import MemoryExtractionRequest
 from .profile_rules import (
     _decay_event_memories,
@@ -74,6 +75,8 @@ class MemoryObservationMixin:
         visibility: str = "private",
         source_context: str | None = None,
         event_id: str | None = None,
+        *,
+        image_refs: list[dict[str, Any]] | None = None,
     ) -> None:
         raw_text = str(text or "")
         if (conversation_id.startswith("private:") and visibility == "private"
@@ -134,7 +137,16 @@ class MemoryObservationMixin:
         if style_flags["correction_count"]:
             item["last_quality_complaint"] = _shorten(text, 80)
         _merge_feature_counts(item, _message_features(text))
-        _append_history(item, "user", text, now, actor_id=actor_id, nickname=nickname)
+        _append_history(
+            item,
+            "user",
+            text,
+            now,
+            actor_id=actor_id,
+            nickname=nickname,
+            message_id=event_id if image_refs is not None else None,
+            image_refs=image_refs,
+        )
         item["topic_words"] = _merge_topics(item.get("topic_words"), _extract_topics(text))
         _append_session_l3(self._session_l3, conversation_id, text, now, memory)
         affection_event = _classify_affection_event(text)
@@ -223,6 +235,8 @@ class MemoryObservationMixin:
         observe: bool = True,
         addressed_to_bot: bool = False,
         is_owner: bool = False,
+        event_id: str | None = None,
+        image_refs: list[dict[str, Any]] | None = None,
     ) -> tuple[str, str]:
         """将同一条群消息的目标和观察合在一次 JSON 保存中。"""
         group = f"group:{group_id}"
@@ -249,6 +263,9 @@ class MemoryObservationMixin:
         # L3 的更新会替换字典里的列表，因此保留原列表即可恢复。
         extractions: list[MemoryExtractionRequest] = []
         accepted = False
+        history_options = (
+            {"event_id": event_id, "image_refs": image_refs} if image_refs is not None else {}
+        )
         try:
             conversations.update(staged)
             self._group_message_extractions = extractions
@@ -264,6 +281,7 @@ class MemoryObservationMixin:
                         now=now,
                         addressed_to_bot=addressed_to_bot,
                         is_owner=is_owner,
+                        **history_options,
                     )
             finally:
                 self._group_message_extractions = None
@@ -298,9 +316,15 @@ class MemoryObservationMixin:
         now: float | None = None,
         addressed_to_bot: bool = False,
         is_owner: bool = False,
+        *,
+        event_id: str | None = None,
+        image_refs: list[dict[str, Any]] | None = None,
     ) -> tuple[str, str]:
         group_conversation_id = f"group:{group_id}"
         member_conversation_id = f"group:{group_id}:user:{user_id}"
+        history_options = (
+            {"event_id": event_id, "image_refs": image_refs} if image_refs is not None else {}
+        )
         self.observe_user(
             group_conversation_id,
             text,
@@ -313,6 +337,7 @@ class MemoryObservationMixin:
             addressed_to_bot=addressed_to_bot,
             visibility=f"group:{group_id}",
             source_context=f"group:{group_id}",
+            **history_options,
         )
         self.observe_user(
             member_conversation_id,
@@ -326,6 +351,7 @@ class MemoryObservationMixin:
             addressed_to_bot=addressed_to_bot,
             visibility=f"group:{group_id}",
             source_context=f"group:{group_id}",
+            **history_options,
         )
         self.remember_person_profile_from_group(
             group_id,
@@ -453,6 +479,20 @@ class MemoryObservationMixin:
         if not isinstance(history, list):
             return []
         return [entry for entry in history[-max(0, limit) :] if isinstance(entry, dict)]
+
+    @_locked_mutation
+    def history_image_refs(
+        self,
+        conversation_id: str,
+        message_id: str | int,
+        *,
+        now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Look up a message's recorded images within its conversation."""
+        self._reload_if_changed()
+        item = self._data["conversations"].get(conversation_id)
+        history = item.get("history") if isinstance(item, dict) else None
+        return find_history_image_refs(history, message_id, now=time.time() if now is None else now)
 
     @_locked_mutation
     def profile(self, conversation_id: str, now: float | None = None) -> dict[str, Any]:

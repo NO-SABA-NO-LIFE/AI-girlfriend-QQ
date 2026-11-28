@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -31,10 +33,18 @@ def _chat_http_timeout(config: Any) -> float:
     )
 
 
-def new_chat_deadline(config: Any) -> float:
-    """本轮主聊天的单调截止时刻；同一轮的所有串行子调用都必须在它之前返回。"""
+def new_chat_deadline(config: Any, turn_deadline: float | None = None) -> float:
+    """QQ 对话共享整轮余量，聊天阶段本身最多 90 秒。"""
 
+    if turn_deadline is not None:
+        return min(turn_deadline, asyncio.get_running_loop().time() + 90.0)
     return time.monotonic() + _chat_http_timeout(config)
+
+
+@dataclass
+class ChatRequestBudget:
+    deadline: float
+    model_elapsed: dict[tuple[str, str], float] = field(default_factory=dict)
 
 
 def chat_attempt_timeout(

@@ -543,7 +543,7 @@ def test_ollama_vision_retries_transient_memory_allocation_failure(
         calls.append(f"lease:{engine}:{timeout_seconds}:{int(priority)}")
         yield
 
-    async def fake_native(encoded_images, system_prompt, user_prompt, model=None):
+    async def fake_native(encoded_images, system_prompt, user_prompt, model=None, request_timeout=None):
         calls.append("vision")
         if calls.count("vision") == 1:
             raise RuntimeError("memory layout cannot be allocated")
@@ -626,6 +626,7 @@ def test_ollama_vision_switches_to_fallback_model_after_resource_failure(
         system_prompt,
         user_prompt,
         model=None,
+        request_timeout=None,
     ):
         called_models.append(model)
         if model == "qwen3-vl:8b-instruct":
@@ -782,7 +783,7 @@ def test_cloud_vision_404_switches_to_fallback_model(monkeypatch, tmp_path) -> N
     seen_models: list[str] = []
 
     async def fake_openai(encoded, mimes, system_prompt, user_prompt,
-                          *, model=None, base_url=None):
+                          *, model=None, base_url=None, request_timeout=None):
         seen_models.append(model)
         if model == "dead-vision":
             request = httpx.Request("POST", "https://x/v1/chat/completions")
@@ -992,6 +993,7 @@ def test_ollama_vision_switches_to_fallback_after_empty_truncated_output(
         system_prompt,
         user_prompt,
         model=None,
+        request_timeout=None,
     ):
         called_models.append(model)
         if model == "qwen3-vl:8b":
@@ -1649,8 +1651,8 @@ def test_current_visual_question_is_sent_with_the_current_image(monkeypatch, tmp
     analyzer = ToolAnalyzer(_config(tmp_path))
     captured: dict[str, object] = {}
 
-    async def fake_vision(data: bytes, source: str, prompt: str | None = None):
-        captured.update(data=data, source=source, prompt=prompt)
+    async def fake_vision(data: bytes, source: str, prompt: str | None = None, *, deadline=None):
+        captured.update(data=data, source=source, prompt=prompt, deadline=deadline)
         return (
             "直接回答：这是初音未来。\n"
             "图中文字：无明显文字。\n"
@@ -1668,16 +1670,19 @@ def test_current_visual_question_is_sent_with_the_current_image(monkeypatch, tmp
         ]
     }
 
-    result = asyncio.run(analyzer.analyze(event, "这是谁？请说明依据[表情包/图片:current.jpg]"))
+    async def analyze_current():
+        deadline = asyncio.get_running_loop().time() + 1
+        return await analyzer.analyze(event, "这是谁？请说明依据[表情包/图片:current.jpg]", deadline=deadline)
+
+    result = asyncio.run(analyze_current())
 
     assert result is not None
     prompt = str(captured["prompt"])
     assert captured["data"] == b"current-image-bytes"
     assert "这是谁？请说明依据" in prompt
-    assert "直接回答" in prompt
-    assert "身份/出处" in prompt
-    assert "表达含义/社交意图" in prompt
-    assert "需要联网核验" in prompt
+    assert captured["deadline"] is not None
+    for field in ("direct_answer", "identity", "social_intent", "needs_web_verification"):
+        assert field in prompt
 
 
 def test_animated_visual_is_sent_as_independent_readable_frames() -> None:
@@ -1985,7 +1990,7 @@ def test_vision_slow_timeout_splits_budget_so_all_retries_run(
     seen_timeouts: list[float] = []
 
     async def fake_openai(encoded_images, mimes, system_prompt, user_prompt, **kw):
-        attempt_timeout = analyzer._vision_attempt_timeout_seconds
+        attempt_timeout = kw["request_timeout"]
         seen_timeouts.append(attempt_timeout)
         clock["t"] += attempt_timeout  # 模拟本次调用一直挂到超时
         # 真实 httpx.ReadTimeout 无自定义消息，摘要回退类名，命中 timeout 可重试。

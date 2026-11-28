@@ -96,10 +96,13 @@ class EngineStateMixin:
         runtime_context: bool = False,
         profile_id: str | None = None,
         event_id: str | None = None,
+        *,
+        image_refs: list[dict[str, Any]] | None = None,
     ) -> None:
         if _is_affection_command(user_text):
             return
         is_owner = _is_owner_id(actor_id, self.config.owner_qqs)
+        history_options = {"image_refs": image_refs} if image_refs is not None else {}
         self.memory.observe_user(
             conversation_id,
             user_text,
@@ -107,6 +110,7 @@ class EngineStateMixin:
             nickname=nickname,
             is_owner=is_owner,
             event_id=event_id,
+            **history_options,
         )
         if profile_id and profile_id != conversation_id:
             self.memory.observe_user(
@@ -116,6 +120,7 @@ class EngineStateMixin:
                 nickname=nickname,
                 is_owner=is_owner,
                 event_id=event_id,
+                **history_options,
             )
         if runtime_context:
             self._remember_user_context(
@@ -133,8 +138,13 @@ class EngineStateMixin:
         is_owner: bool = False,
         *,
         remember_targets: bool = False,
+        event_id: str | None = None,
+        image_refs: list[dict[str, Any]] | None = None,
     ) -> tuple[str, str]:
         is_affection_command = _is_affection_command(user_text)
+        history_options = (
+            {"event_id": event_id, "image_refs": image_refs} if image_refs is not None else {}
+        )
         if remember_targets:
             conversation_id, profile_id = self.memory.record_group_incoming(
                 group_id,
@@ -144,6 +154,7 @@ class EngineStateMixin:
                 observe=not is_affection_command,
                 addressed_to_bot=addressed_to_bot,
                 is_owner=is_owner,
+                **history_options,
             )
         elif is_affection_command:
             return f"group:{group_id}", f"group:{group_id}:user:{user_id}"
@@ -155,6 +166,7 @@ class EngineStateMixin:
                 nickname=nickname,
                 addressed_to_bot=addressed_to_bot,
                 is_owner=is_owner,
+                **history_options,
             )
         if runtime_context and not is_affection_command:
             self._remember_user_context(

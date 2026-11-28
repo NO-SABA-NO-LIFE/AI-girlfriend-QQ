@@ -31,7 +31,6 @@ def test_runtime_accepts_90_second_vision_timeout(tmp_path: Path) -> None:
     analyzer = ToolAnalyzer(config)
 
     assert analyzer.vision_timeout_seconds == 90.0
-    assert analyzer._vision_attempt_timeout_seconds == 90.0
 
 
 def test_runtime_clamps_timeout_bounds(tmp_path: Path) -> None:
